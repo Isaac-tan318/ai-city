@@ -4,23 +4,23 @@ const OPENAI_EMBEDDING_DIMENSION = 1536;
 const TOGETHER_EMBEDDING_DIMENSION = 768;
 const OLLAMA_EMBEDDING_DIMENSION = 1024;
 
-export const EMBEDDING_DIMENSION: number = OLLAMA_EMBEDDING_DIMENSION;
+export const EMBEDDING_DIMENSION: number = 768; //gemini
 
 export function detectMismatchedLLMProvider() {
   switch (EMBEDDING_DIMENSION) {
     case OPENAI_EMBEDDING_DIMENSION:
-      if (!process.env.OPENAI_API_KEY) {
-        throw new Error(
-          "Are you trying to use OpenAI? If so, run: npx convex env set OPENAI_API_KEY 'your-key'",
-        );
-      }
+      // if (!process.env.OPENAI_API_KEY) {
+      //   throw new Error(
+      //     "Are you trying to use OpenAI? If so, run: npx convex env set OPENAI_API_KEY 'your-key'",
+      //   );
+      // }
       break;
     case TOGETHER_EMBEDDING_DIMENSION:
-      if (!process.env.TOGETHER_API_KEY) {
-        throw new Error(
-          "Are you trying to use Together.ai? If so, run: npx convex env set TOGETHER_API_KEY 'your-key'",
-        );
-      }
+      // if (!process.env.TOGETHER_API_KEY) {
+      //   throw new Error(
+      //     "Are you trying to use Together.ai? If so, run: npx convex env set TOGETHER_API_KEY 'your-key'",
+      //   );
+      // }
       break;
     case OLLAMA_EMBEDDING_DIMENSION:
       break;
@@ -147,7 +147,9 @@ export async function chatCompletion(
     retries,
     ms,
   } = await retryWithBackoff(async () => {
-    const result = await fetch(config.url + '/v1/chat/completions', {
+    const chatUrl = `${config.url.replace(/\/$/, '')}/chat/completions`;
+    console.log('[DEBUG] Chat URL:', chatUrl, '| Model:', body.model);
+    const result = await fetch(chatUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -217,7 +219,9 @@ export async function fetchEmbeddingBatch(texts: string[]) {
     retries,
     ms,
   } = await retryWithBackoff(async () => {
-    const result = await fetch(config.url + '/v1/embeddings', {
+    const embeddingUrl = `${config.url.replace(/\/$/, '')}/embeddings`;
+    console.log('[DEBUG] Embedding URL:', embeddingUrl, '| Model:', config.embeddingModel);
+    const result = await fetch(embeddingUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -227,6 +231,7 @@ export async function fetchEmbeddingBatch(texts: string[]) {
       body: JSON.stringify({
         model: config.embeddingModel,
         input: texts.map((text) => text.replace(/\n/g, ' ')),
+        dimensions: EMBEDDING_DIMENSION,
       }),
     });
     if (!result.ok) {

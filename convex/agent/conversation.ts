@@ -58,7 +58,7 @@ export async function startConversationMessage(
   const { content } = await chatCompletion({
     messages: [
       {
-        role: 'system',
+        role: 'user',
         content: prompt.join('\n'),
       },
     ],

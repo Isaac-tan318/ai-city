@@ -6,8 +6,17 @@ import * as gentlesparkle from '../../data/animations/gentlesparkle.json';
 import * as gentlewaterfall from '../../data/animations/gentlewaterfall.json';
 import * as gentlesplash from '../../data/animations/gentlesplash.json';
 import * as windmill from '../../data/animations/windmill.json';
+import {
+  CITY_TILESET_URL,
+  CITY_TRAFFICLIGHT_SHEET,
+  TRAFFIC_LIGHT_SPRITESHEET,
+  createCityTilesetCanvas,
+  createTrafficLightCanvas,
+} from '../cityTileset';
 
-const animations = {
+type SheetEntry = { spritesheet: any; url?: string; canvas?: HTMLCanvasElement };
+
+const animations: Record<string, SheetEntry> = {
   'campfire.json': { spritesheet: campfire, url: '/ai-town/assets/spritesheets/campfire.png' },
   'gentlesparkle.json': {
     spritesheet: gentlesparkle,
@@ -18,8 +27,11 @@ const animations = {
     url: '/ai-town/assets/spritesheets/gentlewaterfall32.png',
   },
   'windmill.json': { spritesheet: windmill, url: '/ai-town/assets/spritesheets/windmill.png' },
-  'gentlesplash.json': { spritesheet: gentlesplash,
-    url: '/ai-town/assets/spritesheets/gentlewaterfall32.png',},
+  'gentlesplash.json': {
+    spritesheet: gentlesplash,
+    url: '/ai-town/assets/spritesheets/gentlewaterfall32.png',
+  },
+  [CITY_TRAFFICLIGHT_SHEET]: { spritesheet: TRAFFIC_LIGHT_SPRITESHEET },
 };
 
 export const PixiStaticMap = PixiComponent('StaticMap', {
@@ -27,7 +39,9 @@ export const PixiStaticMap = PixiComponent('StaticMap', {
     const map = props.map;
     const numxtiles = Math.floor(map.tileSetDimX / map.tileDim);
     const numytiles = Math.floor(map.tileSetDimY / map.tileDim);
-    const bt = PIXI.BaseTexture.from(map.tileSetUrl, {
+    const tileSetSource: string | HTMLCanvasElement =
+      map.tileSetUrl === CITY_TILESET_URL ? createCityTilesetCanvas() : map.tileSetUrl;
+    const bt = PIXI.BaseTexture.from(tileSetSource as any, {
       scaleMode: PIXI.SCALE_MODES.NEAREST,
     });
 
@@ -81,7 +95,9 @@ export const PixiStaticMap = PixiComponent('StaticMap', {
         continue;
       }
       const { spritesheet, url } = animation;
-      const texture = PIXI.BaseTexture.from(url, {
+      const source: string | HTMLCanvasElement =
+        sheet === CITY_TRAFFICLIGHT_SHEET ? createTrafficLightCanvas() : url!;
+      const texture = PIXI.BaseTexture.from(source as any, {
         scaleMode: PIXI.SCALE_MODES.NEAREST,
       });
       const spriteSheet = new PIXI.Spritesheet(texture, spritesheet);

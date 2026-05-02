@@ -214,10 +214,10 @@ const animatedSprites = [];
 // --- Park ---------------------------------------------------------------
 
 for (let y = 13; y <= 21; y++) {
-  objs[17][y] = HEDGE;
-  objs[31][y] = HEDGE;
+  objs[18][y] = HEDGE;
+  objs[30][y] = HEDGE;
 }
-for (let x = 17; x <= 31; x++) {
+for (let x = 18; x <= 30; x++) {
   objs[x][13] = HEDGE;
   objs[x][21] = HEDGE;
 }

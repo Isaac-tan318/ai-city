@@ -7,10 +7,13 @@ import * as gentlewaterfall from '../../data/animations/gentlewaterfall.json';
 import * as gentlesplash from '../../data/animations/gentlesplash.json';
 import * as windmill from '../../data/animations/windmill.json';
 import {
+  CITY_FOUNTAIN_SHEET,
   CITY_TILESET_URL,
   CITY_TRAFFICLIGHT_SHEET,
+  FOUNTAIN_SPRITESHEET,
   TRAFFIC_LIGHT_SPRITESHEET,
   createCityTilesetCanvas,
+  createFountainCanvas,
   createTrafficLightCanvas,
 } from '../cityTileset';
 
@@ -32,6 +35,7 @@ const animations: Record<string, SheetEntry> = {
     url: '/ai-town/assets/spritesheets/gentlewaterfall32.png',
   },
   [CITY_TRAFFICLIGHT_SHEET]: { spritesheet: TRAFFIC_LIGHT_SPRITESHEET },
+  [CITY_FOUNTAIN_SHEET]: { spritesheet: FOUNTAIN_SPRITESHEET },
 };
 
 export const PixiStaticMap = PixiComponent('StaticMap', {
@@ -96,7 +100,11 @@ export const PixiStaticMap = PixiComponent('StaticMap', {
       }
       const { spritesheet, url } = animation;
       const source: string | HTMLCanvasElement =
-        sheet === CITY_TRAFFICLIGHT_SHEET ? createTrafficLightCanvas() : url!;
+        sheet === CITY_TRAFFICLIGHT_SHEET
+          ? createTrafficLightCanvas()
+          : sheet === CITY_FOUNTAIN_SHEET
+            ? createFountainCanvas()
+            : url!;
       const texture = PIXI.BaseTexture.from(source as any, {
         scaleMode: PIXI.SCALE_MODES.NEAREST,
       });

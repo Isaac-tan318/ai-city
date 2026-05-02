@@ -1,9 +1,10 @@
 export const CITY_TILESET_URL = '__city__';
 export const CITY_TILESET_DIM_X = 256;
-export const CITY_TILESET_DIM_Y = 64;
+export const CITY_TILESET_DIM_Y = 128;
 export const CITY_TILE_DIM = 32;
 
 export const CITY_TRAFFICLIGHT_SHEET = '__city_trafficlight__';
+export const CITY_FOUNTAIN_SHEET = '__city_fountain__';
 
 const TILE = 32;
 
@@ -40,6 +41,34 @@ const COLORS = {
   carWindow: '#3a3a40',
   carBlack: '#0a0a0a',
   carHeadlight: '#fff8c0',
+  glass: '#a8d4e8',
+  glassDark: '#6fa9c0',
+  glassFrame: '#1f2a30',
+  concrete: '#b8b3a8',
+  concreteDark: '#7e7a72',
+  awningRed: '#c5302a',
+  awningWhite: '#ececec',
+  flatRoof: '#a8a4a0',
+  flatRoofLine: '#7d7975',
+  water: '#3a8fb8',
+  waterLight: '#5fa6c8',
+  flowerRed: '#d8504a',
+  flowerYellow: '#f5c93f',
+  flowerPink: '#e69ab8',
+  dirt: '#a08458',
+  dirtDark: '#7c6440',
+  hedge: '#1f4a16',
+  hedgeDark: '#163510',
+  hydrantRed: '#c93030',
+  hydrantCap: '#dba93a',
+  mailboxBlue: '#1a4a8a',
+  mailboxLight: '#2a6abf',
+  signYellow: '#f5c93f',
+  signPole: '#1a1a20',
+  binGray: '#5a5a60',
+  binDark: '#3a3a40',
+  stone: '#a8a4a0',
+  stoneDark: '#5a5650',
 };
 
 function fillRect(ctx: Ctx, x: number, y: number, w: number, h: number, color: string) {
@@ -224,6 +253,172 @@ function drawCar(ctx: Ctx, ox: number, oy: number) {
   fillRect(ctx, ox + 22, oy + 23, 5, 2, COLORS.carBlack);
 }
 
+function drawGlassWall(ctx: Ctx, ox: number, oy: number) {
+  fillRect(ctx, ox, oy, TILE, TILE, COLORS.glass);
+  fillRect(ctx, ox, oy + 24, TILE, 8, COLORS.glassDark);
+  for (let x = 0; x < TILE; x += 4) {
+    fillRect(ctx, ox + x, oy, 1, TILE, COLORS.glassFrame);
+  }
+  fillRect(ctx, ox, oy, TILE, 1, COLORS.glassFrame);
+  fillRect(ctx, ox, oy + TILE - 1, TILE, 1, COLORS.glassFrame);
+  for (let i = 0; i < 22; i++) {
+    fillRect(ctx, ox + 5 + i, oy + 2 + i, 2, 1, COLORS.windowGlass);
+  }
+}
+
+function drawGlassWindow(ctx: Ctx, ox: number, oy: number) {
+  drawGlassWall(ctx, ox, oy);
+  fillRect(ctx, ox + 6, oy + 5, 14, 18, '#cce8f5');
+  fillRect(ctx, ox + 6, oy + 5, 1, 18, COLORS.glassFrame);
+  fillRect(ctx, ox + 19, oy + 5, 1, 18, COLORS.glassFrame);
+}
+
+function drawConcreteWall(ctx: Ctx, ox: number, oy: number) {
+  fillRect(ctx, ox, oy, TILE, TILE, COLORS.concrete);
+  for (let y = 0; y < TILE; y += 8) {
+    fillRect(ctx, ox, oy + y, TILE, 1, COLORS.concreteDark);
+  }
+  fillRect(ctx, ox + 16, oy, 1, TILE, COLORS.concreteDark);
+}
+
+function drawConcreteWindow(ctx: Ctx, ox: number, oy: number) {
+  drawConcreteWall(ctx, ox, oy);
+  fillRect(ctx, ox + 8, oy + 7, 16, 16, COLORS.windowFrame);
+  fillRect(ctx, ox + 10, oy + 9, 12, 12, COLORS.glassDark);
+  fillRect(ctx, ox + 10, oy + 14, 12, 1, COLORS.windowFrame);
+}
+
+function drawAwningRed(ctx: Ctx, ox: number, oy: number) {
+  fillRect(ctx, ox, oy, TILE, TILE - 4, COLORS.awningWhite);
+  for (let x = 0; x < TILE; x += 8) {
+    fillRect(ctx, ox + x, oy, 4, TILE - 4, COLORS.awningRed);
+  }
+  for (let x = 0; x < TILE; x += 8) {
+    fillRect(ctx, ox + x + 1, oy + 25, 4, 3, COLORS.brickMortar);
+  }
+  brickPattern(ctx, ox, oy + TILE - 4, TILE, 4);
+}
+
+function drawFlatRoofLight(ctx: Ctx, ox: number, oy: number) {
+  fillRect(ctx, ox, oy, TILE, TILE, COLORS.flatRoof);
+  fillRect(ctx, ox, oy, TILE, 2, COLORS.flatRoofLine);
+  fillRect(ctx, ox, oy + TILE - 2, TILE, 2, COLORS.flatRoofLine);
+  fillRect(ctx, ox, oy, 2, TILE, COLORS.flatRoofLine);
+  fillRect(ctx, ox + TILE - 2, oy, 2, TILE, COLORS.flatRoofLine);
+  fillRect(ctx, ox + 5, oy + 7, 9, 7, COLORS.concreteDark);
+  fillRect(ctx, ox + 6, oy + 8, 7, 5, COLORS.concrete);
+  fillRect(ctx, ox + 19, oy + 17, 8, 7, COLORS.flatRoofLine);
+  fillRect(ctx, ox + 20, oy + 18, 6, 5, COLORS.flatRoof);
+}
+
+function drawPond(ctx: Ctx, ox: number, oy: number) {
+  fillRect(ctx, ox, oy, TILE, TILE, COLORS.water);
+  for (let i = 0; i < 40; i++) {
+    const px = ox + Math.floor(prand(ox + i, oy + i * 5, 17) * TILE);
+    const py = oy + Math.floor(prand(ox - i, oy + i * 2, 18) * TILE);
+    pixel(ctx, px, py, COLORS.waterLight);
+  }
+  for (let i = 0; i < 6; i++) {
+    const px = ox + 5 + Math.floor(prand(ox + i, oy, 19) * 20);
+    const py = oy + 6 + Math.floor(prand(ox, oy + i, 20) * 18);
+    pixel(ctx, px, py, '#ffffff');
+  }
+}
+
+function drawFlowerbed(ctx: Ctx, ox: number, oy: number) {
+  drawGrass(ctx, ox, oy);
+  const flowers = [COLORS.flowerRed, COLORS.flowerYellow, COLORS.flowerPink];
+  for (let i = 0; i < 22; i++) {
+    const px = ox + Math.floor(prand(ox + i, oy + i * 3, 21) * (TILE - 2));
+    const py = oy + Math.floor(prand(ox - i, oy + i * 4, 22) * (TILE - 2));
+    const color = flowers[i % flowers.length];
+    if (i % 5 === 0) fillRect(ctx, px, py, 2, 2, color);
+    else pixel(ctx, px, py, color);
+  }
+}
+
+function drawDirtPath(ctx: Ctx, ox: number, oy: number) {
+  fillRect(ctx, ox, oy, TILE, TILE, COLORS.dirt);
+  for (let i = 0; i < 42; i++) {
+    const px = ox + Math.floor(prand(ox + i, oy + i, 23) * TILE);
+    const py = oy + Math.floor(prand(ox - i, oy + i * 2, 24) * TILE);
+    pixel(ctx, px, py, COLORS.dirtDark);
+  }
+}
+
+function drawHedge(ctx: Ctx, ox: number, oy: number) {
+  fillRect(ctx, ox, oy, TILE, TILE, COLORS.hedgeDark);
+  for (let i = 0; i < 26; i++) {
+    const px = ox + Math.floor(prand(ox + i, oy + i * 7, 25) * (TILE - 3));
+    const py = oy + Math.floor(prand(ox * 2 + i, oy + i, 26) * (TILE - 3));
+    fillRect(ctx, px, py, 3, 3, COLORS.hedge);
+  }
+}
+
+function drawFireHydrant(ctx: Ctx, ox: number, oy: number) {
+  drawSidewalk(ctx, ox, oy);
+  fillRect(ctx, ox + 14, oy + 16, 4, 8, COLORS.hydrantRed);
+  fillRect(ctx, ox + 13, oy + 13, 6, 3, COLORS.hydrantCap);
+  fillRect(ctx, ox + 11, oy + 18, 3, 3, COLORS.hydrantCap);
+  fillRect(ctx, ox + 18, oy + 18, 3, 3, COLORS.hydrantCap);
+  fillRect(ctx, ox + 12, oy + 24, 8, 2, COLORS.hydrantRed);
+}
+
+function drawMailbox(ctx: Ctx, ox: number, oy: number) {
+  drawSidewalk(ctx, ox, oy);
+  fillRect(ctx, ox + 10, oy + 12, 12, 8, COLORS.mailboxBlue);
+  fillRect(ctx, ox + 11, oy + 10, 10, 3, COLORS.mailboxLight);
+  fillRect(ctx, ox + 12, oy + 15, 8, 1, COLORS.windowFrame);
+  fillRect(ctx, ox + 15, oy + 20, 2, 6, COLORS.signPole);
+  fillRect(ctx, ox + 13, oy + 26, 6, 2, COLORS.signPole);
+}
+
+function drawBusStop(ctx: Ctx, ox: number, oy: number) {
+  drawSidewalk(ctx, ox, oy);
+  fillRect(ctx, ox + 15, oy + 8, 2, 20, COLORS.signPole);
+  fillRect(ctx, ox + 11, oy + 5, 10, 10, COLORS.signYellow);
+  fillRect(ctx, ox + 13, oy + 9, 6, 3, COLORS.windowFrame);
+  pixel(ctx, ox + 13, oy + 13, COLORS.windowFrame);
+  pixel(ctx, ox + 18, oy + 13, COLORS.windowFrame);
+  fillRect(ctx, ox + 5, oy + 24, 18, 2, COLORS.benchSeat);
+  fillRect(ctx, ox + 7, oy + 26, 2, 3, COLORS.benchLeg);
+  fillRect(ctx, ox + 19, oy + 26, 2, 3, COLORS.benchLeg);
+}
+
+function drawTrashcan(ctx: Ctx, ox: number, oy: number) {
+  drawSidewalk(ctx, ox, oy);
+  fillRect(ctx, ox + 10, oy + 11, 12, 3, COLORS.binDark);
+  fillRect(ctx, ox + 11, oy + 14, 10, 14, COLORS.binGray);
+  fillRect(ctx, ox + 11, oy + 14, 2, 14, COLORS.binDark);
+  fillRect(ctx, ox + 18, oy + 14, 2, 14, COLORS.binDark);
+  fillRect(ctx, ox + 12, oy + 28, 8, 2, COLORS.binDark);
+}
+
+function drawStatue(ctx: Ctx, ox: number, oy: number) {
+  drawPlaza(ctx, ox, oy);
+  fillRect(ctx, ox + 9, oy + 23, 14, 4, COLORS.stoneDark);
+  fillRect(ctx, ox + 11, oy + 19, 10, 4, COLORS.stone);
+  fillRect(ctx, ox + 13, oy + 16, 6, 3, COLORS.stoneDark);
+  fillRect(ctx, ox + 15, oy + 7, 3, 9, COLORS.stoneDark);
+  fillRect(ctx, ox + 14, oy + 5, 5, 4, COLORS.stone);
+  fillRect(ctx, ox + 12, oy + 10, 3, 2, COLORS.stone);
+  fillRect(ctx, ox + 18, oy + 10, 3, 2, COLORS.stone);
+}
+
+function drawFountainBase(ctx: Ctx, ox: number, oy: number) {
+  drawPlaza(ctx, ox, oy);
+  ctx.fillStyle = COLORS.stoneDark;
+  ctx.beginPath();
+  ctx.ellipse(ox + 16, oy + 18, 13, 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = COLORS.stone;
+  ctx.beginPath();
+  ctx.ellipse(ox + 16, oy + 17, 10, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  fillRect(ctx, ox + 13, oy + 14, 6, 5, COLORS.stoneDark);
+  fillRect(ctx, ox + 14, oy + 13, 4, 4, COLORS.stone);
+}
+
 const TILE_PAINTERS: Array<(ctx: Ctx, ox: number, oy: number) => void> = [
   drawAsphalt,
   drawYellowH,
@@ -241,6 +436,22 @@ const TILE_PAINTERS: Array<(ctx: Ctx, ox: number, oy: number) => void> = [
   drawBench,
   drawLamp,
   drawCar,
+  drawGlassWall,
+  drawGlassWindow,
+  drawConcreteWall,
+  drawConcreteWindow,
+  drawAwningRed,
+  drawFlatRoofLight,
+  drawPond,
+  drawFlowerbed,
+  drawDirtPath,
+  drawHedge,
+  drawFireHydrant,
+  drawMailbox,
+  drawBusStop,
+  drawTrashcan,
+  drawStatue,
+  drawFountainBase,
 ];
 
 export const CITY_TILE = {
@@ -260,6 +471,22 @@ export const CITY_TILE = {
   BENCH: 13,
   LAMP: 14,
   CAR: 15,
+  GLASS_WALL: 16,
+  GLASS_WINDOW: 17,
+  CONCRETE_WALL: 18,
+  CONCRETE_WINDOW: 19,
+  AWNING_RED: 20,
+  FLAT_ROOF_LIGHT: 21,
+  POND: 22,
+  FLOWERBED: 23,
+  DIRT_PATH: 24,
+  HEDGE: 25,
+  FIRE_HYDRANT: 26,
+  MAILBOX: 27,
+  BUS_STOP: 28,
+  TRASHCAN: 29,
+  STATUE: 30,
+  FOUNTAIN_BASE: 31,
 };
 
 export function createCityTilesetCanvas(): HTMLCanvasElement {
@@ -304,6 +531,38 @@ export function createTrafficLightCanvas(): HTMLCanvasElement {
   return canvas;
 }
 
+export function createFountainCanvas(): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 32;
+  const ctx = canvas.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  const heights = [6, 9, 12, 9];
+  for (let i = 0; i < heights.length; i++) {
+    const ox = i * 32;
+    ctx.fillStyle = COLORS.stoneDark;
+    ctx.beginPath();
+    ctx.ellipse(ox + 16, 22, 12, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = COLORS.stone;
+    ctx.beginPath();
+    ctx.ellipse(ox + 16, 21, 9, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+    fillRect(ctx, ox + 14, 17, 4, 4, COLORS.stoneDark);
+    fillRect(ctx, ox + 15, 16, 2, 4, COLORS.stone);
+
+    const h = heights[i];
+    fillRect(ctx, ox + 15, 16 - h, 2, h, COLORS.water);
+    pixel(ctx, ox + 16, 15 - h, COLORS.waterLight);
+    pixel(ctx, ox + 15, 14 - h, '#ffffff');
+    pixel(ctx, ox + 12 - (i % 2), 18 - h, COLORS.waterLight);
+    pixel(ctx, ox + 20 + (i % 2), 18 - h, COLORS.waterLight);
+    pixel(ctx, ox + 11, 20 - Math.floor(h / 2), '#ffffff');
+    pixel(ctx, ox + 21, 20 - Math.floor(h / 2), '#ffffff');
+  }
+  return canvas;
+}
+
 export const TRAFFIC_LIGHT_SPRITESHEET = {
   frames: {
     'tl1.png': {
@@ -340,6 +599,48 @@ export const TRAFFIC_LIGHT_SPRITESHEET = {
   },
   meta: {
     image: 'trafficlight.png',
+    format: 'RGBA8888',
+    size: { w: 128, h: 32 },
+    scale: '1',
+  },
+};
+
+export const FOUNTAIN_SPRITESHEET = {
+  frames: {
+    'f1.png': {
+      frame: { x: 0, y: 0, w: 32, h: 32 },
+      rotated: false,
+      trimmed: false,
+      spriteSourceSize: { x: 0, y: 0, w: 32, h: 32 },
+      sourceSize: { w: 32, h: 32 },
+    },
+    'f2.png': {
+      frame: { x: 32, y: 0, w: 32, h: 32 },
+      rotated: false,
+      trimmed: false,
+      spriteSourceSize: { x: 0, y: 0, w: 32, h: 32 },
+      sourceSize: { w: 32, h: 32 },
+    },
+    'f3.png': {
+      frame: { x: 64, y: 0, w: 32, h: 32 },
+      rotated: false,
+      trimmed: false,
+      spriteSourceSize: { x: 0, y: 0, w: 32, h: 32 },
+      sourceSize: { w: 32, h: 32 },
+    },
+    'f4.png': {
+      frame: { x: 96, y: 0, w: 32, h: 32 },
+      rotated: false,
+      trimmed: false,
+      spriteSourceSize: { x: 0, y: 0, w: 32, h: 32 },
+      sourceSize: { w: 32, h: 32 },
+    },
+  },
+  animations: {
+    bubble: ['f1.png', 'f2.png', 'f3.png', 'f4.png'],
+  },
+  meta: {
+    image: 'fountain.png',
     format: 'RGBA8888',
     size: { w: 128, h: 32 },
     scale: '1',

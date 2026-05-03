@@ -45,6 +45,7 @@ export type Activity = Infer<typeof activity>;
 export const serializedPlayer = {
   id: playerId,
   human: v.optional(v.string()),
+  name: v.optional(v.string()),
   pathfinding: v.optional(pathfinding),
   activity: v.optional(activity),
 
@@ -60,6 +61,7 @@ export type SerializedPlayer = ObjectType<typeof serializedPlayer>;
 export class Player {
   id: GameId<'players'>;
   human?: string;
+  name?: string;
   pathfinding?: Pathfinding;
   activity?: Activity;
 
@@ -70,9 +72,10 @@ export class Player {
   speed: number;
 
   constructor(serialized: SerializedPlayer) {
-    const { id, human, pathfinding, activity, lastInput, position, facing, speed } = serialized;
+    const { id, human, name, pathfinding, activity, lastInput, position, facing, speed } = serialized;
     this.id = parseGameId('players', id);
     this.human = human;
+    this.name = name;
     this.pathfinding = pathfinding;
     this.activity = activity;
     this.lastInput = lastInput;
@@ -218,6 +221,7 @@ export class Player {
       new Player({
         id: playerId,
         human: tokenIdentifier,
+        name,
         lastInput: now,
         position,
         facing,
@@ -249,10 +253,11 @@ export class Player {
   }
 
   serialize(): SerializedPlayer {
-    const { id, human, pathfinding, activity, lastInput, position, facing, speed } = this;
+    const { id, human, name, pathfinding, activity, lastInput, position, facing, speed } = this;
     return {
       id,
       human,
+      name,
       pathfinding,
       activity,
       lastInput,

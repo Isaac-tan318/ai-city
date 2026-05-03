@@ -208,3 +208,14 @@ p[contenteditable='true']:empty::before {
   width: 0;
   height: 0;
 }
+
+.scenario-select {
+  background-color: #2b2418;
+  color: #f8e7c0;
+  color-scheme: dark;
+}
+
+.scenario-select option {
+  background-color: #1b150f;
+  color: #f8e7c0;
+}

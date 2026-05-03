@@ -15,37 +15,37 @@ const scenarioOptions = [
   {
     id: 'restaurant',
     title: 'Dinner Pact',
-    text: 'Get the agents to eat together at the restaurant and compare their day.',
+    text: 'Meet for dinner!',
     requiresTwoAgents: true,
   },
-  {
-    id: 'park',
-    title: 'Park Meetup',
-    text: 'Have the agents meet at the park and share recent discoveries.',
-    requiresTwoAgents: true,
-  },
-  {
-    id: 'rain',
-    title: 'Sudden Rain',
-    text: 'A sudden rainstorm disrupts plans, forcing a quick change in behavior.',
-    requiresTwoAgents: false,
-  },
+  // {
+  //   id: 'park',
+  //   title: 'Park Meetup',
+  //   text: 'Meet at the park!',
+  //   requiresTwoAgents: true,
+  // },
+  // {
+  //   id: 'rain',
+  //   title: 'Sudden Rain',
+  //   text: 'A quick change of plans.',
+  //   requiresTwoAgents: false,
+  // },
   {
     id: 'rumor',
-    title: 'Seed a Rumor',
-    text: 'Agent 1 plants a rumor with Agent 2 and watches it spread socially.',
+    title: 'Start a Rumor',
+    text: 'Start a rumor..',
     requiresTwoAgents: true,
   },
   {
     id: 'debate',
     title: 'Spark a Debate',
-    text: 'Agent 1 challenges Agent 2 to a debate on a polarizing topic.',
+    text: 'Challenge agents to a debate.',
     requiresTwoAgents: true,
   },
   {
     id: 'interrogation',
-    title: 'Interrogation (Memory Retrieval)',
-    text: 'Agent 1 presses Agent 2 for detailed memory of recent actions and conversations.',
+    title: 'questions',
+    text: 'Probe agents for recent memories.',
     requiresTwoAgents: true,
   },
 ];
@@ -70,6 +70,10 @@ export default function PlayerDetails({
   const players = useMemo(() => [...game.world.players.values()], [game]);
   const humanPlayer = players.find((p) => p.human === humanTokenIdentifier);
   const humanConversation = humanPlayer ? game.world.playerConversation(humanPlayer) : undefined;
+  const getPlayerLabel = (agent: (typeof players)[number]) => {
+    const description = game.playerDescriptions.get(agent.id);
+    return description?.name ?? agent.name ?? agent.human ?? agent.id;
+  };
   // Always select the other player if we're in a conversation with them.
   if (humanPlayer && humanConversation) {
     const otherPlayerIds = [...humanConversation.participants.keys()].filter(
@@ -95,7 +99,6 @@ export default function PlayerDetails({
 
   useEffect(() => {
     if (playerId) {
-      setInjectorOpen(true);
       setTargetAgent1(playerId);
       if (targetAgent2 === playerId) {
         const nextAgent = players.find((p) => p.id !== playerId)?.id ?? '';
@@ -167,7 +170,14 @@ export default function PlayerDetails({
   );
 
   const scenarioInjector = injectorOpen && (
-    <div className="scenario-injector mt-36 w-full box bg-gradient-to-br from-[#2d2438] to-[#1d1826] pt-3">
+    <div
+      className={
+        'scenario-injector w-full box bg-gradient-to-br from-[#2d2438] to-[#1d1826] ' +
+        (playerId
+          ? 'mt-4 sm:w-[calc(100%+2rem)] sm:-mx-4'
+          : 'mt-36 pt-3 sm:w-[calc(100%+2rem)] sm:-mx-4')
+      }
+    >
       <div className="bg-brown-700 p-3 flex items-center justify-between text-lg sm:text-xl font-display tracking-widest">
         <span className="flex-1 text-center">Scenario Injector</span>
         <button
@@ -214,7 +224,7 @@ export default function PlayerDetails({
             <label className="flex flex-col gap-1 text-xs uppercase tracking-widest text-amber-200/80">
               Agent 1
               <select
-                className="rounded bg-black/40 border border-white/20 px-3 py-2 text-sm"
+                className="scenario-select rounded bg-black/40 border border-white/20 px-3 py-2 text-sm"
                 value={targetAgent1}
                 onChange={(event) => {
                   const value = event.target.value as GameId<'players'>;
@@ -227,7 +237,7 @@ export default function PlayerDetails({
                 <option value="">Select agent</option>
                 {players.map((agent) => (
                   <option key={agent.id} value={agent.id}>
-                    {agent.name}
+                    {getPlayerLabel(agent)}
                   </option>
                 ))}
               </select>
@@ -235,7 +245,7 @@ export default function PlayerDetails({
             <label className="flex flex-col gap-1 text-xs uppercase tracking-widest text-amber-200/80">
               Agent 2
               <select
-                className="rounded bg-black/40 border border-white/20 px-3 py-2 text-sm"
+                className="scenario-select rounded bg-black/40 border border-white/20 px-3 py-2 text-sm"
                 value={targetAgent2}
                 onChange={(event) => setTargetAgent2(event.target.value as GameId<'players'>)}
               >
@@ -244,7 +254,7 @@ export default function PlayerDetails({
                   .filter((agent) => !targetAgent1 || agent.id !== targetAgent1)
                   .map((agent) => (
                     <option key={agent.id} value={agent.id}>
-                      {agent.name}
+                      {getPlayerLabel(agent)}
                     </option>
                   ))}
               </select>
@@ -268,6 +278,16 @@ export default function PlayerDetails({
             value={scenarioText}
             onChange={(event) => setScenarioText(event.target.value)}
           />
+        </div>
+
+        <div className="flex justify-end">
+          <button
+            className="button text-white shadow-solid text-base sm:text-lg cursor-pointer pointer-events-auto"
+            type="button"
+            onClick={() => setInjectorOpen(false)}
+          >
+            <div className="h-full bg-clay-700 px-4 py-2 text-center">Start scenario</div>
+          </button>
         </div>
       </div>
     </div>

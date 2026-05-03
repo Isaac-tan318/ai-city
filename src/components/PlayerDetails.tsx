@@ -168,8 +168,18 @@ export default function PlayerDetails({
 
   const scenarioInjector = injectorOpen && (
     <div className="scenario-injector mt-4 w-full box bg-gradient-to-br from-[#2d2438] to-[#1d1826]">
-      <div className="bg-brown-700 p-3 text-center text-lg sm:text-xl font-display tracking-widest">
-        Scenario Injector
+      <div className="bg-brown-700 p-3 flex items-center justify-between text-lg sm:text-xl font-display tracking-widest">
+        <span className="flex-1 text-center">Scenario Injector</span>
+        <button
+          className="button text-white shadow-solid text-2xl cursor-pointer pointer-events-auto"
+          type="button"
+          onClick={() => setInjectorOpen(false)}
+          aria-label="Close scenario injector"
+        >
+          <h2 className="h-full bg-clay-700">
+            <img className="w-4 h-4 sm:w-5 sm:h-5" src={closeImg} alt="" />
+          </h2>
+        </button>
       </div>
       <div className="p-4 flex flex-col gap-4 text-sm sm:text-base">
         <div className="grid gap-2">

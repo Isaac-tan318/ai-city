@@ -40,8 +40,7 @@
 
 body {
   color: rgb(var(--foreground-rgb));
-  background: linear-gradient(to bottom, transparent, rgb(var(--background-end-rgb)))
-    rgb(var(--background-start-rgb));
+  background: linear-gradient(to bottom, transparent, rgb(var(--background-end-rgb))) rgb(var(--background-start-rgb));
 }
 
 .game-background {
@@ -155,8 +154,8 @@ body {
     font-size: 16px;
   }
 
-  .button > div,
-  .button > span {
+  .button>div,
+  .button>span {
     vertical-align: top;
     line-height: 1;
   }
@@ -189,6 +188,7 @@ p[contenteditable='true']:empty::before {
     opacity: 0;
     transform: translateY(8px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);
@@ -197,4 +197,14 @@ p[contenteditable='true']:empty::before {
 
 .scenario-injector {
   animation: scenarioEnter 200ms ease-out;
+}
+
+.scenario-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.scenario-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }

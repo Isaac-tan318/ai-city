@@ -174,7 +174,7 @@ export default function PlayerDetails({
       <div className="p-4 flex flex-col gap-4 text-sm sm:text-base">
         <div className="grid gap-2">
           <div className="text-xs uppercase tracking-widest text-amber-200/80">Defaults</div>
-          <div className="grid gap-2 sm:grid-cols-2 max-h-56 overflow-y-auto pr-1">
+          <div className="scenario-scroll grid gap-2 sm:grid-cols-2 max-h-56 overflow-y-auto pr-1">
             {scenarioOptions.map((scenario) => {
               const isActive = scenario.id === selectedScenarioId;
               return (

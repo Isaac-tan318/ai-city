@@ -167,7 +167,7 @@ export default function PlayerDetails({
   );
 
   const scenarioInjector = injectorOpen && (
-    <div className="scenario-injector mt-4 w-full box bg-gradient-to-br from-[#2d2438] to-[#1d1826]">
+    <div className="scenario-injector mt-36 w-full box bg-gradient-to-br from-[#2d2438] to-[#1d1826] pt-3">
       <div className="bg-brown-700 p-3 flex items-center justify-between text-lg sm:text-xl font-display tracking-widest">
         <span className="flex-1 text-center">Scenario Injector</span>
         <button

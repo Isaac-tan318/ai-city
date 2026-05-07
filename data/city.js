@@ -313,6 +313,7 @@ for (const [cx, cy] of PLAZA_CENTERS) {
 
 // Trees scattered in green pockets between buildings.
 const TREES = [
+  [0,0],
   [13, 1],
   [13, 4],
   [13, 7],
@@ -352,10 +353,10 @@ const TREES = [
   [0, 29],
   [47, 1],
   [47, 4],
-  [47, 13],
-  [47, 17],
-  [47, 25],
-  [47, 29],
+  // [47, 13],
+  // [47, 17],
+  // [47, 25],
+  // [47, 29],
 ];
 for (const [tx, ty] of TREES) {
   if (inBounds(tx, ty) && objs[tx][ty] === -1 && ground[tx][ty] === GRASS) {

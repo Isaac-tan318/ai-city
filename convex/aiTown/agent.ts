@@ -18,10 +18,11 @@ import {
 } from '../constants';
 import { FunctionArgs } from 'convex/server';
 import { MutationCtx, internalMutation, internalQuery } from '../_generated/server';
-import { distance } from '../util/geometry';
+import { distance, pointsEqual } from '../util/geometry';
 import { internal } from '../_generated/api';
-import { movePlayer } from './movement';
+import { movePlayer, stopPlayer } from './movement';
 import { insertInput } from './insertInput';
+import { point, Point } from '../util/types';
 
 export class Agent {
   id: GameId<'agents'>;
@@ -34,9 +35,11 @@ export class Agent {
     operationId: string;
     started: number;
   };
+  scenarioTarget?: Point;
+  scenarioName?: string;
 
   constructor(serialized: SerializedAgent) {
-    const { id, lastConversation, lastInviteAttempt, inProgressOperation } = serialized;
+    const { id, lastConversation, lastInviteAttempt, inProgressOperation, scenarioTarget, scenarioName } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
     this.playerId = playerId;
@@ -47,12 +50,18 @@ export class Agent {
     this.lastConversation = lastConversation;
     this.lastInviteAttempt = lastInviteAttempt;
     this.inProgressOperation = inProgressOperation;
+    this.scenarioTarget = scenarioTarget;
+    this.scenarioName = scenarioName;
   }
 
   tick(game: Game, now: number) {
     const player = game.world.players.get(this.playerId);
     if (!player) {
       throw new Error(`Invalid player ID ${this.playerId}`);
+    }
+    if (!this.scenarioTarget && game.world.scenarioTarget) {
+      this.scenarioTarget = game.world.scenarioTarget;
+      this.scenarioName = game.world.scenarioName;
     }
     if (this.inProgressOperation) {
       if (now < this.inProgressOperation.started + ACTION_TIMEOUT) {
@@ -70,6 +79,22 @@ export class Agent {
     const doingActivity = player.activity && player.activity.until > now;
     if (doingActivity && (conversation || player.pathfinding)) {
       player.activity!.until = now;
+    }
+    if (this.scenarioTarget && !conversation) {
+      if (doingActivity) {
+        delete player.activity;
+      }
+      const distanceToTarget = distance(player.position, this.scenarioTarget);
+      if (distanceToTarget <= 1) {
+        if (player.pathfinding) {
+          stopPlayer(player);
+        }
+        return;
+      }
+      if (!player.pathfinding || !pointsEqual(player.pathfinding.destination, this.scenarioTarget)) {
+        movePlayer(game, now, player, this.scenarioTarget, false, true);
+      }
+      return;
     }
     // If we're not in a conversation, do something.
     // If we aren't doing an activity or moving, do something.
@@ -264,6 +289,8 @@ export class Agent {
       lastConversation: this.lastConversation,
       lastInviteAttempt: this.lastInviteAttempt,
       inProgressOperation: this.inProgressOperation,
+      scenarioTarget: this.scenarioTarget,
+      scenarioName: this.scenarioName,
     };
   }
 }
@@ -281,6 +308,8 @@ export const serializedAgent = {
       started: v.number(),
     }),
   ),
+  scenarioTarget: v.optional(point),
+  scenarioName: v.optional(v.string()),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 

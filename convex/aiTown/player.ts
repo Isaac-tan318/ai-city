@@ -19,6 +19,7 @@ import { PlayerDescription } from './playerDescription';
 const pathfinding = v.object({
   destination: point,
   started: v.number(),
+  ignorePlayers: v.optional(v.boolean()),
   state: v.union(
     v.object({
       kind: v.literal('needsPath'),
@@ -152,7 +153,7 @@ export class Player {
       return;
     }
     const { position, facing, velocity } = candidate;
-    const collisionReason = blocked(game, now, position, this.id);
+    const collisionReason = blocked(game, now, position, this.id, this.pathfinding?.ignorePlayers);
     if (collisionReason !== null) {
       const backoff = Math.random() * PATHFINDING_BACKOFF;
       console.warn(`Stopping path for ${this.id}, waiting for ${backoff}ms: ${collisionReason}`);

@@ -6,6 +6,7 @@ import closeImg from '../../assets/close.svg';
 import interactImg from '../../assets/interact.svg';
 import { SelectElement } from './Player';
 import { Messages } from './Messages';
+import { toast } from 'react-toastify';
 import { toastOnError } from '../toasts';
 import { useSendInput } from '../hooks/sendInput';
 import { GameId } from '../../convex/aiTown/ids';
@@ -13,40 +14,10 @@ import { ServerGame } from '../hooks/serverGame';
 
 const scenarioOptions = [
   {
-    id: 'restaurant',
-    title: 'Dinner Pact',
-    text: 'Meet for dinner!',
-    requiresTwoAgents: true,
-  },
-  // {
-  //   id: 'park',
-  //   title: 'Park Meetup',
-  //   text: 'Meet at the park!',
-  //   requiresTwoAgents: true,
-  // },
-  // {
-  //   id: 'rain',
-  //   title: 'Sudden Rain',
-  //   text: 'A quick change of plans.',
-  //   requiresTwoAgents: false,
-  // },
-  {
-    id: 'rumor',
-    title: 'Start a Rumor',
-    text: 'Start a rumor..',
-    requiresTwoAgents: true,
-  },
-  {
-    id: 'debate',
-    title: 'Spark a Debate',
-    text: 'Challenge agents to a debate.',
-    requiresTwoAgents: true,
-  },
-  {
-    id: 'interrogation',
-    title: 'questions',
-    text: 'Probe agents for recent memories.',
-    requiresTwoAgents: true,
+    id: 'park',
+    title: 'Park Meetup',
+    text: 'Meet at the park!',
+    requiresTwoAgents: false,
   },
 ];
 
@@ -86,8 +57,10 @@ export default function PlayerDetails({
   const playerConversation = player && game.world.playerConversation(player);
 
   const [injectorOpen, setInjectorOpen] = useState(false);
-  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
-  const [scenarioText, setScenarioText] = useState('');
+  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(
+    scenarioOptions[0]?.id ?? null,
+  );
+  const [scenarioText, setScenarioText] = useState(scenarioOptions[0]?.text ?? '');
   const [targetAgent1, setTargetAgent1] = useState<GameId<'players'> | ''>('');
   const [targetAgent2, setTargetAgent2] = useState<GameId<'players'> | ''>('');
 
@@ -118,6 +91,7 @@ export default function PlayerDetails({
   const acceptInvite = useSendInput(engineId, 'acceptInvite');
   const rejectInvite = useSendInput(engineId, 'rejectInvite');
   const leaveConversation = useSendInput(engineId, 'leaveConversation');
+  const startScenarioMeetAtPark = useSendInput(engineId, 'startScenarioMeetAtPark');
 
   const setDefaultSecondTarget = (primaryTarget: GameId<'players'> | '') => {
     if (!primaryTarget) {
@@ -130,6 +104,10 @@ export default function PlayerDetails({
 
   const onOpenInjector = (primaryTarget?: GameId<'players'>) => {
     setInjectorOpen(true);
+    if (!selectedScenarioId && scenarioOptions[0]) {
+      setSelectedScenarioId(scenarioOptions[0].id);
+      setScenarioText(scenarioOptions[0].text ?? '');
+    }
     if (primaryTarget) {
       setTargetAgent1(primaryTarget);
       if (targetAgent2 === primaryTarget || !targetAgent2) {
@@ -156,6 +134,19 @@ export default function PlayerDetails({
     ? scenarioText.trim()
     : 'Select a scenario or write a custom one below.';
 
+  const onStartScenario = async () => {
+    if (!selectedScenarioId) {
+      toast.error('Select a scenario to start.');
+      return;
+    }
+    if (selectedScenarioId === 'park') {
+      await toastOnError(startScenarioMeetAtPark({}));
+      setInjectorOpen(false);
+      return;
+    }
+    toast.error('This scenario is not wired yet.');
+  };
+
   const scenarioButton = (
     <button
       className="button text-white shadow-solid text-xl cursor-pointer pointer-events-auto"
@@ -163,8 +154,8 @@ export default function PlayerDetails({
       type="button"
     >
       <div className="h-full bg-clay-700 flex items-center gap-2 px-3">
-        <img className="w-5 h-5" src={interactImg} alt="Scenario" />
-        <span>scenario creator</span>
+        <img className="w-5 h-5 shrink-0" src={interactImg} alt="Scenario" />
+        <div className="leading-none">scenario creator</div>
       </div>
     </button>
   );
@@ -173,9 +164,8 @@ export default function PlayerDetails({
     <div
       className={
         'scenario-injector w-full box bg-gradient-to-br from-[#2d2438] to-[#1d1826] ' +
-        (playerId
-          ? 'mt-4 sm:w-[calc(100%+2rem)] sm:-mx-4'
-          : 'mt-36 pt-3 sm:w-[calc(100%+2rem)] sm:-mx-4')
+        'sm:w-[calc(100%+2rem)] sm:-mx-4 ' +
+        (playerId ? 'mt-4' : 'mt-[calc(9rem+75px)] pt-3')
       }
     >
       <div className="bg-brown-700 p-3 flex items-center justify-between text-lg sm:text-xl font-display tracking-widest">
@@ -284,7 +274,7 @@ export default function PlayerDetails({
           <button
             className="button text-white shadow-solid text-base sm:text-lg cursor-pointer pointer-events-auto"
             type="button"
-            onClick={() => setInjectorOpen(false)}
+            onClick={onStartScenario}
           >
             <div className="h-full bg-clay-700 px-4 py-2 text-center">Start scenario</div>
           </button>

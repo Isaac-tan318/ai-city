@@ -4,6 +4,7 @@ import { Player, serializedPlayer } from './player';
 import { Agent, serializedAgent } from './agent';
 import { GameId, parseGameId, playerId } from './ids';
 import { parseMap } from '../util/object';
+import { point } from '../util/types';
 
 export const historicalLocations = v.array(
   v.object({
@@ -17,6 +18,8 @@ export const serializedWorld = {
   conversations: v.array(v.object(serializedConversation)),
   players: v.array(v.object(serializedPlayer)),
   agents: v.array(v.object(serializedAgent)),
+  scenarioTarget: v.optional(point),
+  scenarioName: v.optional(v.string()),
   historicalLocations: v.optional(historicalLocations),
 };
 export type SerializedWorld = ObjectType<typeof serializedWorld>;
@@ -27,14 +30,18 @@ export class World {
   players: Map<GameId<'players'>, Player>;
   agents: Map<GameId<'agents'>, Agent>;
   historicalLocations?: Map<GameId<'players'>, ArrayBuffer>;
+  scenarioTarget?: { x: number; y: number };
+  scenarioName?: string;
 
   constructor(serialized: SerializedWorld) {
-    const { nextId, historicalLocations } = serialized;
+    const { nextId, historicalLocations, scenarioTarget, scenarioName } = serialized;
 
     this.nextId = nextId;
     this.conversations = parseMap(serialized.conversations, Conversation, (c) => c.id);
     this.players = parseMap(serialized.players, Player, (p) => p.id);
     this.agents = parseMap(serialized.agents, Agent, (a) => a.id);
+    this.scenarioTarget = scenarioTarget;
+    this.scenarioName = scenarioName;
 
     if (historicalLocations) {
       this.historicalLocations = new Map();
@@ -54,6 +61,8 @@ export class World {
       conversations: [...this.conversations.values()].map((c) => c.serialize()),
       players: [...this.players.values()].map((p) => p.serialize()),
       agents: [...this.agents.values()].map((a) => a.serialize()),
+      scenarioTarget: this.scenarioTarget,
+      scenarioName: this.scenarioName,
       historicalLocations:
         this.historicalLocations &&
         [...this.historicalLocations.entries()].map(([playerId, location]) => ({

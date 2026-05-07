@@ -28,6 +28,7 @@ export function movePlayer(
   player: Player,
   destination: Point,
   allowInConversation?: boolean,
+  ignorePlayers?: boolean,
 ) {
   if (Math.floor(destination.x) !== destination.x || Math.floor(destination.y) !== destination.y) {
     throw new Error(`Non-integral destination: ${JSON.stringify(destination)}`);
@@ -47,6 +48,7 @@ export function movePlayer(
   player.pathfinding = {
     destination: destination,
     started: now,
+    ignorePlayers,
     state: {
       kind: 'needsPath',
     },
@@ -55,6 +57,7 @@ export function movePlayer(
 }
 
 export function findRoute(game: Game, now: number, player: Player, destination: Point) {
+  const ignorePlayers = !!player.pathfinding?.ignorePlayers;
   const minDistances: PathCandidate[][] = [];
   const explore = (current: PathCandidate): Array<PathCandidate> => {
     const { x, y } = current.position;
@@ -90,7 +93,7 @@ export function findRoute(game: Game, now: number, player: Player, destination: 
     for (const { position, facing } of neighbors) {
       const segmentLength = distance(current.position, position);
       const length = current.length + segmentLength;
-      if (blocked(game, now, position, player.id)) {
+      if (blocked(game, now, position, player.id, ignorePlayers)) {
         continue;
       }
       const remaining = manhattanDistance(position, destination);
@@ -161,10 +164,18 @@ export function findRoute(game: Game, now: number, player: Player, destination: 
   return { path: compressPath(densePath), newDestination };
 }
 
-export function blocked(game: Game, now: number, pos: Point, playerId?: GameId<'players'>) {
-  const otherPositions = [...game.world.players.values()]
-    .filter((p) => p.id !== playerId)
-    .map((p) => p.position);
+export function blocked(
+  game: Game,
+  now: number,
+  pos: Point,
+  playerId?: GameId<'players'>,
+  ignorePlayers?: boolean,
+) {
+  const otherPositions = ignorePlayers
+    ? []
+    : [...game.world.players.values()]
+        .filter((p) => p.id !== playerId)
+        .map((p) => p.position);
   return blockedWithPositions(pos, otherPositions, game.worldMap);
 }
 

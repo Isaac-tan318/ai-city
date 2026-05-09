@@ -11,58 +11,40 @@ import { Agent } from './agent';
 import { WorldMap } from './worldMap';
 
 const PARK_FOUNTAIN_SHEET = '__city_fountain__';
-const PARK_TARGET_SEARCH_RADIUS = 6;
 
+// Returns the nearest open tile to the fountain centroid.
 function getParkTarget(worldMap: WorldMap): Point {
-  const fountains = worldMap.animatedSprites.filter((sprite) => sprite.sheet === PARK_FOUNTAIN_SHEET);
-  let target: Point | null = null;
+  const fountains = worldMap.animatedSprites.filter((s) => s.sheet === PARK_FOUNTAIN_SHEET);
+  let center: Point;
   if (fountains.length > 0) {
     const sum = fountains.reduce(
-      (acc, sprite) => ({ x: acc.x + sprite.x, y: acc.y + sprite.y }),
+      (acc, s) => ({ x: acc.x + s.x, y: acc.y + s.y }),
       { x: 0, y: 0 },
     );
-    const average = {
-      x: sum.x / fountains.length,
-      y: sum.y / fountains.length,
+    center = {
+      x: Math.round(sum.x / fountains.length / worldMap.tileDim),
+      y: Math.round(sum.y / fountains.length / worldMap.tileDim),
     };
-    target = {
-      x: Math.round(average.x / worldMap.tileDim),
-      y: Math.round(average.y / worldMap.tileDim),
-    };
+  } else {
+    center = { x: Math.floor(worldMap.width / 2), y: Math.floor(worldMap.height / 2) };
   }
-  if (!target) {
-    target = {
-      x: Math.floor(worldMap.width / 2),
-      y: Math.floor(worldMap.height / 2),
-    };
-  }
-  return findNearestOpenTile(target, worldMap);
-}
-
-function findNearestOpenTile(target: Point, worldMap: WorldMap): Point {
-  for (let radius = 0; radius <= PARK_TARGET_SEARCH_RADIUS; radius++) {
+  for (let radius = 0; radius <= 15; radius++) {
     for (let dx = -radius; dx <= radius; dx++) {
       for (let dy = -radius; dy <= radius; dy++) {
-        if (Math.abs(dx) + Math.abs(dy) !== radius) {
-          continue;
-        }
-        const candidate = { x: target.x + dx, y: target.y + dy };
-        if (candidate.x < 0 || candidate.y < 0) {
-          continue;
-        }
-        if (candidate.x >= worldMap.width || candidate.y >= worldMap.height) {
-          continue;
-        }
-        if (blockedWithPositions(candidate, [], worldMap) === null) {
+        if (Math.abs(dx) + Math.abs(dy) !== radius) continue;
+        const candidate = { x: center.x + dx, y: center.y + dy };
+        if (
+          candidate.x >= 0 &&
+          candidate.y >= 0 &&
+          candidate.x < worldMap.width &&
+          candidate.y < worldMap.height &&
+          blockedWithPositions(candidate, [], worldMap) === null
+        )
           return candidate;
-        }
       }
     }
   }
-  return {
-    x: Math.min(Math.max(target.x, 0), worldMap.width - 1),
-    y: Math.min(Math.max(target.y, 0), worldMap.height - 1),
-  };
+  return center;
 }
 
 export const agentInputs = {
@@ -224,16 +206,22 @@ export const agentInputs = {
       const target = getParkTarget(game.worldMap);
       game.world.scenarioTarget = target;
       game.world.scenarioName = 'meetAtPark';
+      // Preempt all ongoing conversations so agents are immediately free to move.
+      for (const conversation of [...game.world.conversations.values()]) {
+        conversation.stop(game, now);
+      }
       for (const agent of game.world.agents.values()) {
         agent.scenarioTarget = target;
         agent.scenarioName = 'meetAtPark';
+        // Drop any pending conversation memory from the just-stopped convos.
+        delete agent.toRemember;
+        // Orphan any in-flight LLM operation — finishDoSomething will see an
+        // operationId mismatch and bail out, preventing destination overrides.
+        delete agent.inProgressOperation;
+        // Reset arrival timer so the 30-second stay clock starts fresh.
+        delete agent.scenarioArrivalTime;
         const player = game.world.players.get(agent.playerId);
-        if (!player) {
-          continue;
-        }
-        if (game.world.playerConversation(player)) {
-          continue;
-        }
+        if (!player) continue;
         delete player.activity;
         movePlayer(game, now, player, target, false, true);
       }

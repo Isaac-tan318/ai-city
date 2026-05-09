@@ -175,6 +175,9 @@ export class Game extends AbstractGame {
   }
 
   tick(now: number) {
+    if (this.world.worldStartTime === undefined) {
+      this.world.worldStartTime = now;
+    }
     for (const player of this.world.players.values()) {
       player.tick(this, now);
     }

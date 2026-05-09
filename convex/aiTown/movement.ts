@@ -179,6 +179,28 @@ export function blocked(
   return blockedWithPositions(pos, otherPositions, game.worldMap);
 }
 
+// Picks a random open tile within `radius` tiles of `center`, ignoring player positions.
+export function pickParkWaypoint(center: Point, radius: number, worldMap: WorldMap): Point | null {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const angle = Math.random() * 2 * Math.PI;
+    const r = 1 + Math.floor(Math.random() * radius);
+    const candidate = {
+      x: Math.round(center.x + Math.cos(angle) * r),
+      y: Math.round(center.y + Math.sin(angle) * r),
+    };
+    if (
+      candidate.x >= 0 &&
+      candidate.y >= 0 &&
+      candidate.x < worldMap.width &&
+      candidate.y < worldMap.height &&
+      blockedWithPositions(candidate, [], worldMap) === null
+    ) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 export function blockedWithPositions(position: Point, otherPositions: Point[], map: WorldMap) {
   if (isNaN(position.x) || isNaN(position.y)) {
     throw new Error(`NaN position in ${JSON.stringify(position)}`);

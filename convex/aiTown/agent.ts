@@ -20,7 +20,7 @@ import { FunctionArgs } from 'convex/server';
 import { MutationCtx, internalMutation, internalQuery } from '../_generated/server';
 import { distance, pointsEqual } from '../util/geometry';
 import { internal } from '../_generated/api';
-import { movePlayer, stopPlayer } from './movement';
+import { movePlayer, stopPlayer, pickParkWaypoint } from './movement';
 import { insertInput } from './insertInput';
 import { point, Point } from '../util/types';
 
@@ -37,9 +37,10 @@ export class Agent {
   };
   scenarioTarget?: Point;
   scenarioName?: string;
+  scenarioArrivalTime?: number;
 
   constructor(serialized: SerializedAgent) {
-    const { id, lastConversation, lastInviteAttempt, inProgressOperation, scenarioTarget, scenarioName } = serialized;
+    const { id, lastConversation, lastInviteAttempt, inProgressOperation, scenarioTarget, scenarioName, scenarioArrivalTime } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
     this.playerId = playerId;
@@ -52,6 +53,7 @@ export class Agent {
     this.inProgressOperation = inProgressOperation;
     this.scenarioTarget = scenarioTarget;
     this.scenarioName = scenarioName;
+    this.scenarioArrivalTime = scenarioArrivalTime;
   }
 
   tick(game: Game, now: number) {
@@ -59,9 +61,55 @@ export class Agent {
     if (!player) {
       throw new Error(`Invalid player ID ${this.playerId}`);
     }
-    if (!this.scenarioTarget && game.world.scenarioTarget) {
+    if (!this.scenarioTarget && !this.scenarioArrivalTime && game.world.scenarioTarget) {
       this.scenarioTarget = game.world.scenarioTarget;
       this.scenarioName = game.world.scenarioName;
+    }
+    const PARK_RADIUS = 5;
+    if (this.scenarioTarget) {
+      const center = this.scenarioTarget;
+      // Preempt any active conversation so the agent can head to the park.
+      const activeConversation = game.world.playerConversation(player);
+      if (activeConversation) {
+        activeConversation.leave(game, now, player);
+        delete this.toRemember;
+      }
+      delete player.activity;
+
+      const distToCenter = distance(player.position, center);
+
+      if (distToCenter > PARK_RADIUS) {
+        // Approaching the park — ignore player collisions so agents don't jam.
+        if (!player.pathfinding || !pointsEqual(player.pathfinding.destination, center)) {
+          movePlayer(game, now, player, center, false, false);
+        }
+        return;
+      }
+
+      // Inside the meeting zone.
+      if (!this.scenarioArrivalTime) {
+        this.scenarioArrivalTime = now;
+        // Cancel the approach pathfinding so the wander logic takes over.
+        if (player.pathfinding) stopPlayer(player);
+      }
+
+      if (now - this.scenarioArrivalTime >= 30_000) {
+        // 30 s is up — free the agent. Keep scenarioArrivalTime as a done-marker
+        // so the propagation check above won't re-enlist them this session.
+        delete this.scenarioTarget;
+        delete this.scenarioName;
+        if (player.pathfinding) stopPlayer(player);
+        // Fall through to normal agent behaviour.
+      } else {
+        // Wander within the zone. ignorePlayers=true so agents aren't deadlocked
+        // by the pile-up from the approach phase; they spread out naturally as
+        // each picks a different random waypoint each stop.
+        if (!player.pathfinding) {
+          const waypoint = pickParkWaypoint(center, PARK_RADIUS, game.worldMap);
+          if (waypoint) movePlayer(game, now, player, waypoint, false, true);
+        }
+        return;
+      }
     }
     if (this.inProgressOperation) {
       if (now < this.inProgressOperation.started + ACTION_TIMEOUT) {
@@ -79,22 +127,6 @@ export class Agent {
     const doingActivity = player.activity && player.activity.until > now;
     if (doingActivity && (conversation || player.pathfinding)) {
       player.activity!.until = now;
-    }
-    if (this.scenarioTarget && !conversation) {
-      if (doingActivity) {
-        delete player.activity;
-      }
-      const distanceToTarget = distance(player.position, this.scenarioTarget);
-      if (distanceToTarget <= 1) {
-        if (player.pathfinding) {
-          stopPlayer(player);
-        }
-        return;
-      }
-      if (!player.pathfinding || !pointsEqual(player.pathfinding.destination, this.scenarioTarget)) {
-        movePlayer(game, now, player, this.scenarioTarget, false, true);
-      }
-      return;
     }
     // If we're not in a conversation, do something.
     // If we aren't doing an activity or moving, do something.
@@ -291,6 +323,7 @@ export class Agent {
       inProgressOperation: this.inProgressOperation,
       scenarioTarget: this.scenarioTarget,
       scenarioName: this.scenarioName,
+      scenarioArrivalTime: this.scenarioArrivalTime,
     };
   }
 }
@@ -310,6 +343,7 @@ export const serializedAgent = {
   ),
   scenarioTarget: v.optional(point),
   scenarioName: v.optional(v.string()),
+  scenarioArrivalTime: v.optional(v.number()),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 

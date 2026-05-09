@@ -1,5 +1,5 @@
 import * as PIXI from 'pixi.js';
-import { useApp } from '@pixi/react';
+import { useApp, useTick } from '@pixi/react';
 import { Player, SelectElement } from './Player.tsx';
 import { useEffect, useRef, useState } from 'react';
 import { PixiStaticMap } from './PixiStaticMap.tsx';
@@ -14,6 +14,27 @@ import { DebugPath } from './DebugPath.tsx';
 import { PositionIndicator } from './PositionIndicator.tsx';
 import { SHOW_DEBUG_UI } from './Game.tsx';
 import { ServerGame } from '../hooks/serverGame.ts';
+
+const CYCLE_MS = 10 * 60 * 1000;
+const DAY_MS = 5 * 60 * 1000;
+const TRANSITION_MS = 30_000;
+
+function nightAlpha(historicalTime: number, worldStartTime: number): number {
+  const elapsed = historicalTime - worldStartTime;
+  const p = ((elapsed % CYCLE_MS) + CYCLE_MS) % CYCLE_MS;
+  if (p < TRANSITION_MS) {
+    // Dawn: fade out
+    return 0.5 * (1 - p / TRANSITION_MS);
+  } else if (p < DAY_MS - TRANSITION_MS) {
+    // Full day
+    return 0;
+  } else if (p < DAY_MS) {
+    // Dusk: fade in
+    return 0.5 * ((p - (DAY_MS - TRANSITION_MS)) / TRANSITION_MS);
+  }
+  // Night
+  return 0.5;
+}
 
 export const PixiGame = (props: {
   worldId: Id<'worlds'>;
@@ -82,7 +103,7 @@ export const PixiGame = (props: {
   const { width, height, tileDim } = props.game.worldMap;
   const players = [...props.game.world.players.values()];
 
-  // Zoom on the user’s avatar when it is created
+  // Zoom on the user's avatar when it is created
   useEffect(() => {
     if (!viewportRef.current || humanPlayerId === undefined) return;
 
@@ -92,6 +113,34 @@ export const PixiGame = (props: {
       scale: 1.5,
     });
   }, [humanPlayerId]);
+
+  // Night overlay — a screen-space PIXI.Graphics added directly to the stage
+  // so it covers the full canvas and doesn't scroll with the viewport.
+  const overlayRef = useRef<PIXI.Graphics | null>(null);
+  useEffect(() => {
+    const g = new PIXI.Graphics();
+    pixiApp.stage.addChild(g);
+    overlayRef.current = g;
+    return () => {
+      pixiApp.stage.removeChild(g);
+      g.destroy();
+      overlayRef.current = null;
+    };
+  }, [pixiApp]);
+
+  useTick(() => {
+    const g = overlayRef.current;
+    const worldStartTime = props.game.world.worldStartTime;
+    if (!g || !props.historicalTime || !worldStartTime) return;
+
+    const alpha = nightAlpha(props.historicalTime, worldStartTime);
+    g.clear();
+    if (alpha > 0) {
+      g.beginFill(0x001530, alpha);
+      g.drawRect(0, 0, props.width, props.height);
+      g.endFill();
+    }
+  });
 
   return (
     <PixiViewport

@@ -223,7 +223,7 @@ export const agentInputs = {
         const player = game.world.players.get(agent.playerId);
         if (!player) continue;
         delete player.activity;
-        movePlayer(game, now, player, target, false, true);
+        movePlayer(game, now, player, target, false, false);
       }
       return { target };
     },

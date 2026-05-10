@@ -1,5 +1,6 @@
 import { Id, TableNames } from './_generated/dataModel';
 import { internal } from './_generated/api';
+import * as mapData from '../data/city';
 import {
   DatabaseReader,
   internalAction,
@@ -165,6 +166,58 @@ export const randomPositions = internalMutation({
         },
       });
     }
+  },
+});
+
+export const skipTime = mutation({
+  args: { skipMs: v.number() },
+  handler: async (ctx, { skipMs }) => {
+    if (process.env.STOP_NOT_ALLOWED) throw new Error('Stop not allowed');
+    const { worldStatus } = await getDefaultWorld(ctx.db);
+    // Route through the engine input system so the change lands in the engine's
+    // in-memory state and gets persisted on the next save (direct DB patches get
+    // overwritten when the engine flushes its world diff).
+    await insertInput(ctx, worldStatus.worldId, 'skipTime', { skipMs });
+  },
+});
+
+export const reinitMap = mutation({
+  handler: async (ctx) => {
+    const { worldStatus } = await getDefaultWorld(ctx.db);
+    const existing = await ctx.db
+      .query('maps')
+      .withIndex('worldId', (q) => q.eq('worldId', worldStatus.worldId))
+      .unique();
+    if (!existing) throw new Error('No map found for default world');
+    await ctx.db.patch(existing._id, {
+      width: (mapData as any).mapwidth,
+      height: (mapData as any).mapheight,
+      tileSetUrl: mapData.tilesetpath,
+      tileSetDimX: mapData.tilesetpxw,
+      tileSetDimY: mapData.tilesetpxh,
+      tileDim: mapData.tiledim,
+      bgTiles: mapData.bgtiles,
+      objectTiles: (mapData as any).objmap ?? [],
+      animatedSprites: (mapData as any).animatedsprites ?? [],
+    });
+    console.log(
+      `Map reloaded from data/city.js — tileset: ${mapData.tilesetpath}, ` +
+      `dims: ${mapData.tilesetpxw}x${mapData.tilesetpxh}, tileSize: ${mapData.tiledim}px`,
+    );
+  },
+});
+
+export const fixMapTilesetUrl = mutation({
+  args: { url: v.string() },
+  handler: async (ctx, { url }) => {
+    const { worldStatus } = await getDefaultWorld(ctx.db);
+    const map = await ctx.db
+      .query('maps')
+      .withIndex('worldId', (q) => q.eq('worldId', worldStatus.worldId))
+      .unique();
+    if (!map) throw new Error('No map found for default world');
+    await ctx.db.patch(map._id, { tileSetUrl: url });
+    console.log(`Updated tileSetUrl to: ${url}`);
   },
 });
 

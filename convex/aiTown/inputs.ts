@@ -2,6 +2,7 @@ import { ObjectType } from 'convex/values';
 import { playerInputs } from './player';
 import { conversationInputs } from './conversation';
 import { agentInputs } from './agentInputs';
+import { worldInputs } from './worldInputs';
 
 // It's easy to hit circular dependencies with these imports,
 // so assert at module scope so we hit errors when analyzing.
@@ -14,6 +15,8 @@ export const inputs = {
   ...conversationInputs,
   // Inputs for the agent layer.
   ...agentInputs,
+  // Inputs for world-level controls.
+  ...worldInputs,
 };
 export type Inputs = typeof inputs;
 export type InputNames = keyof Inputs;

@@ -42,6 +42,9 @@ export interface LLMConfig {
   stopWords: string[];
   apiKey: string | undefined;
   apiVersion?: string; // Azure OpenAI requires ?api-version=... on every request
+  // Optional separate config for embeddings (e.g. Azure chat + Gemini embeddings)
+  embeddingUrl?: string;
+  embeddingApiKey?: string;
 }
 
 export function getLLMConfig(): LLMConfig {
@@ -81,6 +84,8 @@ export function getLLMConfig(): LLMConfig {
     const embeddingModel = process.env.LLM_EMBEDDING_MODEL;
     if (!embeddingModel) throw new Error('LLM_EMBEDDING_MODEL is required');
     const apiVersion = process.env.LLM_API_VERSION;
+    const embeddingUrl = process.env.LLM_EMBEDDING_URL;
+    const embeddingApiKey = process.env.LLM_EMBEDDING_API_KEY;
     return {
       provider: 'custom',
       url,
@@ -89,6 +94,8 @@ export function getLLMConfig(): LLMConfig {
       stopWords: [],
       apiKey,
       apiVersion,
+      embeddingUrl,
+      embeddingApiKey,
     };
   }
   // Assume Ollama
@@ -120,10 +127,37 @@ const AuthHeaders = (): Record<string, string> => {
   return { Authorization: 'Bearer ' + config.apiKey };
 };
 
-// Appends ?api-version=... when the config requires it (Azure OpenAI)
-function buildApiUrl(base: string, endpoint: string, apiVersion?: string): string {
-  const url = `${base.replace(/\/$/, '')}/${endpoint}`;
-  return apiVersion ? `${url}?api-version=${apiVersion}` : url;
+const EmbeddingAuthHeaders = (): Record<string, string> => {
+  const config = getLLMConfig();
+  const key = config.embeddingApiKey ?? config.apiKey;
+  if (!key) return {};
+  // Use Bearer for the embedding endpoint unless it's also Azure (same apiVersion set and no separate embeddingUrl)
+  if (config.apiVersion && !config.embeddingUrl) return { 'api-key': key };
+  return { Authorization: 'Bearer ' + key };
+};
+
+// Builds the chat completions URL.
+// For Azure: {base}/openai/deployments/{deployment}/chat/completions?api-version={version}
+// For others: {base}/chat/completions
+function buildChatUrl(config: LLMConfig): string {
+  const base = config.url.replace(/\/$/, '');
+  if (config.apiVersion) {
+    return `${base}/openai/deployments/${config.chatModel}/chat/completions?api-version=${config.apiVersion}`;
+  }
+  return `${base}/chat/completions`;
+}
+
+// Builds the embeddings URL using the embedding-specific base URL if configured.
+function buildEmbeddingUrl(config: LLMConfig): string {
+  if (config.embeddingUrl) {
+    // Separate provider (e.g. Gemini) — just append /embeddings
+    return `${config.embeddingUrl.replace(/\/$/, '')}/embeddings`;
+  }
+  const base = config.url.replace(/\/$/, '');
+  if (config.apiVersion) {
+    return `${base}/openai/deployments/${config.embeddingModel}/embeddings?api-version=${config.apiVersion}`;
+  }
+  return `${base}/embeddings`;
 }
 
 // Overload for non-streaming
@@ -157,7 +191,7 @@ export async function chatCompletion(
     retries,
     ms,
   } = await retryWithBackoff(async () => {
-    const chatUrl = buildApiUrl(config.url, 'chat/completions', config.apiVersion);
+    const chatUrl = buildChatUrl(config);
     console.log('[DEBUG] Chat URL:', chatUrl, '| Model:', body.model);
     const result = await fetch(chatUrl, {
       method: 'POST',
@@ -229,13 +263,13 @@ export async function fetchEmbeddingBatch(texts: string[]) {
     retries,
     ms,
   } = await retryWithBackoff(async () => {
-    const embeddingUrl = buildApiUrl(config.url, 'embeddings', config.apiVersion);
+    const embeddingUrl = buildEmbeddingUrl(config);
     console.log('[DEBUG] Embedding URL:', embeddingUrl, '| Model:', config.embeddingModel);
     const result = await fetch(embeddingUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...AuthHeaders(),
+        ...EmbeddingAuthHeaders(),
       },
 
       body: JSON.stringify({

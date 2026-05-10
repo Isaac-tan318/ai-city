@@ -5,7 +5,7 @@
 export const tilesetpath = '__city__';
 export const tiledim = 32;
 export const tilesetpxw = 256;
-export const tilesetpxh = 128;
+export const tilesetpxh = 256;
 
 const W = 48;
 const H = 32;
@@ -43,6 +43,29 @@ const BUS_STOP = 28;
 const TRASHCAN = 29;
 const STATUE = 30;
 const FOUNTAIN_BASE = 31;
+const SUNTEC_WALL = 32;
+const SUNTEC_WINDOW = 33;
+const HDB_WALL = 34;
+const HDB_WINDOW = 35;
+const WHITE_BRICK = 36;
+const WHITE_BRICK_WINDOW = 37;
+const WHITE_BRICK_DOOR = 38;
+const FUSION_WALL = 39;
+const FUSION_WINDOW = 40;
+const ASTAR_WALL = 41;
+const MBS_WALL = 42;
+const MBS_WINDOW = 43;
+const MBS_SKYPARK_LEFT = 44;
+const MBS_SKYPARK_MID = 45;
+const MBS_SKYPARK_RIGHT = 46;
+const RESTAURANT_TABLE = 47;
+const RESTAURANT_UMBRELLA = 48;
+const SUPERTREE = 49;
+const PERANAKAN_PINK = 50;
+const PERANAKAN_BLUE = 51;
+const PERANAKAN_MINT = 52;
+const PERANAKAN_ROOF = 53;
+const SUNTEC_FOUNTAIN = 54;
 
 const H_ROAD_Y = [11, 23];
 const V_ROAD_X = [15, 33];
@@ -143,17 +166,60 @@ function placeBuilding(ox, oy, w, h, style = 'brick') {
   if (style === 'shop' && h < 3) style = 'brick';
   const wallY = oy + h - 1;
   const T = {
-    brick: { wall: BRICK, win: WINDOW, roof: ROOF },
-    glass: { wall: GLASS_WALL, win: GLASS_WINDOW, roof: FLAT_ROOF_LIGHT },
-    concrete: { wall: CONCRETE_WALL, win: CONCRETE_WINDOW, roof: ROOF },
-    shop: { wall: BRICK, win: WINDOW, roof: ROOF },
+    brick: { wall: BRICK, win: WINDOW, roof: ROOF, door: DOOR },
+    glass: { wall: GLASS_WALL, win: GLASS_WINDOW, roof: FLAT_ROOF_LIGHT, door: GLASS_WALL },
+    concrete: { wall: CONCRETE_WALL, win: CONCRETE_WINDOW, roof: ROOF, door: CONCRETE_WALL },
+    shop: { wall: BRICK, win: WINDOW, roof: ROOF, door: DOOR },
+    suntec: { wall: SUNTEC_WALL, win: SUNTEC_WINDOW, roof: FLAT_ROOF_LIGHT, door: SUNTEC_WALL },
+    hdb: { wall: HDB_WALL, win: HDB_WINDOW, roof: FLAT_ROOF_LIGHT, door: HDB_WALL },
+    whitebrick: {
+      wall: WHITE_BRICK,
+      win: WHITE_BRICK_WINDOW,
+      roof: ROOF,
+      door: WHITE_BRICK_DOOR,
+    },
+    fusion: { wall: FUSION_WALL, win: FUSION_WINDOW, roof: FLAT_ROOF_LIGHT, door: FUSION_WALL },
+    astar: { wall: ASTAR_WALL, win: ASTAR_WALL, roof: FLAT_ROOF_LIGHT, door: ASTAR_WALL },
+    mbs: { wall: MBS_WALL, win: MBS_WINDOW, roof: FLAT_ROOF_LIGHT, door: MBS_WALL },
+    pera_pink: {
+      wall: PERANAKAN_PINK,
+      win: PERANAKAN_PINK,
+      roof: PERANAKAN_ROOF,
+      door: PERANAKAN_PINK,
+    },
+    pera_blue: {
+      wall: PERANAKAN_BLUE,
+      win: PERANAKAN_BLUE,
+      roof: PERANAKAN_ROOF,
+      door: PERANAKAN_BLUE,
+    },
+    pera_mint: {
+      wall: PERANAKAN_MINT,
+      win: PERANAKAN_MINT,
+      roof: PERANAKAN_ROOF,
+      door: PERANAKAN_MINT,
+    },
   }[style];
+
+  const isTower =
+    style === 'hdb' ||
+    style === 'suntec' ||
+    style === 'mbs' ||
+    style === 'fusion';
 
   for (let dx = 0; dx < w; dx++) {
     for (let dy = 0; dy < h - 1; dy++) {
       if (!inBounds(ox + dx, oy + dy)) continue;
       const isAwningRow = style === 'shop' && oy + dy === wallY - 1;
-      objs[ox + dx][oy + dy] = isAwningRow ? AWNING_RED : T.roof;
+      if (isAwningRow) {
+        objs[ox + dx][oy + dy] = AWNING_RED;
+      } else if (isTower && dy === 0) {
+        objs[ox + dx][oy + dy] = T.roof;
+      } else if (isTower) {
+        objs[ox + dx][oy + dy] = dy % 2 === 0 ? T.wall : T.win;
+      } else {
+        objs[ox + dx][oy + dy] = T.roof;
+      }
     }
   }
 
@@ -161,7 +227,7 @@ function placeBuilding(ox, oy, w, h, style = 'brick') {
   for (let dx = 0; dx < w; dx++) {
     if (!inBounds(ox + dx, wallY)) continue;
     if (ox + dx === doorX) {
-      objs[ox + dx][wallY] = DOOR;
+      objs[ox + dx][wallY] = T.door;
     } else if (dx % 2 === 0) {
       objs[ox + dx][wallY] = T.win;
     } else {
@@ -171,134 +237,140 @@ function placeBuilding(ox, oy, w, h, style = 'brick') {
 }
 
 const BUILDINGS = [
-  // Block NW (cols 0..13, rows 0..9)
-  [2, 1, 5, 4],
-  [8, 2, 4, 4],
-  [2, 6, 5, 3],
-  [8, 6, 5, 3],
-  // Block NE (cols 17..31, rows 0..9)
-  [18, 1, 6, 4, 'glass'],
-  [25, 2, 5, 5, 'glass'],
-  [18, 6, 5, 3, 'concrete'],
-  [24, 7, 6, 2],
-  // Block N-far-E (cols 35..47, rows 0..9)
-  [36, 1, 4, 4, 'glass'],
-  [41, 2, 5, 5, 'glass'],
-  [36, 6, 5, 3, 'concrete'],
-  [42, 7, 5, 2],
-  // Block W-mid (cols 0..13, rows 13..21)
-  [2, 14, 5, 4],
-  [8, 14, 5, 3],
-  [2, 18, 6, 3],
-  [9, 18, 4, 3],
-  // Block E-mid (cols 35..47, rows 13..21)
-  [36, 14, 5, 4, 'concrete'],
-  [42, 14, 5, 4, 'glass'],
-  [36, 19, 5, 2],
-  [42, 19, 5, 2],
-  // Block SW (cols 0..13, rows 25..31)
-  [2, 26, 5, 5, 'shop'],
-  [8, 27, 6, 4, 'shop'],
-  // Block S-mid (cols 17..31, rows 25..31)
-  [17, 26, 5, 5],
-  [23, 27, 5, 4],
-  [28, 26, 4, 5],
-  // Block S-far-E (cols 35..47, rows 25..31)
-  [36, 26, 5, 5, 'shop'],
-  [42, 27, 5, 4, 'concrete'],
+  // 1. NW — Suntec City: 5 dark towers in a horseshoe (cols 0..13, rows 0..9)
+  [1, 1, 2, 5, 'suntec'],
+  [4, 0, 2, 4, 'suntec'],
+  [7, 0, 2, 4, 'suntec'],
+  [10, 0, 2, 4, 'suntec'],
+  [12, 1, 2, 5, 'suntec'],
+
+  // 2. N-mid — HDBs (cols 17..31, rows 0..9)
+  [18, 1, 4, 8, 'hdb'],
+  [23, 1, 4, 8, 'hdb'],
+  [28, 1, 3, 8, 'hdb'],
+
+  // 3. NE — landed white-brick housing (cols 35..47, rows 0..9)
+  [36, 1, 4, 4, 'whitebrick'],
+  [41, 1, 5, 4, 'whitebrick'],
+  [36, 6, 5, 3, 'whitebrick'],
+  [42, 6, 5, 3, 'whitebrick'],
+
+  // 4. W-mid — Fusionopolis + A*STAR (cols 0..13, rows 13..21)
+  [1, 14, 4, 7, 'fusion'],
+  [6, 14, 4, 7, 'fusion'],
+  [11, 14, 3, 4, 'astar'],
+  [11, 19, 3, 2, 'fusion'],
+
+  // 5. Center — Marina Bay Sands: 3 tall white towers (cols 17..31, rows 13..21)
+  [19, 14, 2, 8, 'mbs'],
+  [24, 14, 2, 8, 'mbs'],
+  [29, 14, 2, 8, 'mbs'],
+
+  // 6. E-mid — HDBs (cols 35..47, rows 13..21)
+  [36, 14, 4, 7, 'hdb'],
+  [41, 14, 4, 7, 'hdb'],
+  [45, 14, 2, 7, 'hdb'],
+
+  // 7. SW — outdoor restaurant kitchen (rest is plaza/objects, see below)
+  [1, 26, 3, 5, 'shop'],
+
+  // 8. S-mid — supertree park (no buildings; placed below)
+
+  // 9. SE — Peranakan shophouses: two rows (cols 35..47, rows 25..31)
+  [36, 26, 3, 3, 'pera_pink'],
+  [40, 26, 3, 3, 'pera_blue'],
+  [44, 26, 3, 3, 'pera_mint'],
+  [36, 29, 3, 2, 'pera_blue'],
+  [40, 29, 3, 2, 'pera_mint'],
+  [44, 29, 3, 2, 'pera_pink'],
 ];
 for (const [ox, oy, w, h, style] of BUILDINGS) placeBuilding(ox, oy, w, h, style);
 
 const animatedSprites = [];
 
-// --- Park ---------------------------------------------------------------
+// --- Suntec inner plaza + static fountain centerpiece (NOT animated) ---
 
-for (let y = 13; y <= 21; y++) {
-  objs[18][y] = HEDGE;
-  objs[30][y] = HEDGE;
+for (let x = 4; x <= 11; x++) {
+  for (let y = 3; y <= 7; y++) {
+    if (objs[x][y] === -1) ground[x][y] = PLAZA;
+  }
 }
-for (let x = 18; x <= 30; x++) {
-  objs[x][13] = HEDGE;
-  objs[x][21] = HEDGE;
+objs[8][5] = SUNTEC_FOUNTAIN;
+
+// --- MBS — plaza promenade + full-width SkyPark (cols 17-31) -----------
+
+for (let x = 17; x <= 31; x++) {
+  for (let y = 13; y <= 21; y++) ground[x][y] = PLAZA;
 }
-for (const [x, y] of [
-  [24, 13],
-  [24, 21],
-]) {
-  ground[x][y] = DIRT_PATH;
-  objs[x][y] = -1;
+objs[17][13] = MBS_SKYPARK_LEFT;
+for (let x = 18; x <= 30; x++) objs[x][13] = MBS_SKYPARK_MID;
+objs[31][13] = MBS_SKYPARK_RIGHT;
+
+// --- Outdoor restaurant plaza (SW) -------------------------------------
+
+for (let x = 5; x <= 13; x++) {
+  for (let y = 25; y <= 31; y++) {
+    if (objs[x][y] === -1) ground[x][y] = PLAZA;
+  }
 }
-for (const y of [14, 15, 19, 20]) ground[24][y] = DIRT_PATH;
-for (let x = 22; x <= 26; x++) {
-  for (let y = 16; y <= 18; y++) ground[x][y] = PLAZA;
+const TABLES = [
+  [6, 26],
+  [9, 26],
+  [12, 26],
+  [6, 29],
+  [9, 29],
+  [12, 29],
+];
+const UMBRELLAS = [
+  [7, 27],
+  [10, 27],
+  [13, 27],
+  [7, 30],
+  [10, 30],
+  [13, 30],
+];
+for (const [x, y] of TABLES) {
+  if (inBounds(x, y) && objs[x][y] === -1) objs[x][y] = RESTAURANT_TABLE;
+}
+for (const [x, y] of UMBRELLAS) {
+  if (inBounds(x, y) && objs[x][y] === -1) objs[x][y] = RESTAURANT_UMBRELLA;
 }
 
-objs[24][17] = STATUE;
-for (const [x, y] of [
-  [20, 17],
-  [28, 17],
-]) {
-  objs[x][y] = FOUNTAIN_BASE;
-  animatedSprites.push({
-    x: x * tiledim,
-    y: y * tiledim,
-    w: tiledim,
-    h: tiledim,
-    layer: 1,
-    sheet: '__city_fountain__',
-    animation: 'bubble',
-  });
+// --- Supertree park (S-mid) — drives "Meet at Park" centroid -----------
+
+for (let x = 17; x <= 31; x++) {
+  for (let y = 25; y <= 31; y++) ground[x][y] = PLAZA;
 }
-for (const [x, y] of [
-  [18, 14],
-  [18, 20],
-  [30, 14],
-  [30, 20],
-  [22, 14],
-  [26, 14],
-  [22, 20],
-  [26, 20],
-]) {
-  ground[x][y] = FLOWERBED;
+for (let x = 17; x <= 31; x++) ground[x][28] = DIRT_PATH;
+for (let y = 25; y <= 31; y++) ground[24][y] = DIRT_PATH;
+const SUPERTREES = [
+  [19, 26],
+  [22, 26],
+  [26, 26],
+  [29, 26],
+  [18, 30],
+  [21, 30],
+  [27, 30],
+  [30, 30],
+];
+for (const [x, y] of SUPERTREES) {
+  if (inBounds(x, y) && objs[x][y] === -1) objs[x][y] = SUPERTREE;
 }
-for (let x = 26; x <= 28; x++) {
-  for (let y = 19; y <= 20; y++) {
-    ground[x][y] = POND;
-    objs[x][y] = POND;
-  }
-}
-for (const [tx, ty] of [
-  [19, 15],
-  [29, 15],
-  [19, 19],
-  [29, 19],
-  [21, 14],
-  [27, 20],
-]) {
-  if (inBounds(tx, ty) && objs[tx][ty] === -1 && ground[tx][ty] === GRASS) {
-    objs[tx][ty] = TREE;
-  }
-}
-for (const [bx, by] of [
-  [22, 17],
-  [26, 17],
-  [24, 16],
-  [24, 18],
-]) {
-  if (inBounds(bx, by) && objs[bx][by] === -1) {
-    if (ground[bx][by] === PLAZA || ground[bx][by] === DIRT_PATH) {
-      objs[bx][by] = BENCH;
-    }
-  }
-}
+objs[24][28] = FOUNTAIN_BASE;
+animatedSprites.push({
+  x: 24 * tiledim,
+  y: 28 * tiledim,
+  w: tiledim,
+  h: tiledim,
+  layer: 1,
+  sheet: '__city_fountain__',
+  animation: 'bubble',
+});
 
 // --- Decorative props ---------------------------------------------------
 
 // Plaza patches in some open green pockets.
-const PLAZA_CENTERS = [
-  [10, 5],
-  [40, 17],
-];
+const PLAZA_CENTERS = [];
 for (const [cx, cy] of PLAZA_CENTERS) {
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
@@ -311,52 +383,40 @@ for (const [cx, cy] of PLAZA_CENTERS) {
   }
 }
 
-// Trees scattered in green pockets between buildings.
+// Trees scattered in green pockets along edges and between blocks.
 const TREES = [
-  [0,0],
-  [13, 1],
-  [13, 4],
-  [13, 7],
-  [16, 1],
+  [0, 0],
+  [0, 4],
+  [0, 8],
+  [13, 8],
   [16, 4],
-  [16, 7],
-  [22, 8],
-  [30, 1],
-  [31, 4],
+  [16, 8],
+  [22, 9],
+  [32, 4],
+  [32, 8],
   [34, 1],
   [34, 4],
-  [34, 7],
-  [40, 7],
-  [44, 8],
-  [13, 13],
-  [16, 13],
-  [16, 16],
-  [22, 13],
-  [30, 13],
-  [34, 13],
-  [34, 17],
-  [40, 21],
-  [13, 25],
-  [16, 25],
-  [16, 29],
-  [22, 25],
-  [30, 25],
-  [34, 25],
-  [34, 29],
-  [44, 25],
-  [0, 1],
-  [0, 4],
-  [0, 7],
+  [34, 8],
+  [40, 8],
+  [47, 1],
+  [47, 8],
   [0, 13],
   [0, 17],
+  [0, 21],
+  [13, 21],
+  [34, 13],
+  [34, 17],
+  [34, 21],
+  [40, 21],
+  [47, 13],
+  [47, 21],
   [0, 25],
   [0, 29],
-  [47, 1],
-  [47, 4],
-  // [47, 13],
-  // [47, 17],
-  // [47, 25],
-  // [47, 29],
+  [34, 25],
+  [34, 29],
+  [40, 31],
+  [47, 25],
+  [47, 29],
 ];
 for (const [tx, ty] of TREES) {
   if (inBounds(tx, ty) && objs[tx][ty] === -1 && ground[tx][ty] === GRASS) {

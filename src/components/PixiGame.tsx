@@ -24,7 +24,7 @@ function nightAlpha(historicalTime: number, worldStartTime: number): number {
   const p = ((elapsed % CYCLE_MS) + CYCLE_MS) % CYCLE_MS;
   if (p < TRANSITION_MS) {
     // Dawn: fade out
-    return 0.3 * (1 - p / TRANSITION_MS);
+    return 0.2 * (1 - p / TRANSITION_MS);
   } else if (p < DAY_MS - TRANSITION_MS) {
     // Full day
     return 0;

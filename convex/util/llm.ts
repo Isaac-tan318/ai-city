@@ -41,6 +41,7 @@ export interface LLMConfig {
   embeddingModel: string;
   stopWords: string[];
   apiKey: string | undefined;
+  apiVersion?: string; // Azure OpenAI requires ?api-version=... on every request
 }
 
 export function getLLMConfig(): LLMConfig {
@@ -79,6 +80,7 @@ export function getLLMConfig(): LLMConfig {
     if (!chatModel) throw new Error('LLM_MODEL is required');
     const embeddingModel = process.env.LLM_EMBEDDING_MODEL;
     if (!embeddingModel) throw new Error('LLM_EMBEDDING_MODEL is required');
+    const apiVersion = process.env.LLM_API_VERSION;
     return {
       provider: 'custom',
       url,
@@ -86,6 +88,7 @@ export function getLLMConfig(): LLMConfig {
       embeddingModel,
       stopWords: [],
       apiKey,
+      apiVersion,
     };
   }
   // Assume Ollama
@@ -109,12 +112,19 @@ export function getLLMConfig(): LLMConfig {
   };
 }
 
-const AuthHeaders = (): Record<string, string> =>
-  getLLMConfig().apiKey
-    ? {
-        Authorization: 'Bearer ' + getLLMConfig().apiKey,
-      }
-    : {};
+// Azure OpenAI uses api-key header; all other providers use Authorization: Bearer
+const AuthHeaders = (): Record<string, string> => {
+  const config = getLLMConfig();
+  if (!config.apiKey) return {};
+  if (config.apiVersion) return { 'api-key': config.apiKey };
+  return { Authorization: 'Bearer ' + config.apiKey };
+};
+
+// Appends ?api-version=... when the config requires it (Azure OpenAI)
+function buildApiUrl(base: string, endpoint: string, apiVersion?: string): string {
+  const url = `${base.replace(/\/$/, '')}/${endpoint}`;
+  return apiVersion ? `${url}?api-version=${apiVersion}` : url;
+}
 
 // Overload for non-streaming
 export async function chatCompletion(
@@ -147,7 +157,7 @@ export async function chatCompletion(
     retries,
     ms,
   } = await retryWithBackoff(async () => {
-    const chatUrl = `${config.url.replace(/\/$/, '')}/chat/completions`;
+    const chatUrl = buildApiUrl(config.url, 'chat/completions', config.apiVersion);
     console.log('[DEBUG] Chat URL:', chatUrl, '| Model:', body.model);
     const result = await fetch(chatUrl, {
       method: 'POST',
@@ -219,7 +229,7 @@ export async function fetchEmbeddingBatch(texts: string[]) {
     retries,
     ms,
   } = await retryWithBackoff(async () => {
-    const embeddingUrl = `${config.url.replace(/\/$/, '')}/embeddings`;
+    const embeddingUrl = buildApiUrl(config.url, 'embeddings', config.apiVersion);
     console.log('[DEBUG] Embedding URL:', embeddingUrl, '| Model:', config.embeddingModel);
     const result = await fetch(embeddingUrl, {
       method: 'POST',

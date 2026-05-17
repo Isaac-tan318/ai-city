@@ -29,7 +29,7 @@ export default function Home() {
         <div className="font-body">
           <h1 className="text-center text-6xl font-bold font-display game-title">Help</h1>
           <p>
-            Welcome to AI town. AI town supports both anonymous <i>spectators</i> and logged in{' '}
+            Welcome to AI City. AI City supports both anonymous <i>spectators</i> and logged in{' '}
             <i>interactivity</i>.
           </p>
           <h2 className="text-4xl mt-4">Spectating</h2>
@@ -53,7 +53,7 @@ export default function Home() {
             in the messages panel.
           </p>
           <p className="mt-4">
-            AI town only supports {MAX_HUMAN_PLAYERS} humans at a time. If you're idle for five
+            AI City only supports {MAX_HUMAN_PLAYERS} humans at a time. If you're idle for five
             minutes, you'll be automatically removed from the simulation.
           </p>
         </div>
@@ -70,7 +70,7 @@ export default function Home() {
 
       <div className="w-full h-screen relative isolate overflow-hidden lg:px-8 lg:pb-4 lg:pt-2 shadow-2xl flex flex-col justify-start">
         <h1 className="mx-auto text-4xl p-1 sm:text-6xl lg:text-7xl font-bold font-display leading-none tracking-wide game-title w-full text-left sm:text-center sm:w-auto">
-          AI Town
+          AI City
         </h1>
 
         <Game />

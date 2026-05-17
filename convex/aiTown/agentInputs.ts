@@ -7,8 +7,9 @@ import { inputHandler } from './inputHandler';
 import { Point, point } from '../util/types';
 import { Descriptions } from '../../data/characters';
 import { AgentDescription } from './agentDescription';
-import { Agent } from './agent';
+import { Agent, scheduleStep } from './agent';
 import { WorldMap } from './worldMap';
+import { homeFor } from '../../data/cityLocations';
 
 const PARK_FOUNTAIN_SHEET = '__city_fountain__';
 
@@ -48,6 +49,33 @@ function getParkTarget(worldMap: WorldMap): Point {
 }
 
 export const agentInputs = {
+  finishPlanDay: inputHandler({
+    args: {
+      operationId: v.string(),
+      agentId,
+      schedule: v.array(scheduleStep),
+      dayNumber: v.number(),
+    },
+    handler: (game, now, args) => {
+      const agentId = parseGameId('agents', args.agentId);
+      const agent = game.world.agents.get(agentId);
+      if (!agent) {
+        throw new Error(`Couldn't find agent: ${agentId}`);
+      }
+      if (
+        !agent.inProgressOperation ||
+        agent.inProgressOperation.operationId !== args.operationId
+      ) {
+        console.debug(`Agent ${agentId} didn't have ${args.operationId} in progress`);
+        return null;
+      }
+      delete agent.inProgressOperation;
+      agent.schedule = args.schedule;
+      agent.scheduleGeneratedForDay = args.dayNumber;
+      agent.currentStepIndex = 0;
+      return null;
+    },
+  }),
   finishRememberConversation: inputHandler({
     args: {
       operationId: v.string(),
@@ -168,6 +196,8 @@ export const agentInputs = {
         description.identity,
       );
       const agentId = game.allocId('agents');
+      const homeLoc = homeFor(description.name);
+      const home = homeLoc ? { x: homeLoc.x, y: homeLoc.y } : undefined;
       game.world.agents.set(
         agentId,
         new Agent({
@@ -179,6 +209,7 @@ export const agentInputs = {
           toRemember: undefined,
           scenarioTarget: game.world.scenarioTarget,
           scenarioName: game.world.scenarioName,
+          home,
         }),
       );
       game.agentDescriptions.set(

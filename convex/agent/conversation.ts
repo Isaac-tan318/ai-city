@@ -7,6 +7,8 @@ import { api, internal } from '../_generated/api';
 import * as embeddingsCache from './embeddingsCache';
 import { GameId, conversationId, playerId } from '../aiTown/ids';
 import { NUM_MEMORIES_TO_SEARCH } from '../constants';
+import { computeGameTime } from '../aiTown/gameTime';
+import { CITY_LOCATIONS } from '../../data/cityLocations';
 
 const selfInternal = internal.agent.conversation;
 
@@ -17,15 +19,13 @@ export async function startConversationMessage(
   playerId: GameId<'players'>,
   otherPlayerId: GameId<'players'>,
 ): Promise<string> {
-  const { player, otherPlayer, agent, otherAgent, lastConversation } = await ctx.runQuery(
-    selfInternal.queryPromptData,
-    {
+  const { player, otherPlayer, agent, otherAgent, lastConversation, worldStartTime } =
+    await ctx.runQuery(selfInternal.queryPromptData, {
       worldId,
       playerId,
       otherPlayerId,
       conversationId,
-    },
-  );
+    });
   const embedding = await embeddingsCache.fetch(
     ctx,
     `${player.name} is talking to ${otherPlayer.name}`,
@@ -44,6 +44,7 @@ export async function startConversationMessage(
   const prompt = [
     `You are ${player.name}, and you just started a conversation with ${otherPlayer.name}.`,
   ];
+  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, agent));
   prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
   prompt.push(...previousConversationPrompt(otherPlayer, lastConversation));
   prompt.push(...relatedMemoriesPrompt(memories));
@@ -82,15 +83,13 @@ export async function continueConversationMessage(
   playerId: GameId<'players'>,
   otherPlayerId: GameId<'players'>,
 ): Promise<string> {
-  const { player, otherPlayer, conversation, agent, otherAgent } = await ctx.runQuery(
-    selfInternal.queryPromptData,
-    {
+  const { player, otherPlayer, conversation, agent, otherAgent, worldStartTime } =
+    await ctx.runQuery(selfInternal.queryPromptData, {
       worldId,
       playerId,
       otherPlayerId,
       conversationId,
-    },
-  );
+    });
   const now = Date.now();
   const started = new Date(conversation.created);
   const embedding = await embeddingsCache.fetch(
@@ -102,6 +101,7 @@ export async function continueConversationMessage(
     `You are ${player.name}, and you're currently in a conversation with ${otherPlayer.name}.`,
     `The conversation started at ${started.toLocaleString()}. It's now ${now.toLocaleString()}.`,
   ];
+  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, agent));
   prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
   prompt.push(...relatedMemoriesPrompt(memories));
   prompt.push(
@@ -140,19 +140,18 @@ export async function leaveConversationMessage(
   playerId: GameId<'players'>,
   otherPlayerId: GameId<'players'>,
 ): Promise<string> {
-  const { player, otherPlayer, conversation, agent, otherAgent } = await ctx.runQuery(
-    selfInternal.queryPromptData,
-    {
+  const { player, otherPlayer, conversation, agent, otherAgent, worldStartTime } =
+    await ctx.runQuery(selfInternal.queryPromptData, {
       worldId,
       playerId,
       otherPlayerId,
       conversationId,
-    },
-  );
+    });
   const prompt = [
     `You are ${player.name}, and you're currently in a conversation with ${otherPlayer.name}.`,
     `You've decided to leave the question and would like to politely tell them you're leaving the conversation.`,
   ];
+  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, agent));
   prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
   prompt.push(
     `Below is the current chat history between you and ${otherPlayer.name}.`,
@@ -211,6 +210,40 @@ function previousConversationPrompt(
         otherPlayer.name
       } it was ${prev.toLocaleString()}. It's now ${now.toLocaleString()}.`,
     );
+  }
+  return prompt;
+}
+
+function currentTimeAndPlacePrompt(
+  position: { x: number; y: number },
+  worldStartTime: number | undefined,
+  agent: { schedule?: any[]; currentStepIndex?: number } | null,
+): string[] {
+  const prompt: string[] = [];
+  if (worldStartTime !== undefined) {
+    const gt = computeGameTime(Date.now(), worldStartTime);
+    prompt.push(
+      `It is currently Day ${gt.dayNumber}, ${gt.timeStr} (${gt.isDay ? 'daytime' : 'nighttime'}) in Singapore.`,
+    );
+  }
+  // Find the nearest named location.
+  let nearest: { name: string; d: number } | null = null;
+  for (const loc of CITY_LOCATIONS) {
+    const dx = loc.x - position.x;
+    const dy = loc.y - position.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (!nearest || d < nearest.d) nearest = { name: loc.name, d };
+  }
+  if (nearest) {
+    if (nearest.d <= 3) prompt.push(`You are at ${nearest.name}.`);
+    else if (nearest.d <= 8) prompt.push(`You are on the street near ${nearest.name}.`);
+    else prompt.push(`You are somewhere in the city, away from major landmarks.`);
+  }
+  if (agent && agent.schedule && agent.currentStepIndex !== undefined) {
+    const step = agent.schedule[agent.currentStepIndex];
+    if (step && step.description) {
+      prompt.push(`Your current plan: ${step.description}.`);
+    }
   }
   return prompt;
 }
@@ -341,6 +374,7 @@ export const queryPromptData = internalQuery({
         ...otherAgent,
       },
       lastConversation,
+      worldStartTime: world.worldStartTime,
     };
   },
 });

@@ -76,3 +76,10 @@ export const ENGINE_ACTION_DURATION = 30000;
 export const MAX_PATHFINDS_PER_STEP = 16;
 
 export const DEFAULT_NAME = 'Me';
+
+// Tile distance at which an agent counts as "arrived" at a scheduled location.
+export const ARRIVAL_RADIUS = 1.5;
+
+// If an agent's current schedule step has been overdue for this many game-minutes
+// AND they still haven't reached the location, trigger a re-plan.
+export const SCHEDULE_DISRUPTION_MINUTES = 60;

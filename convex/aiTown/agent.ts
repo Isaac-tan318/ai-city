@@ -23,6 +23,18 @@ import { internal } from '../_generated/api';
 import { movePlayer, stopPlayer, pickParkWaypoint } from './movement';
 import { insertInput } from './insertInput';
 import { point, Point } from '../util/types';
+import { computeGameTime } from './gameTime';
+import { ARRIVAL_RADIUS, SCHEDULE_DISRUPTION_MINUTES } from '../constants';
+import { getLocationById, homeFor } from '../../data/cityLocations';
+
+export type ScheduleStep = {
+  startMinute: number;
+  locationId: string;
+  destination: Point;
+  activity: string;
+  emoji?: string;
+  description: string;
+};
 
 export class Agent {
   id: GameId<'agents'>;
@@ -38,9 +50,25 @@ export class Agent {
   scenarioTarget?: Point;
   scenarioName?: string;
   scenarioArrivalTime?: number;
+  home?: Point;
+  schedule?: ScheduleStep[];
+  scheduleGeneratedForDay?: number;
+  currentStepIndex?: number;
 
   constructor(serialized: SerializedAgent) {
-    const { id, lastConversation, lastInviteAttempt, inProgressOperation, scenarioTarget, scenarioName, scenarioArrivalTime } = serialized;
+    const {
+      id,
+      lastConversation,
+      lastInviteAttempt,
+      inProgressOperation,
+      scenarioTarget,
+      scenarioName,
+      scenarioArrivalTime,
+      home,
+      schedule,
+      scheduleGeneratedForDay,
+      currentStepIndex,
+    } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
     this.playerId = playerId;
@@ -54,6 +82,10 @@ export class Agent {
     this.scenarioTarget = scenarioTarget;
     this.scenarioName = scenarioName;
     this.scenarioArrivalTime = scenarioArrivalTime;
+    this.home = home;
+    this.schedule = schedule;
+    this.scheduleGeneratedForDay = scheduleGeneratedForDay;
+    this.currentStepIndex = currentStepIndex;
   }
 
   tick(game: Game, now: number) {
@@ -118,6 +150,11 @@ export class Agent {
       }
       console.log(`Timing out ${JSON.stringify(this.inProgressOperation)}`);
       delete this.inProgressOperation;
+    }
+    // Schedule + plan execution: give the agent a real daily plan and walk them
+    // through it. Conversation logic still runs below and can interrupt.
+    if (this.tickSchedule(game, now, player)) {
+      return;
     }
     const conversation = game.world.playerConversation(player);
     const member = conversation?.participants.get(player.id);
@@ -292,6 +329,102 @@ export class Agent {
     }
   }
 
+  // Returns true if the schedule handled this tick (caller should return).
+  tickSchedule(game: Game, now: number, player: import('./player').Player): boolean {
+    const gt = computeGameTime(now, game.world.worldStartTime);
+    const conversation = game.world.playerConversation(player);
+    const doingActivity = player.activity && player.activity.until > now;
+
+    // Decide if we need a new plan.
+    const noSchedule = !this.schedule || this.schedule.length === 0;
+    const dayChanged =
+      this.scheduleGeneratedForDay !== undefined && this.scheduleGeneratedForDay !== gt.dayNumber;
+    let disrupted = false;
+    if (this.schedule && this.currentStepIndex !== undefined && !noSchedule && !dayChanged) {
+      const step = this.schedule[this.currentStepIndex];
+      const nextStep = this.schedule[this.currentStepIndex + 1];
+      if (step) {
+        const stepEnd = nextStep ? nextStep.startMinute : 24 * 60;
+        const overdueMinutes = gt.minutesIntoDay - stepEnd;
+        const atDest = distance(player.position, step.destination) < ARRIVAL_RADIUS;
+        if (overdueMinutes > SCHEDULE_DISRUPTION_MINUTES && !atDest) {
+          disrupted = true;
+        }
+      }
+    }
+
+    const needsPlan = (noSchedule || dayChanged || disrupted) && !conversation && !doingActivity;
+    if (needsPlan) {
+      const playerName = player.name ?? 'someone';
+      const home = this.home ?? (homeFor(playerName) ?? getLocationById('hdb'))!;
+      const homePoint = this.home ?? { x: home.x, y: home.y };
+      const homeLoc = homeFor(playerName);
+      this.startOperation(game, now, 'agentPlanDay', {
+        worldId: game.worldId,
+        agentId: this.id,
+        playerName,
+        home: homePoint,
+        homeName: homeLoc?.name,
+        dayNumber: gt.dayNumber,
+        currentTimeStr: gt.timeStr,
+        currentMinutesIntoDay: gt.minutesIntoDay,
+        existingSchedule: disrupted ? this.schedule : undefined,
+      });
+      return true;
+    }
+
+    if (!this.schedule || this.currentStepIndex === undefined) return false;
+
+    // Advance past steps whose successor's start time has arrived.
+    while (
+      this.currentStepIndex < this.schedule.length - 1 &&
+      gt.minutesIntoDay >= this.schedule[this.currentStepIndex + 1].startMinute
+    ) {
+      this.currentStepIndex += 1;
+    }
+
+    const step = this.schedule[this.currentStepIndex];
+    if (!step) return false;
+
+    // It isn't time for the first step yet — let the rest of the tick run.
+    if (gt.minutesIntoDay < step.startMinute) return false;
+
+    // Don't yank the agent out of an active conversation. The schedule can wait.
+    if (conversation) return false;
+
+    const atDest = distance(player.position, step.destination) < ARRIVAL_RADIUS;
+    if (!atDest) {
+      // Walk to the scheduled location.
+      if (
+        !player.pathfinding ||
+        !pointsEqual(player.pathfinding.destination, step.destination)
+      ) {
+        try {
+          movePlayer(game, now, player, step.destination);
+        } catch (err) {
+          // Movement can throw if in a conversation; ignore and re-try next tick.
+          console.warn(`Schedule move failed for ${player.id}: ${(err as Error).message}`);
+        }
+      }
+      return true;
+    }
+
+    // At the destination — set the activity for the duration of this step.
+    if (!doingActivity) {
+      const nextStep = this.schedule[this.currentStepIndex + 1];
+      const stepEndMinutes = nextStep ? nextStep.startMinute : 24 * 60;
+      const minutesLeft = Math.max(1, stepEndMinutes - gt.minutesIntoDay);
+      // Game-minute → real-ms: each in-game minute lasts CYCLE_MS / (24*60).
+      const realMsPerGameMinute = (10 * 60 * 1000) / (24 * 60);
+      player.activity = {
+        description: step.activity,
+        emoji: step.emoji ?? '💭',
+        until: now + minutesLeft * realMsPerGameMinute,
+      };
+    }
+    return true;
+  }
+
   startOperation<Name extends keyof AgentOperations>(
     game: Game,
     now: number,
@@ -324,9 +457,22 @@ export class Agent {
       scenarioTarget: this.scenarioTarget,
       scenarioName: this.scenarioName,
       scenarioArrivalTime: this.scenarioArrivalTime,
+      home: this.home,
+      schedule: this.schedule,
+      scheduleGeneratedForDay: this.scheduleGeneratedForDay,
+      currentStepIndex: this.currentStepIndex,
     };
   }
 }
+
+export const scheduleStep = v.object({
+  startMinute: v.number(),
+  locationId: v.string(),
+  destination: point,
+  activity: v.string(),
+  emoji: v.optional(v.string()),
+  description: v.string(),
+});
 
 export const serializedAgent = {
   id: agentId,
@@ -344,6 +490,10 @@ export const serializedAgent = {
   scenarioTarget: v.optional(point),
   scenarioName: v.optional(v.string()),
   scenarioArrivalTime: v.optional(v.number()),
+  home: v.optional(point),
+  schedule: v.optional(v.array(scheduleStep)),
+  scheduleGeneratedForDay: v.optional(v.number()),
+  currentStepIndex: v.optional(v.number()),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 
@@ -360,6 +510,9 @@ export async function runAgentOperation(ctx: MutationCtx, operation: string, arg
       break;
     case 'agentDoSomething':
       reference = internal.aiTown.agentOperations.agentDoSomething;
+      break;
+    case 'agentPlanDay':
+      reference = internal.aiTown.agentOperations.agentPlanDay;
       break;
     default:
       throw new Error(`Unknown operation: ${operation}`);

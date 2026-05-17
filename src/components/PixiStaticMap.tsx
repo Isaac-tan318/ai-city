@@ -64,6 +64,10 @@ export const PixiStaticMap = PixiComponent('StaticMap', {
     const container = new PIXI.Container();
     const allLayers = [...map.bgTiles, ...map.objectTiles];
 
+    const FLIP_H = 0x80000000;
+    const FLIP_V = 0x40000000;
+    const FLIP_D = 0x20000000;
+
     // blit bg & object layers of map onto canvas
     for (let i = 0; i < screenxtiles * screenytiles; i++) {
       const x = i % screenxtiles;
@@ -73,12 +77,48 @@ export const PixiStaticMap = PixiComponent('StaticMap', {
 
       // Add all layers of backgrounds.
       for (const layer of allLayers) {
-        const tileIndex = layer[x][y];
+        const stored = layer[x][y];
         // Some layers may not have tiles at this location.
-        if (tileIndex === -1) continue;
+        if (stored === -1) continue;
+
+        const tileIndex = stored & 0x1FFFFFFF;
         const ctile = new PIXI.Sprite(tiles[tileIndex]);
-        ctile.x = xPx;
-        ctile.y = yPx;
+
+        const fh = (stored & FLIP_H) !== 0;
+        const fv = (stored & FLIP_V) !== 0;
+        const fd = (stored & FLIP_D) !== 0;
+
+        if (!fh && !fv && !fd) {
+          ctile.x = xPx;
+          ctile.y = yPx;
+        } else if (!fd) {
+          // Pure mirror — offset so scale pivot lands at tile corner
+          ctile.x = xPx + (fh ? map.tileDim : 0);
+          ctile.y = yPx + (fv ? map.tileDim : 0);
+          ctile.scale.x = fh ? -1 : 1;
+          ctile.scale.y = fv ? -1 : 1;
+        } else {
+          // Rotation (diagonal flag set) — rotate around tile center
+          ctile.anchor.set(0.5, 0.5);
+          ctile.x = xPx + map.tileDim / 2;
+          ctile.y = yPx + map.tileDim / 2;
+          if (fh && fv) {
+            // D+H+V = 270° CW
+            ctile.rotation = Math.PI / 2;
+            ctile.scale.y = -1;
+          } else if (fh) {
+            // D+H = 90° CW
+            ctile.rotation = Math.PI / 2;
+          } else if (fv) {
+            // D+V = 90° CCW
+            ctile.rotation = -Math.PI / 2;
+          } else {
+            // D only = anti-diagonal transpose
+            ctile.rotation = Math.PI / 2;
+            ctile.scale.x = -1;
+          }
+        }
+
         container.addChild(ctile);
       }
     }

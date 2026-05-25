@@ -54,6 +54,10 @@ export class Agent {
   schedule?: ScheduleStep[];
   scheduleGeneratedForDay?: number;
   currentStepIndex?: number;
+  // Hard cooldown to prevent any path through tickSchedule from re-firing
+  // `agentPlanDay` more than once per ~60s real time per agent. Protects
+  // against ACTION_TIMEOUT re-fires when the LLM is slow.
+  lastPlanAttempt?: number;
 
   constructor(serialized: SerializedAgent) {
     const {
@@ -68,6 +72,7 @@ export class Agent {
       schedule,
       scheduleGeneratedForDay,
       currentStepIndex,
+      lastPlanAttempt,
     } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
@@ -86,6 +91,7 @@ export class Agent {
     this.schedule = schedule;
     this.scheduleGeneratedForDay = scheduleGeneratedForDay;
     this.currentStepIndex = currentStepIndex;
+    this.lastPlanAttempt = lastPlanAttempt;
   }
 
   tick(game: Game, now: number) {
@@ -355,10 +361,30 @@ export class Agent {
 
     const needsPlan = (noSchedule || dayChanged || disrupted) && !conversation && !doingActivity;
     if (needsPlan) {
+      // Hard cooldown: never re-fire agentPlanDay more than once per 5 minutes
+      // real time per agent. Protects against ACTION_TIMEOUT re-fires and any
+      // unforeseen tick-loop calling startOperation repeatedly.
+      const PLAN_COOLDOWN_MS = 5 * 60 * 1000;
+      if (this.lastPlanAttempt && now - this.lastPlanAttempt < PLAN_COOLDOWN_MS) {
+        return false;
+      }
+      // Stagger: deterministic per-agent offset so 5 agents don't all hit the
+      // LLM in the same engine step at bootstrap / day rollover. Spread over
+      // 2 minutes real time, keyed by agent id.
+      const STAGGER_WINDOW_MS = 2 * 60 * 1000;
+      const idHash = [...this.id].reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 0);
+      const offset = Math.abs(idHash) % STAGGER_WINDOW_MS;
+      // Anchor offset to the start of the current game-day so agents stagger
+      // each day, not just at world boot.
+      const dayStart = (game.world.worldStartTime ?? now) + (gt.dayNumber - 1) * (10 * 60 * 1000);
+      if (now < dayStart + offset) {
+        return false;
+      }
       const playerName = player.name ?? 'someone';
       const home = this.home ?? (homeFor(playerName) ?? getLocationById('hdb'))!;
       const homePoint = this.home ?? { x: home.x, y: home.y };
       const homeLoc = homeFor(playerName);
+      this.lastPlanAttempt = now;
       this.startOperation(game, now, 'agentPlanDay', {
         worldId: game.worldId,
         agentId: this.id,
@@ -461,6 +487,7 @@ export class Agent {
       schedule: this.schedule,
       scheduleGeneratedForDay: this.scheduleGeneratedForDay,
       currentStepIndex: this.currentStepIndex,
+      lastPlanAttempt: this.lastPlanAttempt,
     };
   }
 }
@@ -494,6 +521,7 @@ export const serializedAgent = {
   schedule: v.optional(v.array(scheduleStep)),
   scheduleGeneratedForDay: v.optional(v.number()),
   currentStepIndex: v.optional(v.number()),
+  lastPlanAttempt: v.optional(v.number()),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 

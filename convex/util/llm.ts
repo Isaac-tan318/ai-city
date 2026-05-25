@@ -4,7 +4,7 @@ const OPENAI_EMBEDDING_DIMENSION = 1536;
 const TOGETHER_EMBEDDING_DIMENSION = 768; //gemini
 const OLLAMA_EMBEDDING_DIMENSION = 1024;
 
-export const EMBEDDING_DIMENSION: number = 1536; 
+export const EMBEDDING_DIMENSION: number = 768;
 
 export function detectMismatchedLLMProvider() {
   switch (EMBEDDING_DIMENSION) {

@@ -11,6 +11,7 @@ import { toastOnError } from '../toasts';
 import { useSendInput } from '../hooks/sendInput';
 import { GameId } from '../../convex/aiTown/ids';
 import { ServerGame } from '../hooks/serverGame';
+import { computeGameTime } from '../../convex/aiTown/gameTime';
 
 const scenarioOptions = [
   {
@@ -86,6 +87,24 @@ export default function PlayerDetails({
   );
 
   const playerDescription = playerId && game.playerDescriptions.get(playerId);
+  const agentForPlayer = useMemo(() => {
+    if (!playerId) return undefined;
+    for (const a of game.world.agents.values()) {
+      if (a.playerId === playerId) return a;
+    }
+    return undefined;
+  }, [game, playerId]);
+  const agentDescription = agentForPlayer
+    ? game.agentDescriptions.get(agentForPlayer.id)
+    : undefined;
+  const gameNow = computeGameTime(Date.now(), game.world.worldStartTime);
+  const formatScheduleTime = (mins: number) => {
+    const h24 = Math.floor(mins / 60) % 24;
+    const m = mins % 60;
+    const h12 = h24 % 12 || 12;
+    const ampm = h24 < 12 ? 'AM' : 'PM';
+    return `${h12}:${m.toString().padStart(2, '0')} ${ampm}`;
+  };
 
   const startConversation = useSendInput(engineId, 'startConversation');
   const acceptInvite = useSendInput(engineId, 'acceptInvite');
@@ -469,6 +488,51 @@ export default function PlayerDetails({
           )}
         </p>
       </div>
+      {!isMe && agentDescription?.plan && (
+        <div className="box flex-grow mb-4">
+          <h2 className="bg-brown-700 text-base sm:text-lg text-center px-2 py-1">
+            Long-term plan
+          </h2>
+          <p className="bg-brown-700 text-sm leading-snug px-3 pb-3 pt-1 italic">
+            {agentDescription.plan}
+          </p>
+        </div>
+      )}
+      {!isMe && agentForPlayer?.schedule && agentForPlayer.schedule.length > 0 && (
+        <div className="box flex-grow mb-4">
+          <h2 className="bg-brown-700 text-base sm:text-lg text-center px-2 py-1">
+            Today's schedule · Day {gameNow.dayNumber}
+          </h2>
+          <ul className="bg-brown-700 text-sm leading-snug px-3 pb-3 pt-2 flex flex-col gap-1">
+            {agentForPlayer.schedule.map((step, idx) => {
+              const next = agentForPlayer.schedule![idx + 1];
+              const isCurrent =
+                gameNow.minutesIntoDay >= step.startMinute &&
+                (!next || gameNow.minutesIntoDay < next.startMinute);
+              const isPast = next ? gameNow.minutesIntoDay >= next.startMinute : false;
+              return (
+                <li
+                  key={idx}
+                  className={
+                    'flex items-start gap-2 ' +
+                    (isCurrent
+                      ? 'text-amber-200 font-semibold'
+                      : isPast
+                        ? 'text-white/50 line-through'
+                        : 'text-white/90')
+                  }
+                >
+                  <span className="font-mono text-xs shrink-0 w-16">
+                    {formatScheduleTime(step.startMinute)}
+                  </span>
+                  <span className="shrink-0">{step.emoji ?? '·'}</span>
+                  <span className="flex-1">{step.description || step.activity}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
       {!isMe && playerConversation && playerStatus?.kind === 'participating' && (
         <Messages
           worldId={worldId}

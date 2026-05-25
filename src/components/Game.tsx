@@ -14,6 +14,8 @@ import { useServerGame } from '../hooks/serverGame.ts';
 import { GameClock } from './GameClock.tsx';
 import { TimeControls } from './TimeControls.tsx';
 import { ChatHistoryViewer } from './ChatHistoryViewer.tsx';
+import { MiniMap } from './MiniMap.tsx';
+import type { Viewport } from 'pixi-viewport';
 
 export const SHOW_DEBUG_UI = !!import.meta.env.VITE_SHOW_DEBUG_UI;
 
@@ -39,6 +41,7 @@ export default function Game() {
   const { historicalTime, timeManager } = useHistoricalTime(worldState?.engine);
 
   const scrollViewRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<Viewport | undefined>();
 
   if (!worldId || !engineId || !game) {
     return null;
@@ -63,6 +66,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
                     height={height}
                     historicalTime={historicalTime}
                     setSelectedElement={setSelectedElement}
+                    viewportRef={viewportRef}
                   />
                 </ConvexProvider>
               </Stage>
@@ -100,6 +104,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
       {showChatHistory && (
         <ChatHistoryViewer worldId={worldId} onClose={() => setShowChatHistory(false)} />
       )}
+      <MiniMap game={game} viewportRef={viewportRef} />
     </>
   );
 }

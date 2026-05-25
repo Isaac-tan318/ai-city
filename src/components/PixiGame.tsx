@@ -17,23 +17,35 @@ import { ServerGame } from '../hooks/serverGame.ts';
 
 const CYCLE_MS = 10 * 60 * 1000;
 const DAY_MS = 5 * 60 * 1000;
-const TRANSITION_MS = 30_000;
+
+// One game-hour in real-world ms (CYCLE_MS represents 24 game-hours).
+const GAME_HOUR_MS = CYCLE_MS / 24;
+
+// p=0 → 6 AM, p=DAY_MS → 6 PM, p=CYCLE_MS → 6 AM next day.
+// Dusk starts at 9 PM (3 hours into the night half) and lasts 1 game-hour.
+// Dawn starts 1 game-hour before the cycle resets (5 AM) and finishes at 6 AM.
+const DUSK_START_MS = DAY_MS + 3 * GAME_HOUR_MS;   // 9 PM
+const DUSK_END_MS   = DAY_MS + 4 * GAME_HOUR_MS;   // 10 PM  (fully dark)
+const DAWN_START_MS = CYCLE_MS - 1 * GAME_HOUR_MS; // 5 AM   (starts brightening)
+// Dawn ends at CYCLE_MS (= 6 AM, p wraps to 0).
 
 function nightAlpha(historicalTime: number, worldStartTime: number): number {
   const elapsed = historicalTime - worldStartTime;
   const p = ((elapsed % CYCLE_MS) + CYCLE_MS) % CYCLE_MS;
-  if (p < TRANSITION_MS) {
-    // Dawn: fade out
-    return 0.2 * (1 - p / TRANSITION_MS);
-  } else if (p < DAY_MS - TRANSITION_MS) {
-    // Full day
+
+  if (p < DUSK_START_MS) {
+    // 6 AM → 9 PM: full daylight
     return 0;
-  } else if (p < DAY_MS) {
-    // Dusk: fade in
-    return 0.3 * ((p - (DAY_MS - TRANSITION_MS)) / TRANSITION_MS);
+  } else if (p < DUSK_END_MS) {
+    // 9 PM → 10 PM: dusk — ramp up to full night
+    return 0.3 * ((p - DUSK_START_MS) / (DUSK_END_MS - DUSK_START_MS));
+  } else if (p < DAWN_START_MS) {
+    // 10 PM → 5 AM: full night
+    return 0.3;
+  } else {
+    // 5 AM → 6 AM: dawn — fade back to day
+    return 0.3 * (1 - (p - DAWN_START_MS) / (CYCLE_MS - DAWN_START_MS));
   }
-  // Night
-  return 0.3;
 }
 
 export const PixiGame = (props: {

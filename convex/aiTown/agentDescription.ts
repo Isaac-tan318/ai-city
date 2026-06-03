@@ -20,5 +20,8 @@ export class AgentDescription {
 export const serializedAgentDescription = {
   agentId,
   identity: v.string(),
+  // Kept optional for backwards-compatibility with existing documents written
+  // before long-term plans were removed. Not read anywhere in the codebase.
+  plan: v.optional(v.string()),
 };
 export type SerializedAgentDescription = ObjectType<typeof serializedAgentDescription>;

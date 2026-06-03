@@ -110,6 +110,7 @@ export const conversationGraph = query({
       .withIndex('worldId', (q) => q.eq('worldId', args.worldId))
       .collect();
     const nameMap = new Map(playerDescs.map((p) => [p.playerId, p.name]));
+    const charMap = new Map(playerDescs.map((p) => [p.playerId, p.character]));
 
     // `participatedTogether` stores a directed edge for each ordered pair, so we
     // canonicalize to an unordered pair and count distinct conversations.
@@ -143,6 +144,7 @@ export const conversationGraph = query({
     const nodes = [...nodeIds].map((id) => ({
       id,
       name: nameMap.get(id) ?? id,
+      character: charMap.get(id) ?? null,
       conversations: links
         .filter((l) => l.source === id || l.target === id)
         .reduce((sum, l) => sum + l.count, 0),

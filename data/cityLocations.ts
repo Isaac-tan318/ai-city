@@ -88,21 +88,21 @@ export const CITY_LOCATIONS: CityLocation[] = [
 // estate or above one of the Peranakan shophouses; each gets a distinct
 // passable tile next to their building so they spawn in different "units".
 export const CHARACTER_HOMES: Record<string, { locationId: string; x?: number; y?: number }> = {
-  Lucky: { locationId: 'shophouses', x: 60, y: 42 }, // back room above his cafe
-  Pete: { locationId: 'shophouses', x: 64, y: 37 }, // upstairs unit two doors down
-  Bob: { locationId: 'hdb', x: 56, y: 9 }, // HDB block, ground floor
-  Stella: { locationId: 'hdb', x: 65, y: 9 }, // HDB block, middle unit
-  Alice: { locationId: 'hdb', x: 61, y: 17 }, // HDB block, far unit
+  Cedric: { locationId: 'shophouses', x: 60, y: 42 }, // back room above his cafe
+  Xavier: { locationId: 'shophouses', x: 64, y: 37 }, // upstairs unit two doors down
+  James: { locationId: 'hdb', x: 56, y: 9 }, // HDB block, ground floor
+  Sarah: { locationId: 'hdb', x: 65, y: 9 }, // HDB block, middle unit
+  Isabel: { locationId: 'hdb', x: 61, y: 17 }, // HDB block, far unit
 };
 
 // Per-character workplace. On weekdays agents spend their working hours here.
 // `activity` is a short in-character description of what they do at work.
 export const CHARACTER_WORKPLACES: Record<string, { locationId: string; activity: string }> = {
-  Lucky: { locationId: 'shophouses', activity: 'working the espresso bar at his cafe' },
-  Bob: { locationId: 'mbs', activity: 'waiting at the taxi stand for fares' },
-  Stella: { locationId: 'restaurant', activity: 'working the lunch crowd for marks' },
-  Alice: { locationId: 'astar', activity: 'running experiments in the lab' },
-  Pete: { locationId: 'university', activity: 'preaching to students on campus' },
+  Cedric: { locationId: 'shophouses', activity: 'working the espresso bar at his cafe' },
+  James: { locationId: 'mbs', activity: 'waiting at the taxi stand for fares' },
+  Sarah: { locationId: 'restaurant', activity: 'cooking and serving at her hawker stall' },
+  Isabel: { locationId: 'astar', activity: 'running experiments in the lab' },
+  Xavier: { locationId: 'university', activity: 'cramming on coding projects on campus' },
 };
 
 export function getLocationById(id: string): CityLocation | undefined {

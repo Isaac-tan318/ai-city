@@ -76,30 +76,30 @@ export const ACTIVITIES: Activity[] = [
 // Per-character activities so free-roam behaviour reflects who the agent is,
 // rather than everyone reading/daydreaming/gardening at random.
 export const CHARACTER_ACTIVITIES: Record<string, Activity[]> = {
-  Lucky: [
+  Cedric: [
     { description: 'wiping down the counter', emoji: '☕', duration: 60_000 },
     { description: 'chatting up a regular', emoji: '💬', duration: 60_000 },
     { description: 'humming a tune', emoji: '🎶', duration: 60_000 },
   ],
-  Bob: [
+  James: [
     { description: 'waiting for a fare', emoji: '🚗', duration: 60_000 },
-    { description: 'checking the app', emoji: '📱', duration: 60_000 },
-    { description: 'grumbling to himself', emoji: '😤', duration: 60_000 },
+    { description: 'checking the Grab app', emoji: '📱', duration: 60_000 },
+    { description: 'cracking a joke with a passenger', emoji: '😄', duration: 60_000 },
   ],
-  Stella: [
-    { description: 'eyeing an easy mark', emoji: '👀', duration: 60_000 },
-    { description: 'counting her takings', emoji: '💰', duration: 60_000 },
-    { description: 'rehearsing a story', emoji: '🃏', duration: 60_000 },
+  Sarah: [
+    { description: 'frying up an order', emoji: '🍳', duration: 60_000 },
+    { description: 'wiping down the tables', emoji: '🧽', duration: 60_000 },
+    { description: 'sneaking in an extra egg', emoji: '🥚', duration: 60_000 },
   ],
-  Alice: [
+  Isabel: [
     { description: 'scribbling equations', emoji: '📝', duration: 60_000 },
     { description: 'reading a paper', emoji: '📄', duration: 60_000 },
     { description: 'lost in thought', emoji: '🧠', duration: 60_000 },
   ],
-  Pete: [
-    { description: 'preaching on the corner', emoji: '📢', duration: 60_000 },
-    { description: 'reading scripture', emoji: '📖', duration: 60_000 },
-    { description: 'praying quietly', emoji: '🙏', duration: 60_000 },
+  Xavier: [
+    { description: "debugging a friend's code", emoji: '💻', duration: 60_000 },
+    { description: 'sipping iced Milo', emoji: '🥤', duration: 60_000 },
+    { description: 'rushing a deadline', emoji: '😩', duration: 60_000 },
   ],
 };
 

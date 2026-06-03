@@ -385,15 +385,13 @@ export class Agent {
     }
 
     const conversationRefresh = !!this.scheduleNeedsRefresh;
-    const needsPlan = (noSchedule || dayChanged || disrupted || conversationRefresh) && !conversation && !doingActivity;
-    if (needsPlan) {
+    const wantsPlan = (noSchedule || dayChanged || disrupted || conversationRefresh) && !conversation && !doingActivity;
+    if (wantsPlan) {
       // Hard cooldown: never re-fire agentPlanDay more than once per 5 minutes
       // real time per agent. Protects against ACTION_TIMEOUT re-fires and any
       // unforeseen tick-loop calling startOperation repeatedly.
       const PLAN_COOLDOWN_MS = 5 * 60 * 1000;
-      if (this.lastPlanAttempt && now - this.lastPlanAttempt < PLAN_COOLDOWN_MS) {
-        return false;
-      }
+      const onCooldown = !!this.lastPlanAttempt && now - this.lastPlanAttempt < PLAN_COOLDOWN_MS;
       // Stagger: deterministic per-agent offset so 5 agents don't all hit the
       // LLM in the same engine step at bootstrap / day rollover. Spread over
       // 2 minutes real time, keyed by agent id.
@@ -403,28 +401,37 @@ export class Agent {
       // Anchor offset to the start of the current game-day so agents stagger
       // each day, not just at world boot.
       const dayStart = (game.world.worldStartTime ?? now) + (gt.dayNumber - 1) * (10 * 60 * 1000);
-      if (now < dayStart + offset) {
-        return false;
+      const beforeStagger = now < dayStart + offset;
+      // Only fire a (re)plan when we're not throttled. CRUCIAL: when throttled we
+      // deliberately DO NOT `return false` here. Returning false hands control
+      // back to tick(), which then drops the agent into the free-roam wander
+      // branch — random destination + random activity. Because PLAN_COOLDOWN_MS
+      // is 5 real minutes (~12 in-game hours) and `scheduleNeedsRefresh` is set
+      // after every conversation, that made agents abandon their schedule and
+      // stand around at random tiles for minutes after each chat. Instead, fall
+      // through and keep executing the existing schedule (walk to current step).
+      if (!onCooldown && !beforeStagger) {
+        const playerName = player.name ?? 'someone';
+        const home = this.home ?? (homeFor(playerName) ?? getLocationById('hdb'))!;
+        const homePoint = this.home ?? { x: home.x, y: home.y };
+        const homeLoc = homeFor(playerName);
+        this.lastPlanAttempt = now;
+        delete this.scheduleNeedsRefresh;
+        this.startOperation(game, now, 'agentPlanDay', {
+          worldId: game.worldId,
+          agentId: this.id,
+          playerId: this.playerId,
+          playerName,
+          home: homePoint,
+          homeName: homeLoc?.name,
+          dayNumber: gt.dayNumber,
+          currentTimeStr: gt.timeStr,
+          currentMinutesIntoDay: gt.minutesIntoDay,
+          existingSchedule: (disrupted || conversationRefresh) ? this.schedule : undefined,
+        });
+        return true;
       }
-      const playerName = player.name ?? 'someone';
-      const home = this.home ?? (homeFor(playerName) ?? getLocationById('hdb'))!;
-      const homePoint = this.home ?? { x: home.x, y: home.y };
-      const homeLoc = homeFor(playerName);
-      this.lastPlanAttempt = now;
-      delete this.scheduleNeedsRefresh;
-      this.startOperation(game, now, 'agentPlanDay', {
-        worldId: game.worldId,
-        agentId: this.id,
-        playerId: this.playerId,
-        playerName,
-        home: homePoint,
-        homeName: homeLoc?.name,
-        dayNumber: gt.dayNumber,
-        currentTimeStr: gt.timeStr,
-        currentMinutesIntoDay: gt.minutesIntoDay,
-        existingSchedule: (disrupted || conversationRefresh) ? this.schedule : undefined,
-      });
-      return true;
+      // Throttled: fall through to execute the existing schedule below.
     }
 
     if (!this.schedule || this.currentStepIndex === undefined) return false;

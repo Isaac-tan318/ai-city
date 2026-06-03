@@ -222,7 +222,6 @@ export const agentInputs = {
         new AgentDescription({
           agentId: agentId,
           identity: description.identity,
-          plan: description.plan,
         }),
       );
       if (game.world.scenarioTarget) {

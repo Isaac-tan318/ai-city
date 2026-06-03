@@ -51,9 +51,12 @@ export async function startConversationMessage(
   prompt.push(...relatedMemoriesPrompt(memories));
   if (memoryWithOtherPlayer) {
     prompt.push(
-      `Be sure to include some detail or question about a previous conversation in your greeting.`,
+      `You may briefly reference your last conversation in one short clause, but keep it light.`,
     );
   }
+  prompt.push(
+    `Keep your greeting to one or two short sentences, like real spoken dialogue — under 200 characters. Don't monologue or give a speech.`,
+  );
   const lastPrompt = `${player.name} to ${otherPlayer.name}:`;
   prompt.push(lastPrompt);
 
@@ -64,7 +67,7 @@ export async function startConversationMessage(
         content: prompt.join('\n'),
       },
     ],
-    max_tokens: 300,
+    max_tokens: 120,
     stop: stopWords(otherPlayer.name, player.name),
   });
   return trimContentPrefx(content, lastPrompt);
@@ -185,13 +188,12 @@ export async function leaveConversationMessage(
 
 function agentPrompts(
   otherPlayer: { name: string },
-  agent: { identity: string; plan: string; scenarioInstruction?: string } | null,
-  otherAgent: { identity: string; plan: string } | null,
+  agent: { identity: string; scenarioInstruction?: string } | null,
+  otherAgent: { identity: string } | null,
 ): string[] {
   const prompt = [];
   if (agent) {
     prompt.push(`About you: ${agent.identity}`);
-    prompt.push(`Your goals for the conversation: ${agent.plan}`);
   }
   if (otherAgent) {
     prompt.push(`About ${otherPlayer.name}: ${otherAgent.identity}`);
@@ -376,10 +378,9 @@ export const queryPromptData = internalQuery({
       player: { name: playerDescription.name, ...player },
       otherPlayer: { name: otherPlayerDescription.name, ...otherPlayer },
       conversation,
-      agent: { identity: agentDescription.identity, plan: agentDescription.plan, ...agent },
+      agent: { identity: agentDescription.identity, ...agent },
       otherAgent: otherAgent && {
         identity: otherAgentDescription!.identity,
-        plan: otherAgentDescription!.plan,
         ...otherAgent,
       },
       lastConversation,

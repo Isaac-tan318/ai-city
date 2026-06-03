@@ -542,16 +542,6 @@ export default function PlayerDetails({
           )}
         </p>
       </div>
-      {!isMe && agentDescription?.plan && (
-        <div className="box flex-grow mb-4">
-          <h2 className="bg-brown-700 text-base sm:text-lg text-center px-2 py-1">
-            Long-term plan
-          </h2>
-          <p className="bg-brown-700 text-sm leading-snug px-3 pb-3 pt-1 italic">
-            {agentDescription.plan}
-          </p>
-        </div>
-      )}
       {!isMe && agentForPlayer?.schedule && agentForPlayer.schedule.length > 0 && (
         <div className="box flex-grow mb-4">
           <h2 className="bg-brown-700 text-base sm:text-lg text-center px-2 py-1">

@@ -44,7 +44,10 @@ export async function rememberConversation(
       role: 'user',
       content: `You are ${player.name}, and you just finished a conversation with ${otherPlayer.name}. I would
       like you to summarize the conversation from ${player.name}'s perspective, using first-person pronouns like
-      "I," and add if you liked or disliked this interaction.`,
+      "I," and add if you liked or disliked this interaction. Then, on a final line beginning with
+      "Commitments:", state any concrete plans you agreed to (who, what, where, and when) — for example
+      "Commitments: meet ${otherPlayer.name} at the hawker centre at 3pm". If you made no concrete plans, write
+      "Commitments: none".`,
     },
   ];
   const authors = new Set<GameId<'players'>>();

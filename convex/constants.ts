@@ -64,11 +64,48 @@ export const DELETE_BATCH_SIZE = 64;
 
 export const HUMAN_IDLE_TOO_LONG = 5 * 60 * 1000;
 
-export const ACTIVITIES = [
+export type Activity = { description: string; emoji: string; duration: number };
+
+// Generic fallback used for humans or any character without a bespoke list.
+export const ACTIVITIES: Activity[] = [
   { description: 'reading a book', emoji: '📖', duration: 60_000 },
   { description: 'daydreaming', emoji: '🤔', duration: 60_000 },
-  { description: 'gardening', emoji: '🥕', duration: 60_000 },
+  { description: 'people-watching', emoji: '👀', duration: 60_000 },
 ];
+
+// Per-character activities so free-roam behaviour reflects who the agent is,
+// rather than everyone reading/daydreaming/gardening at random.
+export const CHARACTER_ACTIVITIES: Record<string, Activity[]> = {
+  Lucky: [
+    { description: 'wiping down the counter', emoji: '☕', duration: 60_000 },
+    { description: 'chatting up a regular', emoji: '💬', duration: 60_000 },
+    { description: 'humming a tune', emoji: '🎶', duration: 60_000 },
+  ],
+  Bob: [
+    { description: 'waiting for a fare', emoji: '🚗', duration: 60_000 },
+    { description: 'checking the app', emoji: '📱', duration: 60_000 },
+    { description: 'grumbling to himself', emoji: '😤', duration: 60_000 },
+  ],
+  Stella: [
+    { description: 'eyeing an easy mark', emoji: '👀', duration: 60_000 },
+    { description: 'counting her takings', emoji: '💰', duration: 60_000 },
+    { description: 'rehearsing a story', emoji: '🃏', duration: 60_000 },
+  ],
+  Alice: [
+    { description: 'scribbling equations', emoji: '📝', duration: 60_000 },
+    { description: 'reading a paper', emoji: '📄', duration: 60_000 },
+    { description: 'lost in thought', emoji: '🧠', duration: 60_000 },
+  ],
+  Pete: [
+    { description: 'preaching on the corner', emoji: '📢', duration: 60_000 },
+    { description: 'reading scripture', emoji: '📖', duration: 60_000 },
+    { description: 'praying quietly', emoji: '🙏', duration: 60_000 },
+  ],
+};
+
+export function activitiesForName(name?: string): Activity[] {
+  return (name && CHARACTER_ACTIVITIES[name]) || ACTIVITIES;
+}
 
 export const ENGINE_ACTION_DURATION = 30000;
 

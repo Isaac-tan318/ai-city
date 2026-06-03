@@ -1,5 +1,5 @@
 import { useQuery, useConvex } from 'convex/react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Id } from '../../convex/_generated/dataModel';
 import { api } from '../../convex/_generated/api';
 import closeImg from '../../assets/close.svg';
@@ -54,14 +54,45 @@ export function ChatHistoryViewer({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [exporting, setExporting] = useState(false);
+  const [selectedPlayerIds, setSelectedPlayerIds] = useState<string[]>([]);
   const convex = useConvex();
 
   const conversations = useQuery(api.messages.listAllConversations, { worldId });
 
-  const filtered = conversations?.filter(
-    (c) =>
-      !search || c.participantNames.some((n) => n.toLowerCase().includes(search.toLowerCase())),
-  );
+  // Derive every unique player that appears in any conversation.
+  const allPlayers = useMemo(() => {
+    if (!conversations) return [];
+    const map = new Map<string, { id: string; name: string; character: string | null }>();
+    for (const conv of conversations) {
+      conv.participants.forEach((id, i) => {
+        if (!map.has(id)) {
+          map.set(id, {
+            id,
+            name: conv.participantNames[i] ?? id,
+            character: conv.participantCharacters[i] ?? null,
+          });
+        }
+      });
+    }
+    return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [conversations]);
+
+  const togglePlayer = (id: string) =>
+    setSelectedPlayerIds((prev) => {
+      if (prev.includes(id)) return prev.filter((p) => p !== id); // deselect
+      if (prev.length < 2) return [...prev, id];                  // add (slot available)
+      return [prev[1], id];                                        // drop oldest, add new
+    });
+
+  const filtered = conversations?.filter((c) => {
+    if (search && !c.participantNames.some((n) => n.toLowerCase().includes(search.toLowerCase())))
+      return false;
+    // 1 selected → conversations that include that character
+    // 2 selected → conversations where BOTH participated together
+    if (selectedPlayerIds.length > 0 && !selectedPlayerIds.every((id) => c.participants.includes(id)))
+      return false;
+    return true;
+  });
 
   const selected = filtered?.find((c) => c.id === selectedId);
 
@@ -80,6 +111,44 @@ export function ChatHistoryViewer({
       const data = await convex.query(api.messages.exportAllConversations, { worldId });
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       downloadBlob(blob, `chat-history-${new Date().toISOString().slice(0, 10)}.json`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleExportMarkdown = async () => {
+    setExporting(true);
+    try {
+      const data = await convex.query(api.messages.exportAllConversations, { worldId });
+      const date = new Date().toLocaleDateString(undefined, {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      });
+      const sections: string[] = [
+        `# AI Town — Chat History`,
+        `*Exported: ${date}*`,
+        `*${data.length} conversation${data.length !== 1 ? 's' : ''}*`,
+      ];
+      for (const conv of data) {
+        const names = conv.participants.map((p) => p.name).join(' & ');
+        const started = new Date(conv.created).toLocaleString();
+        const ended = new Date(conv.ended).toLocaleString();
+        sections.push(`\n---\n`);
+        sections.push(`## ${names}`);
+        sections.push(`*${started} → ${ended} · ${conv.numMessages} message${conv.numMessages !== 1 ? 's' : ''}*\n`);
+        for (const msg of conv.messages) {
+          const time = new Date(msg.timestamp).toLocaleTimeString(undefined, {
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+          sections.push(`**[${time}] ${msg.author}:**`);
+          sections.push(`${msg.text}\n`);
+        }
+      }
+      const md = sections.join('\n');
+      const blob = new Blob([md], { type: 'text/markdown' });
+      downloadBlob(blob, `chat-history-${new Date().toISOString().slice(0, 10)}.md`);
     } finally {
       setExporting(false);
     }
@@ -132,6 +201,17 @@ export function ChatHistoryViewer({
           </h2>
           <button
             className="button text-white shadow-solid text-sm cursor-pointer pointer-events-auto"
+            onClick={handleExportMarkdown}
+            disabled={exporting}
+            type="button"
+            title="Export as readable Markdown"
+          >
+            <div className="h-full bg-clay-700 flex items-center px-2">
+              {exporting ? '...' : 'MD'}
+            </div>
+          </button>
+          <button
+            className="button text-white shadow-solid text-sm cursor-pointer pointer-events-auto"
             onClick={handleExportJSON}
             disabled={exporting}
             type="button"
@@ -168,6 +248,56 @@ export function ChatHistoryViewer({
         <div className="flex flex-1 min-h-0">
           {/* Left: conversation list */}
           <div className="w-[300px] lg:w-[360px] shrink-0 border-r-4 border-brown-900 flex flex-col">
+            {/* Character face filter */}
+            {allPlayers.length > 0 && (
+              <div className="px-3 pt-3 pb-1 border-b border-brown-700">
+                <div className="text-xs text-brown-400 uppercase tracking-widest mb-2">
+                  Filter by character
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {allPlayers.map((p) => {
+                    const active = selectedPlayerIds.includes(p.id);
+                    const anyActive = selectedPlayerIds.length > 0;
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        title={p.name}
+                        onClick={() => togglePlayer(p.id)}
+                        className="flex flex-col items-center gap-1 transition-opacity focus:outline-none"
+                        style={{ opacity: anyActive && !active ? 0.35 : 1 }}
+                      >
+                        <div
+                          className="rounded-full transition-all"
+                          style={{
+                            outline: active ? '3px solid #d97757' : '3px solid transparent',
+                            outlineOffset: '2px',
+                          }}
+                        >
+                          <CharacterIcon character={p.character} name={p.name} size={38} />
+                        </div>
+                        <span
+                          className="text-xs leading-none max-w-[48px] truncate"
+                          style={{ color: active ? '#d97757' : '#a09080' }}
+                        >
+                          {p.name}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {selectedPlayerIds.length > 0 && (
+                  <button
+                    type="button"
+                    className="mt-2 text-xs text-brown-400 hover:text-brown-200 underline transition-colors"
+                    onClick={() => setSelectedPlayerIds([])}
+                  >
+                    Clear filter
+                  </button>
+                )}
+              </div>
+            )}
+
             <div className="px-3 pt-3 pb-2">
               <input
                 className="w-full bg-brown-900 border border-brown-700 text-brown-100 px-3 py-1.5 text-sm rounded placeholder:text-brown-500 focus:outline-none focus:border-brown-300"

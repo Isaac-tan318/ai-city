@@ -62,3 +62,28 @@ export function gameMinutesUntil(targetMinutes: number, currentMinutes: number):
   const delta = targetMinutes - currentMinutes;
   return delta >= 0 ? delta : delta + MINUTES_PER_DAY;
 }
+
+// Day-of-week derived from the 1-indexed game day. Day 1 is treated as Monday,
+// so each block of 7 game days forms a Mon–Sun week.
+const DAY_NAMES = [
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+  'Sunday',
+];
+
+export function dayOfWeekIndex(dayNumber: number): number {
+  return (((dayNumber - 1) % 7) + 7) % 7;
+}
+
+export function dayOfWeekName(dayNumber: number): string {
+  return DAY_NAMES[dayOfWeekIndex(dayNumber)];
+}
+
+// Monday–Friday are weekdays (indices 0–4); Saturday/Sunday are the weekend.
+export function isWeekday(dayNumber: number): boolean {
+  return dayOfWeekIndex(dayNumber) < 5;
+}

@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { internalAction, internalQuery } from '../_generated/server';
-import { parseTimeOfDay } from './gameTime';
+import { parseTimeOfDay, isWeekday, dayOfWeekName } from './gameTime';
 import { WorldMap, serializedWorldMap } from './worldMap';
 import { rememberConversation } from '../agent/memory';
 import { GameId, agentId, conversationId, playerId } from './ids';
@@ -11,12 +11,12 @@ import {
 } from '../agent/conversation';
 import { assertNever } from '../util/assertNever';
 import { serializedAgent, ScheduleStep, scheduleStep } from './agent';
-import { ACTIVITIES, ACTIVITY_COOLDOWN, CONVERSATION_COOLDOWN } from '../constants';
+import { activitiesForName, ACTIVITY_COOLDOWN, CONVERSATION_COOLDOWN } from '../constants';
 import { api, internal } from '../_generated/api';
 import { sleep } from '../util/sleep';
 import { serializedPlayer } from './player';
 import { chatCompletion } from '../util/llm';
-import { CITY_LOCATIONS, getLocationById } from '../../data/cityLocations';
+import { CITY_LOCATIONS, CityLocation, getLocationById, workplaceFor } from '../../data/cityLocations';
 import { point } from '../util/types';
 
 export const agentRememberConversation = internalAction({
@@ -138,8 +138,8 @@ export const agentDoSomething = internalAction({
         });
         return;
       } else {
-        // TODO: have LLM choose the activity & emoji
-        const activity = ACTIVITIES[Math.floor(Math.random() * ACTIVITIES.length)];
+        const activities = activitiesForName(player.name);
+        const activity = activities[Math.floor(Math.random() * activities.length)];
         await sleep(Math.random() * 1000);
         await ctx.runMutation(api.aiTown.main.sendInput, {
           worldId: args.worldId,
@@ -201,39 +201,67 @@ export const getAgentPlanContext = internalQuery({
       .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('agentId', args.agentId))
       .first();
     if (!desc) return null;
-    return { identity: desc.identity, plan: desc.plan };
+    return { identity: desc.identity };
   },
 });
 
-function fallbackSchedule(home: { x: number; y: number } | undefined): ScheduleStep[] {
+function fallbackSchedule(
+  home: { x: number; y: number } | undefined,
+  workplace: CityLocation | undefined,
+  weekday: boolean,
+  workActivity?: string,
+): ScheduleStep[] {
   const hdb = getLocationById('hdb')!;
   const homeLoc = home ?? { x: hdb.x, y: hdb.y };
-  return [
+  const restaurant = getLocationById('restaurant')!;
+  const steps: ScheduleStep[] = [
     {
-      startMinute: 6 * 60,
+      startMinute: 7 * 60,
       locationId: 'home',
       destination: homeLoc,
       activity: 'waking up at home',
       emoji: '🛏️',
       description: 'morning at home, getting ready',
     },
-    {
-      startMinute: 12 * 60,
-      locationId: 'restaurant',
-      destination: { x: getLocationById('restaurant')!.x, y: getLocationById('restaurant')!.y },
-      activity: 'eating at the hawker centre',
-      emoji: '🍜',
-      description: 'lunch break',
-    },
-    {
-      startMinute: 22 * 60,
-      locationId: 'home',
-      destination: homeLoc,
-      activity: 'going to sleep',
-      emoji: '😴',
-      description: 'back home for the night',
-    },
   ];
+  // Weekdays: a morning and afternoon block at the workplace, bracketing lunch.
+  if (weekday && workplace) {
+    steps.push({
+      startMinute: 9 * 60,
+      locationId: workplace.id,
+      destination: { x: workplace.x, y: workplace.y },
+      activity: workActivity ?? `working at ${workplace.name}`,
+      emoji: '💼',
+      description: `at ${workplace.name} for the morning`,
+    });
+  }
+  steps.push({
+    startMinute: 12 * 60 + 30,
+    locationId: 'restaurant',
+    destination: { x: restaurant.x, y: restaurant.y },
+    activity: 'eating at the hawker centre',
+    emoji: '🍜',
+    description: 'lunch break',
+  });
+  if (weekday && workplace) {
+    steps.push({
+      startMinute: 13 * 60 + 30,
+      locationId: workplace.id,
+      destination: { x: workplace.x, y: workplace.y },
+      activity: workActivity ?? `back at ${workplace.name}`,
+      emoji: '💼',
+      description: `at ${workplace.name} for the afternoon`,
+    });
+  }
+  steps.push({
+    startMinute: 22 * 60,
+    locationId: 'home',
+    destination: homeLoc,
+    activity: 'going to sleep',
+    emoji: '😴',
+    description: 'back home for the night',
+  });
+  return steps;
 }
 
 function parseSchedule(
@@ -293,7 +321,6 @@ export const agentPlanDay = internalAction({
       agentId: args.agentId,
     });
     const identity = ctxData?.identity ?? `${args.playerName} is a resident of Singapore.`;
-    const plan = ctxData?.plan ?? '';
 
     // Fetch the last few conversation memories so the LLM can update the plan
     // based on what was discussed (e.g. arrangements made, invitations accepted).
@@ -310,7 +337,8 @@ export const agentPlanDay = internalAction({
           .slice(0, 5);
         if (convMemories.length > 0) {
           recentMemoriesStr =
-            '\nRecent conversation memories (incorporate anything plan-relevant):\n' +
+            '\nRecent conversations — read these carefully for any commitments you made ' +
+            '(who you agreed to meet, what you agreed to do, and where/when):\n' +
             convMemories.map((m: any) => `- ${m.description}`).join('\n');
         }
       } catch {
@@ -318,20 +346,33 @@ export const agentPlanDay = internalAction({
       }
     }
 
+    const weekday = isWeekday(args.dayNumber);
+    const dayName = dayOfWeekName(args.dayNumber);
+    const work = workplaceFor(args.playerName);
+
     const locationList = CITY_LOCATIONS.map(
       (l) => `- ${l.id} — ${l.name}: ${l.description}`,
     ).join('\n');
     const homeStr = args.homeName ? `${args.homeName} (use location_id "home")` : 'no fixed home';
+    const workStr = work
+      ? `Workplace: ${work.location.name} (use location_id "${work.location.id}") — ${work.activity}.`
+      : '';
+    const workRule =
+      weekday && work
+        ? `Today is a WEEKDAY: ${args.playerName} goes to work. Schedule a work block at "${work.location.id}" covering roughly 09:00–17:00 (you may split it around a short lunch elsewhere), then head home afterwards.`
+        : work
+          ? `Today is a WEEKEND: no work shift. Fill the day with rest, errands, and social time that fit the character.`
+          : '';
     const replanNote = args.existingSchedule
-      ? `\nThis is a RE-PLAN (current time: ${args.currentTimeStr}). A conversation may have changed your plans, or the previous schedule was disrupted. Review any recent memories below and produce a revised schedule for the REST of today only.`
+      ? `\nThis is a RE-PLAN (current time: ${args.currentTimeStr}). A conversation may have changed your plans, or the previous schedule was disrupted. Produce a revised schedule for the REST of today only — keep entries whose start_time has already passed, and revise the rest.\nIMPORTANT: If in a recent conversation you agreed to meet someone or do something at a particular place and/or time, you MUST add a schedule entry for it (pick a sensible start_time if none was stated, and map the place to the closest location_id from the list above). Do not drop commitments you made.`
       : '';
 
     const prompt = [
       `You are planning a single day in the life of ${args.playerName}, who lives in Singapore.`,
       `Identity: ${identity}`,
-      plan ? `Long-term plan / goal: ${plan}` : '',
       `Home: ${homeStr}`,
-      `Today is Day ${args.dayNumber}. The current in-game time is ${args.currentTimeStr}.`,
+      workStr,
+      `Today is Day ${args.dayNumber} (${dayName}, a ${weekday ? 'weekday' : 'weekend day'}). The current in-game time is ${args.currentTimeStr}.`,
       ``,
       `Available locations (use the location_id verbatim):`,
       locationList,
@@ -340,7 +381,8 @@ export const agentPlanDay = internalAction({
       ``,
       `Produce a believable daily schedule of 4–7 entries that fits this character.`,
       `Each entry needs: start_time (24h "HH:MM"), location_id, activity (short phrase), emoji (one), description (one sentence).`,
-      `The character should generally wake at home in the morning and return home at night.`,
+      `Keep timings consistent and realistic: wake at home around 07:00, take meals at regular times, and the FINAL entry must be "going to sleep" at home (location_id "home") around 22:00.`,
+      workRule,
       `If recent memories mention plans or arrangements made in conversation, honour them.`,
       `Pick locations that suit the character's personality and goal.`,
       replanNote,
@@ -363,7 +405,8 @@ export const agentPlanDay = internalAction({
     } catch (err) {
       console.error(`agentPlanDay LLM failed for ${args.playerName}:`, err);
     }
-    const schedule = parsed ?? fallbackSchedule(args.home);
+    const schedule =
+      parsed ?? fallbackSchedule(args.home, work?.location, weekday, work?.activity);
 
     await sleep(Math.random() * 500);
     await ctx.runMutation(api.aiTown.main.sendInput, {

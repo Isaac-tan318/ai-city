@@ -22,7 +22,11 @@ export const listMessages = query({
       if (!playerDescription) {
         throw new Error(`Invalid author ID: ${message.author}`);
       }
-      out.push({ ...message, authorName: playerDescription.name });
+      out.push({
+        ...message,
+        authorName: playerDescription.name,
+        authorCharacter: playerDescription.character,
+      });
     }
     return out;
   },
@@ -42,10 +46,12 @@ export const listAllConversations = query({
       .withIndex('worldId', (q) => q.eq('worldId', args.worldId))
       .collect();
     const nameMap = new Map(playerDescs.map((p) => [p.playerId, p.name]));
+    const charMap = new Map(playerDescs.map((p) => [p.playerId, p.character]));
 
     return archived.map((conv) => ({
       ...conv,
       participantNames: conv.participants.map((p) => nameMap.get(p) ?? p),
+      participantCharacters: conv.participants.map((p) => charMap.get(p) ?? null),
     }));
   },
 });
@@ -88,6 +94,62 @@ export const exportAllConversations = query({
       });
     }
     return result;
+  },
+});
+
+export const conversationGraph = query({
+  args: { worldId: v.id('worlds') },
+  handler: async (ctx, args) => {
+    const edges = await ctx.db
+      .query('participatedTogether')
+      .withIndex('edge', (q) => q.eq('worldId', args.worldId))
+      .collect();
+
+    const playerDescs = await ctx.db
+      .query('playerDescriptions')
+      .withIndex('worldId', (q) => q.eq('worldId', args.worldId))
+      .collect();
+    const nameMap = new Map(playerDescs.map((p) => [p.playerId, p.name]));
+
+    // `participatedTogether` stores a directed edge for each ordered pair, so we
+    // canonicalize to an unordered pair and count distinct conversations.
+    const pairs = new Map<
+      string,
+      { a: string; b: string; conversations: Set<string>; lastEnded: number }
+    >();
+    const nodeIds = new Set<string>();
+    for (const edge of edges) {
+      nodeIds.add(edge.player1);
+      nodeIds.add(edge.player2);
+      const [a, b] =
+        edge.player1 < edge.player2 ? [edge.player1, edge.player2] : [edge.player2, edge.player1];
+      const key = `${a}|${b}`;
+      let entry = pairs.get(key);
+      if (!entry) {
+        entry = { a, b, conversations: new Set(), lastEnded: 0 };
+        pairs.set(key, entry);
+      }
+      entry.conversations.add(edge.conversationId);
+      entry.lastEnded = Math.max(entry.lastEnded, edge.ended);
+    }
+
+    const links = [...pairs.values()].map((p) => ({
+      source: p.a,
+      target: p.b,
+      count: p.conversations.size,
+      lastEnded: p.lastEnded,
+    }));
+
+    const nodes = [...nodeIds].map((id) => ({
+      id,
+      name: nameMap.get(id) ?? id,
+      conversations: links
+        .filter((l) => l.source === id || l.target === id)
+        .reduce((sum, l) => sum + l.count, 0),
+    }));
+    nodes.sort((a, b) => b.conversations - a.conversations);
+
+    return { nodes, links };
   },
 });
 

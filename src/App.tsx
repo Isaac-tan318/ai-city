@@ -8,6 +8,7 @@ import helpImg from '../assets/help.svg';
 // import { Authenticated, Unauthenticated } from 'convex/react';
 // import LoginButton from './components/buttons/LoginButton.tsx';
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import ReactModal from 'react-modal';
 import MusicButton from './components/buttons/MusicButton.tsx';
 import Button from './components/buttons/Button.tsx';
@@ -86,6 +87,16 @@ export default function Home() {
             <Button imgUrl={helpImg} onClick={() => setHelpModalOpen(true)}>
               Help
             </Button>
+            <Link
+              to="/analysis"
+              className="button text-white shadow-solid text-xl pointer-events-auto"
+            >
+              <div className="inline-block bg-clay-700">
+                <span>
+                  <div className="inline-flex h-full items-center gap-4 px-4">Analysis</div>
+                </span>
+              </div>
+            </Link>
           </div>
           <a href="https://a16z.com">
             <img className="w-8 h-8 pointer-events-auto" src={a16zImg} alt="a16z" />

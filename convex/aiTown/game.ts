@@ -264,6 +264,8 @@ export class Game extends AbstractGame {
     }
     for (const conversation of existingWorld.conversations) {
       if (!newWorld.conversations.some((c) => c.id === conversation.id)) {
+        // Don't archive empty conversations — they clutter history and the graph.
+        if (conversation.numMessages === 0) continue;
         const participants = conversation.participants.map((p) => p.playerId);
         const archivedConversation = {
           worldId,

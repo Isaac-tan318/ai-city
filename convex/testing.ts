@@ -17,6 +17,7 @@ import { fetchEmbedding } from './util/llm';
 import { chatCompletion } from './util/llm';
 import { startConversationMessage } from './agent/conversation';
 import { GameId } from './aiTown/ids';
+import { point } from './util/types';
 
 // Clear all of the tables except for the embeddings cache.
 const excludedTables: Array<TableNames> = ['embeddingsCache'];
@@ -178,6 +179,21 @@ export const skipTime = mutation({
     // in-memory state and gets persisted on the next save (direct DB patches get
     // overwritten when the engine flushes its world diff).
     await insertInput(ctx, worldStatus.worldId, 'skipTime', { skipMs });
+  },
+});
+
+export const movePlayerTo = mutation({
+  args: {
+    playerId: v.id('players'),
+    destination: point,
+  },
+  handler: async (ctx, args) => {
+    const { worldStatus } = await getDefaultWorld(ctx.db);
+    // Route through engine inputs so the move is persisted.
+    await insertInput(ctx, worldStatus.worldId, 'moveTo', {
+      playerId: args.playerId,
+      destination: args.destination,
+    });
   },
 });
 

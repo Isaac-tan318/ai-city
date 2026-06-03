@@ -11,7 +11,7 @@ import {
 } from '../constants';
 import { pointsEqual, pathPosition } from '../util/geometry';
 import { Game } from './game';
-import { stopPlayer, findRoute, blocked, movePlayer } from './movement';
+import { stopPlayer, findRoute, blocked, blockedWithPositions, movePlayer } from './movement';
 import { inputHandler } from './inputHandler';
 import { characters } from '../../data/characters';
 import { PlayerDescription } from './playerDescription';
@@ -122,7 +122,13 @@ export class Player {
       }
       const route = findRoute(game, now, this, pathfinding.destination);
       if (route === null) {
-        console.log(`Failed to route to ${JSON.stringify(pathfinding.destination)}`);
+        const startPos = { x: Math.floor(this.position.x), y: Math.floor(this.position.y) };
+        const startBlocked = blockedWithPositions(startPos, [], game.worldMap);
+        const destBlocked = blockedWithPositions(pathfinding.destination, [], game.worldMap);
+        console.log(
+          `Failed to route from ${JSON.stringify(this.position)} to ${JSON.stringify(pathfinding.destination)}` +
+          ` — start: ${startBlocked ?? 'ok'}, dest: ${destBlocked ?? 'ok'}`,
+        );
         stopPlayer(this);
       } else {
         if (route.newDestination) {
@@ -310,6 +316,40 @@ export const playerInputs = {
       } else {
         stopPlayer(player);
       }
+      return null;
+    },
+  }),
+  // Debug / rescue: directly set a player's position without pathfinding.
+  // Useful for unsticking agents whose current position A* can't navigate from.
+  // The agent's tick will resume normally from the new position on the next step.
+  teleportPlayer: inputHandler({
+    args: {
+      playerId,
+      destination: point,
+    },
+    handler: (game, now, args) => {
+      const playerId = parseGameId('players', args.playerId);
+      const player = game.world.players.get(playerId);
+      if (!player) {
+        throw new Error(`Invalid player ID ${playerId}`);
+      }
+      const reason = blockedWithPositions(args.destination, [], game.worldMap);
+      if (reason !== null) {
+        throw new Error(
+          `Destination ${JSON.stringify(args.destination)} is blocked (${reason}) — pick a passable tile`,
+        );
+      }
+      // Leave any active conversation so neither participant gets stuck.
+      const conversation = [...game.world.conversations.values()].find((c) =>
+        c.participants.has(player.id),
+      );
+      if (conversation) {
+        conversation.leave(game, now, player);
+      }
+      // Snap position and stop pathfinding. The agent will re-plan on the next tick.
+      stopPlayer(player);
+      player.position = args.destination;
+      console.log(`Teleported ${player.id} (${player.name}) to ${JSON.stringify(args.destination)}`);
       return null;
     },
   }),

@@ -83,3 +83,8 @@ export const ARRIVAL_RADIUS = 1.5;
 // If an agent's current schedule step has been overdue for this many game-minutes
 // AND they still haven't reached the location, trigger a re-plan.
 export const SCHEDULE_DISRUPTION_MINUTES = 60;
+
+// Tile radius within which a settled (arrived) agent will look for another free
+// agent to strike up a conversation with. This is what makes conversations
+// emerge from agents' schedules bringing them to the same place.
+export const SCHEDULE_CHAT_RADIUS = 6;

@@ -24,7 +24,7 @@ import { movePlayer, stopPlayer, pickParkWaypoint } from './movement';
 import { insertInput } from './insertInput';
 import { point, Point } from '../util/types';
 import { computeGameTime } from './gameTime';
-import { ARRIVAL_RADIUS, SCHEDULE_DISRUPTION_MINUTES } from '../constants';
+import { ARRIVAL_RADIUS, SCHEDULE_DISRUPTION_MINUTES, SCHEDULE_CHAT_RADIUS } from '../constants';
 import { getLocationById, homeFor } from '../../data/cityLocations';
 
 export type ScheduleStep = {
@@ -50,6 +50,7 @@ export class Agent {
   scenarioTarget?: Point;
   scenarioName?: string;
   scenarioArrivalTime?: number;
+  scenarioInstruction?: string;
   home?: Point;
   schedule?: ScheduleStep[];
   scheduleGeneratedForDay?: number;
@@ -58,6 +59,7 @@ export class Agent {
   // `agentPlanDay` more than once per ~60s real time per agent. Protects
   // against ACTION_TIMEOUT re-fires when the LLM is slow.
   lastPlanAttempt?: number;
+  scheduleNeedsRefresh?: boolean;
 
   constructor(serialized: SerializedAgent) {
     const {
@@ -68,11 +70,13 @@ export class Agent {
       scenarioTarget,
       scenarioName,
       scenarioArrivalTime,
+      scenarioInstruction,
       home,
       schedule,
       scheduleGeneratedForDay,
       currentStepIndex,
       lastPlanAttempt,
+      scheduleNeedsRefresh,
     } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
@@ -87,11 +91,13 @@ export class Agent {
     this.scenarioTarget = scenarioTarget;
     this.scenarioName = scenarioName;
     this.scenarioArrivalTime = scenarioArrivalTime;
+    this.scenarioInstruction = scenarioInstruction;
     this.home = home;
     this.schedule = schedule;
     this.scheduleGeneratedForDay = scheduleGeneratedForDay;
     this.currentStepIndex = currentStepIndex;
     this.lastPlanAttempt = lastPlanAttempt;
+    this.scheduleNeedsRefresh = scheduleNeedsRefresh;
   }
 
   tick(game: Game, now: number) {
@@ -102,6 +108,9 @@ export class Agent {
     if (!this.scenarioTarget && !this.scenarioArrivalTime && game.world.scenarioTarget) {
       this.scenarioTarget = game.world.scenarioTarget;
       this.scenarioName = game.world.scenarioName;
+    }
+    if (this.scenarioInstruction === undefined && game.world.scenarioInstruction) {
+      this.scenarioInstruction = game.world.scenarioInstruction;
     }
     const PARK_RADIUS = 5;
     if (this.scenarioTarget) {
@@ -281,6 +290,7 @@ export class Agent {
               otherPlayerId: otherPlayer.id,
               messageUuid,
               type: 'start',
+              gameTimeMs: now,
             });
             return;
           } else {
@@ -302,6 +312,7 @@ export class Agent {
             otherPlayerId: otherPlayer.id,
             messageUuid,
             type: 'leave',
+            gameTimeMs: now,
           });
           return;
         }
@@ -329,6 +340,7 @@ export class Agent {
           otherPlayerId: otherPlayer.id,
           messageUuid,
           type: 'continue',
+          gameTimeMs: now,
         });
         return;
       }
@@ -345,13 +357,26 @@ export class Agent {
     const noSchedule = !this.schedule || this.schedule.length === 0;
     const dayChanged =
       this.scheduleGeneratedForDay !== undefined && this.scheduleGeneratedForDay !== gt.dayNumber;
+    // Advance to the latest step whose start time has passed BEFORE computing
+    // overdueMinutes. Previously the while loop sat below the disruption check,
+    // so currentStepIndex advanced the instant the next step's startMinute arrived
+    // — keeping overdueMinutes permanently ≤ 0 and the disruption branch
+    // permanently unreachable. Advancing first and measuring from the current
+    // step's own startMinute lets stuck agents correctly trigger a replan.
+    if (this.schedule && this.currentStepIndex !== undefined) {
+      while (
+        this.currentStepIndex < this.schedule.length - 1 &&
+        gt.minutesIntoDay >= this.schedule[this.currentStepIndex + 1].startMinute
+      ) {
+        this.currentStepIndex += 1;
+      }
+    }
+
     let disrupted = false;
     if (this.schedule && this.currentStepIndex !== undefined && !noSchedule && !dayChanged) {
       const step = this.schedule[this.currentStepIndex];
-      const nextStep = this.schedule[this.currentStepIndex + 1];
       if (step) {
-        const stepEnd = nextStep ? nextStep.startMinute : 24 * 60;
-        const overdueMinutes = gt.minutesIntoDay - stepEnd;
+        const overdueMinutes = gt.minutesIntoDay - step.startMinute;
         const atDest = distance(player.position, step.destination) < ARRIVAL_RADIUS;
         if (overdueMinutes > SCHEDULE_DISRUPTION_MINUTES && !atDest) {
           disrupted = true;
@@ -359,7 +384,8 @@ export class Agent {
       }
     }
 
-    const needsPlan = (noSchedule || dayChanged || disrupted) && !conversation && !doingActivity;
+    const conversationRefresh = !!this.scheduleNeedsRefresh;
+    const needsPlan = (noSchedule || dayChanged || disrupted || conversationRefresh) && !conversation && !doingActivity;
     if (needsPlan) {
       // Hard cooldown: never re-fire agentPlanDay more than once per 5 minutes
       // real time per agent. Protects against ACTION_TIMEOUT re-fires and any
@@ -385,29 +411,23 @@ export class Agent {
       const homePoint = this.home ?? { x: home.x, y: home.y };
       const homeLoc = homeFor(playerName);
       this.lastPlanAttempt = now;
+      delete this.scheduleNeedsRefresh;
       this.startOperation(game, now, 'agentPlanDay', {
         worldId: game.worldId,
         agentId: this.id,
+        playerId: this.playerId,
         playerName,
         home: homePoint,
         homeName: homeLoc?.name,
         dayNumber: gt.dayNumber,
         currentTimeStr: gt.timeStr,
         currentMinutesIntoDay: gt.minutesIntoDay,
-        existingSchedule: disrupted ? this.schedule : undefined,
+        existingSchedule: (disrupted || conversationRefresh) ? this.schedule : undefined,
       });
       return true;
     }
 
     if (!this.schedule || this.currentStepIndex === undefined) return false;
-
-    // Advance past steps whose successor's start time has arrived.
-    while (
-      this.currentStepIndex < this.schedule.length - 1 &&
-      gt.minutesIntoDay >= this.schedule[this.currentStepIndex + 1].startMinute
-    ) {
-      this.currentStepIndex += 1;
-    }
 
     const step = this.schedule[this.currentStepIndex];
     if (!step) return false;
@@ -448,6 +468,37 @@ export class Agent {
         until: now + minutesLeft * realMsPerGameMinute,
       };
     }
+
+    // While settled here, look for a nearby free agent to chat with. Scheduled
+    // agents are otherwise perpetually "busy" (walking or doing an activity), so
+    // without this they would never initiate conversations — and the
+    // conversation-driven re-planning would never fire. This is what lets agents'
+    // plans collide into emergent conversations at shared locations.
+    const onInviteCooldown =
+      this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN;
+    const justChatted =
+      this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN;
+    if (!onInviteCooldown && !justChatted && !this.inProgressOperation) {
+      const nearbyFree = [...game.world.players.values()].filter(
+        (p) =>
+          p.id !== player.id &&
+          distance(p.position, player.position) < SCHEDULE_CHAT_RADIUS &&
+          ![...game.world.conversations.values()].some((c) => c.participants.has(p.id)),
+      );
+      if (nearbyFree.length > 0) {
+        // Optimistically record the attempt so we don't re-fire every tick when
+        // no candidate can actually be invited (e.g. all on the pair cooldown).
+        this.lastInviteAttempt = now;
+        this.startOperation(game, now, 'agentDoSomething', {
+          worldId: game.worldId,
+          player: player.serialize(),
+          otherFreePlayers: nearbyFree.map((p) => p.serialize()),
+          agent: this.serialize(),
+          map: game.worldMap.serialize(),
+          forceInvite: true,
+        });
+      }
+    }
     return true;
   }
 
@@ -483,11 +534,13 @@ export class Agent {
       scenarioTarget: this.scenarioTarget,
       scenarioName: this.scenarioName,
       scenarioArrivalTime: this.scenarioArrivalTime,
+      scenarioInstruction: this.scenarioInstruction,
       home: this.home,
       schedule: this.schedule,
       scheduleGeneratedForDay: this.scheduleGeneratedForDay,
       currentStepIndex: this.currentStepIndex,
       lastPlanAttempt: this.lastPlanAttempt,
+      scheduleNeedsRefresh: this.scheduleNeedsRefresh,
     };
   }
 }
@@ -517,11 +570,13 @@ export const serializedAgent = {
   scenarioTarget: v.optional(point),
   scenarioName: v.optional(v.string()),
   scenarioArrivalTime: v.optional(v.number()),
+  scenarioInstruction: v.optional(v.string()),
   home: v.optional(point),
   schedule: v.optional(v.array(scheduleStep)),
   scheduleGeneratedForDay: v.optional(v.number()),
   currentStepIndex: v.optional(v.number()),
   lastPlanAttempt: v.optional(v.number()),
+  scheduleNeedsRefresh: v.optional(v.boolean()),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 

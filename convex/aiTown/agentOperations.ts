@@ -57,6 +57,10 @@ export const agentGenerateMessage = internalAction({
     operationId: v.string(),
     type: v.union(v.literal('start'), v.literal('continue'), v.literal('leave')),
     messageUuid: v.string(),
+    // Engine wall-clock timestamp from the tick that triggered this operation.
+    // Passed to the prompt builder so the time the LLM is told matches the game
+    // clock, rather than whatever real time the action happens to execute at.
+    gameTimeMs: v.number(),
   },
   handler: async (ctx, args) => {
     let completionFn;
@@ -79,6 +83,7 @@ export const agentGenerateMessage = internalAction({
       args.conversationId as GameId<'conversations'>,
       args.playerId as GameId<'players'>,
       args.otherPlayerId as GameId<'players'>,
+      args.gameTimeMs,
     );
 
     await ctx.runMutation(internal.aiTown.agent.agentSendMessage, {
@@ -101,6 +106,10 @@ export const agentDoSomething = internalAction({
     agent: v.object(serializedAgent),
     map: v.object(serializedWorldMap),
     otherFreePlayers: v.array(v.object(serializedPlayer)),
+    // When set, skip the wander/activity branch and go straight to inviting a
+    // nearby free agent. Used by scheduled agents who are settled at a location
+    // and want to strike up a conversation without abandoning their spot.
+    forceInvite: v.optional(v.boolean()),
     operationId: v.string(),
   },
   handler: async (ctx, args) => {
@@ -115,7 +124,7 @@ export const agentDoSomething = internalAction({
       agent.lastInviteAttempt && now < agent.lastInviteAttempt + CONVERSATION_COOLDOWN;
     const recentActivity = player.activity && now < player.activity.until + ACTIVITY_COOLDOWN;
     // Decide whether to do an activity or wander somewhere.
-    if (!player.pathfinding) {
+    if (!args.forceInvite && !player.pathfinding) {
       if (recentActivity || justLeftConversation) {
         await sleep(Math.random() * 1000);
         await ctx.runMutation(api.aiTown.main.sendInput, {
@@ -149,7 +158,7 @@ export const agentDoSomething = internalAction({
       }
     }
     const invitee =
-      justLeftConversation || recentlyAttemptedInvite
+      !args.forceInvite && (justLeftConversation || recentlyAttemptedInvite)
         ? undefined
         : await ctx.runQuery(internal.aiTown.agent.findConversationCandidate, {
             now,
@@ -268,6 +277,7 @@ export const agentPlanDay = internalAction({
   args: {
     worldId: v.id('worlds'),
     agentId,
+    playerId: v.optional(playerId),
     playerName: v.string(),
     home: v.optional(point),
     homeName: v.optional(v.string()),
@@ -285,12 +295,35 @@ export const agentPlanDay = internalAction({
     const identity = ctxData?.identity ?? `${args.playerName} is a resident of Singapore.`;
     const plan = ctxData?.plan ?? '';
 
+    // Fetch the last few conversation memories so the LLM can update the plan
+    // based on what was discussed (e.g. arrangements made, invitations accepted).
+    let recentMemoriesStr = '';
+    if (args.playerId) {
+      try {
+        const memData = await ctx.runQuery(internal.agent.memory.getReflectionMemories, {
+          worldId: args.worldId,
+          playerId: args.playerId,
+          numberOfItems: 8,
+        });
+        const convMemories = memData.memories
+          .filter((m: any) => m.data.type === 'conversation')
+          .slice(0, 5);
+        if (convMemories.length > 0) {
+          recentMemoriesStr =
+            '\nRecent conversation memories (incorporate anything plan-relevant):\n' +
+            convMemories.map((m: any) => `- ${m.description}`).join('\n');
+        }
+      } catch {
+        // Memory fetch failure is non-fatal — proceed without memories.
+      }
+    }
+
     const locationList = CITY_LOCATIONS.map(
       (l) => `- ${l.id} — ${l.name}: ${l.description}`,
     ).join('\n');
     const homeStr = args.homeName ? `${args.homeName} (use location_id "home")` : 'no fixed home';
     const replanNote = args.existingSchedule
-      ? `\nThis is a RE-PLAN. The previous schedule was disrupted. Produce a new schedule for the REST of today, starting at ${args.currentTimeStr}.`
+      ? `\nThis is a RE-PLAN (current time: ${args.currentTimeStr}). A conversation may have changed your plans, or the previous schedule was disrupted. Review any recent memories below and produce a revised schedule for the REST of today only.`
       : '';
 
     const prompt = [
@@ -303,10 +336,12 @@ export const agentPlanDay = internalAction({
       `Available locations (use the location_id verbatim):`,
       locationList,
       `- home — the character's home`,
+      recentMemoriesStr,
       ``,
       `Produce a believable daily schedule of 4–7 entries that fits this character.`,
       `Each entry needs: start_time (24h "HH:MM"), location_id, activity (short phrase), emoji (one), description (one sentence).`,
       `The character should generally wake at home in the morning and return home at night.`,
+      `If recent memories mention plans or arrangements made in conversation, honour them.`,
       `Pick locations that suit the character's personality and goal.`,
       replanNote,
       ``,

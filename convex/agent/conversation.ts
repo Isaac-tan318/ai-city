@@ -18,6 +18,7 @@ export async function startConversationMessage(
   conversationId: GameId<'conversations'>,
   playerId: GameId<'players'>,
   otherPlayerId: GameId<'players'>,
+  gameTimeMs: number,
 ): Promise<string> {
   const { player, otherPlayer, agent, otherAgent, lastConversation, worldStartTime } =
     await ctx.runQuery(selfInternal.queryPromptData, {
@@ -44,7 +45,7 @@ export async function startConversationMessage(
   const prompt = [
     `You are ${player.name}, and you just started a conversation with ${otherPlayer.name}.`,
   ];
-  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, agent));
+  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
   prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
   prompt.push(...previousConversationPrompt(otherPlayer, lastConversation));
   prompt.push(...relatedMemoriesPrompt(memories));
@@ -82,6 +83,7 @@ export async function continueConversationMessage(
   conversationId: GameId<'conversations'>,
   playerId: GameId<'players'>,
   otherPlayerId: GameId<'players'>,
+  gameTimeMs: number,
 ): Promise<string> {
   const { player, otherPlayer, conversation, agent, otherAgent, worldStartTime } =
     await ctx.runQuery(selfInternal.queryPromptData, {
@@ -90,7 +92,6 @@ export async function continueConversationMessage(
       otherPlayerId,
       conversationId,
     });
-  const now = Date.now();
   const started = new Date(conversation.created);
   const embedding = await embeddingsCache.fetch(
     ctx,
@@ -99,9 +100,9 @@ export async function continueConversationMessage(
   const memories = await memory.searchMemories(ctx, player.id as GameId<'players'>, embedding, 3);
   const prompt = [
     `You are ${player.name}, and you're currently in a conversation with ${otherPlayer.name}.`,
-    `The conversation started at ${started.toLocaleString()}. It's now ${now.toLocaleString()}.`,
+    `The conversation started at ${started.toLocaleString()}.`,
   ];
-  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, agent));
+  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
   prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
   prompt.push(...relatedMemoriesPrompt(memories));
   prompt.push(
@@ -139,6 +140,7 @@ export async function leaveConversationMessage(
   conversationId: GameId<'conversations'>,
   playerId: GameId<'players'>,
   otherPlayerId: GameId<'players'>,
+  gameTimeMs: number,
 ): Promise<string> {
   const { player, otherPlayer, conversation, agent, otherAgent, worldStartTime } =
     await ctx.runQuery(selfInternal.queryPromptData, {
@@ -151,7 +153,7 @@ export async function leaveConversationMessage(
     `You are ${player.name}, and you're currently in a conversation with ${otherPlayer.name}.`,
     `You've decided to leave the question and would like to politely tell them you're leaving the conversation.`,
   ];
-  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, agent));
+  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
   prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
   prompt.push(
     `Below is the current chat history between you and ${otherPlayer.name}.`,
@@ -183,7 +185,7 @@ export async function leaveConversationMessage(
 
 function agentPrompts(
   otherPlayer: { name: string },
-  agent: { identity: string; plan: string } | null,
+  agent: { identity: string; plan: string; scenarioInstruction?: string } | null,
   otherAgent: { identity: string; plan: string } | null,
 ): string[] {
   const prompt = [];
@@ -193,6 +195,12 @@ function agentPrompts(
   }
   if (otherAgent) {
     prompt.push(`About ${otherPlayer.name}: ${otherAgent.identity}`);
+  }
+  if (agent?.scenarioInstruction) {
+    prompt.push(
+      `SCENARIO DIRECTIVE (follow this right now): ${agent.scenarioInstruction}`,
+      `Weave this directive naturally into the conversation without breaking character.`,
+    );
   }
   return prompt;
 }
@@ -217,11 +225,12 @@ function previousConversationPrompt(
 function currentTimeAndPlacePrompt(
   position: { x: number; y: number },
   worldStartTime: number | undefined,
+  gameTimeMs: number,
   agent: { schedule?: any[]; currentStepIndex?: number } | null,
 ): string[] {
   const prompt: string[] = [];
   if (worldStartTime !== undefined) {
-    const gt = computeGameTime(Date.now(), worldStartTime);
+    const gt = computeGameTime(gameTimeMs, worldStartTime);
     prompt.push(
       `It is currently Day ${gt.dayNumber}, ${gt.timeStr} (${gt.isDay ? 'daytime' : 'nighttime'}) in Singapore.`,
     );

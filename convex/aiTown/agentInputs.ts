@@ -9,7 +9,8 @@ import { Descriptions } from '../../data/characters';
 import { AgentDescription } from './agentDescription';
 import { Agent, scheduleStep } from './agent';
 import { WorldMap } from './worldMap';
-import { homeFor } from '../../data/cityLocations';
+import { CITY_LOCATIONS, homeFor } from '../../data/cityLocations';
+
 
 const PARK_FOUNTAIN_SHEET = '__city_fountain__';
 
@@ -95,6 +96,9 @@ export const agentInputs = {
       } else {
         delete agent.inProgressOperation;
         delete agent.toRemember;
+        // Flag the schedule for refresh so the agent re-plans in light of
+        // whatever was discussed during the conversation.
+        agent.scheduleNeedsRefresh = true;
       }
       return null;
     },
@@ -209,6 +213,7 @@ export const agentInputs = {
           toRemember: undefined,
           scenarioTarget: game.world.scenarioTarget,
           scenarioName: game.world.scenarioName,
+          scenarioInstruction: game.world.scenarioInstruction,
           home,
         }),
       );
@@ -229,6 +234,41 @@ export const agentInputs = {
         }
       }
       return { agentId };
+    },
+  }),
+  startCustomScenario: inputHandler({
+    args: { instruction: v.string() },
+    handler: (game, now, args) => {
+      const instruction = args.instruction.trim();
+      if (!instruction) return null;
+
+      game.world.scenarioInstruction = instruction;
+
+      // End all ongoing conversations so agents are immediately free to move/react.
+      for (const conversation of [...game.world.conversations.values()]) {
+        conversation.stop(game, now);
+      }
+      for (const agent of game.world.agents.values()) {
+        agent.scenarioInstruction = instruction;
+        delete agent.toRemember;
+        delete agent.inProgressOperation;
+      }
+      return null;
+    },
+  }),
+  clearScenario: inputHandler({
+    args: {},
+    handler: (game, _now) => {
+      delete game.world.scenarioInstruction;
+      delete game.world.scenarioTarget;
+      delete game.world.scenarioName;
+      for (const agent of game.world.agents.values()) {
+        delete agent.scenarioInstruction;
+        delete agent.scenarioTarget;
+        delete agent.scenarioName;
+        delete agent.scenarioArrivalTime;
+      }
+      return null;
     },
   }),
   startScenarioMeetAtPark: inputHandler({

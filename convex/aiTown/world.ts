@@ -20,6 +20,7 @@ export const serializedWorld = {
   agents: v.array(v.object(serializedAgent)),
   scenarioTarget: v.optional(point),
   scenarioName: v.optional(v.string()),
+  scenarioInstruction: v.optional(v.string()),
   historicalLocations: v.optional(historicalLocations),
   worldStartTime: v.optional(v.number()),
 };
@@ -33,10 +34,11 @@ export class World {
   historicalLocations?: Map<GameId<'players'>, ArrayBuffer>;
   scenarioTarget?: { x: number; y: number };
   scenarioName?: string;
+  scenarioInstruction?: string;
   worldStartTime?: number;
 
   constructor(serialized: SerializedWorld) {
-    const { nextId, historicalLocations, scenarioTarget, scenarioName, worldStartTime } = serialized;
+    const { nextId, historicalLocations, scenarioTarget, scenarioName, scenarioInstruction, worldStartTime } = serialized;
 
     this.nextId = nextId;
     this.conversations = parseMap(serialized.conversations, Conversation, (c) => c.id);
@@ -44,6 +46,7 @@ export class World {
     this.agents = parseMap(serialized.agents, Agent, (a) => a.id);
     this.scenarioTarget = scenarioTarget;
     this.scenarioName = scenarioName;
+    this.scenarioInstruction = scenarioInstruction;
     this.worldStartTime = worldStartTime;
 
     if (historicalLocations) {
@@ -66,6 +69,7 @@ export class World {
       agents: [...this.agents.values()].map((a) => a.serialize()),
       scenarioTarget: this.scenarioTarget,
       scenarioName: this.scenarioName,
+      scenarioInstruction: this.scenarioInstruction,
       worldStartTime: this.worldStartTime,
       historicalLocations:
         this.historicalLocations &&

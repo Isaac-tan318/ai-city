@@ -20,6 +20,12 @@ const scenarioOptions = [
     text: 'Meet at the park!',
     requiresTwoAgents: false,
   },
+  {
+    id: 'custom',
+    title: 'Custom Scenario',
+    text: '',
+    requiresTwoAgents: false,
+  },
 ];
 
 export default function PlayerDetails({
@@ -111,6 +117,8 @@ export default function PlayerDetails({
   const rejectInvite = useSendInput(engineId, 'rejectInvite');
   const leaveConversation = useSendInput(engineId, 'leaveConversation');
   const startScenarioMeetAtPark = useSendInput(engineId, 'startScenarioMeetAtPark');
+  const startCustomScenario = useSendInput(engineId, 'startCustomScenario');
+  const clearScenario = useSendInput(engineId, 'clearScenario');
 
   const setDefaultSecondTarget = (primaryTarget: GameId<'players'> | '') => {
     if (!primaryTarget) {
@@ -163,7 +171,21 @@ export default function PlayerDetails({
       setInjectorOpen(false);
       return;
     }
+    if (selectedScenarioId === 'custom') {
+      if (!scenarioText.trim()) {
+        toast.error('Write your scenario instructions before starting.');
+        return;
+      }
+      await toastOnError(startCustomScenario({ instruction: scenarioText.trim() }));
+      setInjectorOpen(false);
+      return;
+    }
     toast.error('This scenario is not wired yet.');
+  };
+
+  const onClearScenario = async () => {
+    await toastOnError(clearScenario({}));
+    toast.success('Scenario cleared — agents will resume normal behaviour.');
   };
 
   const scenarioButton = (
@@ -206,6 +228,7 @@ export default function PlayerDetails({
           <div className="scenario-scroll grid gap-2 sm:grid-cols-2 max-h-56 overflow-y-auto pr-1">
             {scenarioOptions.map((scenario) => {
               const isActive = scenario.id === selectedScenarioId;
+              const isCustom = scenario.id === 'custom';
               return (
                 <button
                   key={scenario.id}
@@ -213,15 +236,19 @@ export default function PlayerDetails({
                     'rounded border px-3 py-2 text-left transition ' +
                     (isActive
                       ? 'border-amber-300 bg-amber-200/10 text-amber-100'
-                      : 'border-white/10 bg-white/5 hover:border-white/30')
+                      : isCustom
+                        ? 'border-dashed border-white/30 bg-white/5 hover:border-amber-300/60'
+                        : 'border-white/10 bg-white/5 hover:border-white/30')
                   }
                   type="button"
                   onClick={() => onSelectScenario(scenario.id)}
                 >
                   <div className="font-display text-sm sm:text-base leading-tight tracking-wider">
-                    {scenario.title}
+                    {isCustom ? '✏️ ' : ''}{scenario.title}
                   </div>
-                  <div className="text-xs leading-snug text-white/70">{scenario.text}</div>
+                  <div className="text-xs leading-snug text-white/70">
+                    {isCustom ? 'Write your own instructions below' : scenario.text}
+                  </div>
                 </button>
               );
             })}
@@ -276,20 +303,47 @@ export default function PlayerDetails({
           <p className="text-sm sm:text-base leading-relaxed text-white/90">{scenarioPreview}</p>
         </div>
 
-        <div className="rounded border border-white/15 bg-black/50 p-3">
+        <div
+          className={
+            'rounded border p-3 transition ' +
+            (selectedScenarioId === 'custom'
+              ? 'border-amber-300/60 bg-black/50'
+              : 'border-white/15 bg-black/50')
+          }
+        >
           <div className="text-xs uppercase tracking-widest text-amber-200/80">
-            Scenario chatbox
+            {selectedScenarioId === 'custom'
+              ? 'Your custom instructions'
+              : 'Scenario chatbox'}
           </div>
           <textarea
-            className="mt-2 w-full resize-none rounded bg-black/30 border border-white/10 px-3 py-2 text-sm sm:text-base"
-            placeholder="Describe the scenario you want to inject..."
-            rows={3}
+            className={
+              'mt-2 w-full resize-none rounded border px-3 py-2 text-sm sm:text-base bg-black/30 ' +
+              (selectedScenarioId === 'custom'
+                ? 'border-amber-300/40 focus:border-amber-300 outline-none'
+                : 'border-white/10')
+            }
+            placeholder={
+              selectedScenarioId === 'custom'
+                ? 'e.g. "Everyone is secretly a spy who must not reveal their identity"'
+                : 'Describe the scenario you want to inject...'
+            }
+            rows={selectedScenarioId === 'custom' ? 4 : 3}
+            autoFocus={selectedScenarioId === 'custom'}
             value={scenarioText}
             onChange={(event) => setScenarioText(event.target.value)}
           />
         </div>
 
-        <div className="flex justify-end">
+        <div className="flex justify-between gap-3">
+          <button
+            className="button text-white shadow-solid text-sm cursor-pointer pointer-events-auto opacity-70 hover:opacity-100"
+            type="button"
+            onClick={onClearScenario}
+            title="Remove any active scenario from all agents"
+          >
+            <div className="h-full bg-clay-700 px-3 py-2 text-center">Clear scenario</div>
+          </button>
           <button
             className="button text-white shadow-solid text-base sm:text-lg cursor-pointer pointer-events-auto"
             type="button"

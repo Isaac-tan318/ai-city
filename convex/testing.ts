@@ -249,6 +249,7 @@ export const testConvo = internalAction({
       'c:115' as GameId<'conversations'>,
       'p:0' as GameId<'players'>,
       'p:6' as GameId<'players'>,
+      Date.now(),
     )) as any;
     return await a.readAll();
   },

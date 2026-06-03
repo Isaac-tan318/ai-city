@@ -14,8 +14,8 @@ export const CITY_LOCATIONS: CityLocation[] = [
   {
     id: 'mbs',
     name: 'Marina Bay Sands',
-    x: 45,
-    y: 15,
+    x: 36,
+    y: 22,
     description:
       'Iconic three-tower hotel with the rooftop skypark and reflecting pool. Tourists, business meetings, expensive drinks.',
   },
@@ -30,7 +30,7 @@ export const CITY_LOCATIONS: CityLocation[] = [
   {
     id: 'astar',
     name: 'A*STAR',
-    x: 12,
+    x: 13,
     y: 8,
     description:
       "Singapore's national research agency campus. Scientists, postdocs, gleaming labs.",
@@ -38,16 +38,16 @@ export const CITY_LOCATIONS: CityLocation[] = [
   {
     id: 'gardens',
     name: 'Gardens by the Bay',
-    x: 22,
-    y: 5,
+    x: 36,
+    y: 6,
     description:
       'Huge public park with the supertree grove and winding paths. Joggers, families, picnics.',
   },
   {
     id: 'university',
-    name: 'Temasek University',
-    x: 12,
-    y: 35,
+    name: 'Temasek Polytechnic',
+    x: 6,
+    y: 39,
     description:
       'Large tertiary campus with lecture halls, dorms, and a sprawling library.',
   },
@@ -63,23 +63,23 @@ export const CITY_LOCATIONS: CityLocation[] = [
     id: 'shophouses',
     name: 'Peranakan Shophouses',
     x: 60,
-    y: 37,
+    y: 42,
     description:
       'Row of colourful shophouses — small cafes, boutiques, tailor shops, hidden bars.',
   },
   {
     id: 'restaurant',
     name: 'Hawker Centre',
-    x: 60,
-    y: 23,
+    x: 63,
+    y: 27,
     description:
       'Open-air kopitiam with food stalls and shared tables. Always busy at meal times, gossip central.',
   },
   {
     id: 'changi_hospital',
     name: 'Changi General Hospital',
-    x: 38,
-    y: 33,
+    x: 36,
+    y: 42,
     description: 'Large general hospital with the blue cross emblem.',
   },
 ];

@@ -2,14 +2,81 @@ import { v } from 'convex/values';
 import { agentId, conversationId, parseGameId } from './ids';
 import { Player, activity } from './player';
 import { Conversation, conversationInputs } from './conversation';
-import { movePlayer } from './movement';
+import { blockedWithPositions, movePlayer, stopPlayer } from './movement';
 import { inputHandler } from './inputHandler';
-import { point } from '../util/types';
+import { Point, point } from '../util/types';
 import { Descriptions } from '../../data/characters';
 import { AgentDescription } from './agentDescription';
-import { Agent } from './agent';
+import { Agent, scheduleStep } from './agent';
+import { WorldMap } from './worldMap';
+import { CITY_LOCATIONS, homeFor } from '../../data/cityLocations';
+
+
+const PARK_FOUNTAIN_SHEET = '__city_fountain__';
+
+// Returns the nearest open tile to the fountain centroid.
+function getParkTarget(worldMap: WorldMap): Point {
+  const fountains = worldMap.animatedSprites.filter((s) => s.sheet === PARK_FOUNTAIN_SHEET);
+  let center: Point;
+  if (fountains.length > 0) {
+    const sum = fountains.reduce(
+      (acc, s) => ({ x: acc.x + s.x, y: acc.y + s.y }),
+      { x: 0, y: 0 },
+    );
+    center = {
+      x: Math.round(sum.x / fountains.length / worldMap.tileDim),
+      y: Math.round(sum.y / fountains.length / worldMap.tileDim),
+    };
+  } else {
+    center = { x: Math.floor(worldMap.width / 2), y: Math.floor(worldMap.height / 2) };
+  }
+  for (let radius = 0; radius <= 15; radius++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      for (let dy = -radius; dy <= radius; dy++) {
+        if (Math.abs(dx) + Math.abs(dy) !== radius) continue;
+        const candidate = { x: center.x + dx, y: center.y + dy };
+        if (
+          candidate.x >= 0 &&
+          candidate.y >= 0 &&
+          candidate.x < worldMap.width &&
+          candidate.y < worldMap.height &&
+          blockedWithPositions(candidate, [], worldMap) === null
+        )
+          return candidate;
+      }
+    }
+  }
+  return center;
+}
 
 export const agentInputs = {
+  finishPlanDay: inputHandler({
+    args: {
+      operationId: v.string(),
+      agentId,
+      schedule: v.array(scheduleStep),
+      dayNumber: v.number(),
+    },
+    handler: (game, now, args) => {
+      const agentId = parseGameId('agents', args.agentId);
+      const agent = game.world.agents.get(agentId);
+      if (!agent) {
+        throw new Error(`Couldn't find agent: ${agentId}`);
+      }
+      if (
+        !agent.inProgressOperation ||
+        agent.inProgressOperation.operationId !== args.operationId
+      ) {
+        console.debug(`Agent ${agentId} didn't have ${args.operationId} in progress`);
+        return null;
+      }
+      delete agent.inProgressOperation;
+      agent.schedule = args.schedule;
+      agent.scheduleGeneratedForDay = args.dayNumber;
+      agent.currentStepIndex = 0;
+      return null;
+    },
+  }),
   finishRememberConversation: inputHandler({
     args: {
       operationId: v.string(),
@@ -29,6 +96,9 @@ export const agentInputs = {
       } else {
         delete agent.inProgressOperation;
         delete agent.toRemember;
+        // Flag the schedule for refresh so the agent re-plans in light of
+        // whatever was discussed during the conversation.
+        agent.scheduleNeedsRefresh = true;
       }
       return null;
     },
@@ -130,6 +200,8 @@ export const agentInputs = {
         description.identity,
       );
       const agentId = game.allocId('agents');
+      const homeLoc = homeFor(description.name);
+      const home = homeLoc ? { x: homeLoc.x, y: homeLoc.y } : undefined;
       game.world.agents.set(
         agentId,
         new Agent({
@@ -139,6 +211,10 @@ export const agentInputs = {
           lastConversation: undefined,
           lastInviteAttempt: undefined,
           toRemember: undefined,
+          scenarioTarget: game.world.scenarioTarget,
+          scenarioName: game.world.scenarioName,
+          scenarioInstruction: game.world.scenarioInstruction,
+          home,
         }),
       );
       game.agentDescriptions.set(
@@ -146,10 +222,95 @@ export const agentInputs = {
         new AgentDescription({
           agentId: agentId,
           identity: description.identity,
-          plan: description.plan,
         }),
       );
+      if (game.world.scenarioTarget) {
+        const target = game.world.scenarioTarget;
+        const player = game.world.players.get(playerId);
+        if (player && !game.world.playerConversation(player)) {
+          delete player.activity;
+          movePlayer(game, now, player, target, false, true);
+        }
+      }
       return { agentId };
+    },
+  }),
+  startCustomScenario: inputHandler({
+    args: { instruction: v.string() },
+    handler: (game, now, args) => {
+      const instruction = args.instruction.trim();
+      if (!instruction) return null;
+
+      game.world.scenarioInstruction = instruction;
+
+      // End all ongoing conversations so agents are immediately free to move/react.
+      for (const conversation of [...game.world.conversations.values()]) {
+        conversation.stop(game, now);
+      }
+      for (const agent of game.world.agents.values()) {
+        agent.scenarioInstruction = instruction;
+        delete agent.toRemember;
+        delete agent.inProgressOperation;
+        // Force an immediate re-plan that incorporates the scenario:
+        //  - scheduleNeedsRefresh makes tickSchedule WANT to plan.
+        //  - forcePlan bypasses the 5-min cooldown AND the per-agent stagger
+        //    window so every agent reacts at once.
+        //  - clearing lastPlanAttempt removes any lingering cooldown.
+        //  - clearing the current activity is required: tickSchedule won't plan
+        //    while `doingActivity` is true.
+        agent.scheduleNeedsRefresh = true;
+        agent.forcePlan = true;
+        delete agent.lastPlanAttempt;
+        const player = game.world.players.get(agent.playerId);
+        if (player) {
+          delete player.activity;
+          if (player.pathfinding) stopPlayer(player);
+        }
+      }
+      return null;
+    },
+  }),
+  clearScenario: inputHandler({
+    args: {},
+    handler: (game, _now) => {
+      delete game.world.scenarioInstruction;
+      delete game.world.scenarioTarget;
+      delete game.world.scenarioName;
+      for (const agent of game.world.agents.values()) {
+        delete agent.scenarioInstruction;
+        delete agent.scenarioTarget;
+        delete agent.scenarioName;
+        delete agent.scenarioArrivalTime;
+      }
+      return null;
+    },
+  }),
+  startScenarioMeetAtPark: inputHandler({
+    args: {},
+    handler: (game, now) => {
+      const target = getParkTarget(game.worldMap);
+      game.world.scenarioTarget = target;
+      game.world.scenarioName = 'meetAtPark';
+      // Preempt all ongoing conversations so agents are immediately free to move.
+      for (const conversation of [...game.world.conversations.values()]) {
+        conversation.stop(game, now);
+      }
+      for (const agent of game.world.agents.values()) {
+        agent.scenarioTarget = target;
+        agent.scenarioName = 'meetAtPark';
+        // Drop any pending conversation memory from the just-stopped convos.
+        delete agent.toRemember;
+        // Orphan any in-flight LLM operation — finishDoSomething will see an
+        // operationId mismatch and bail out, preventing destination overrides.
+        delete agent.inProgressOperation;
+        // Reset arrival timer so the 30-second stay clock starts fresh.
+        delete agent.scenarioArrivalTime;
+        const player = game.world.players.get(agent.playerId);
+        if (!player) continue;
+        delete player.activity;
+        movePlayer(game, now, player, target, false, false);
+      }
+      return { target };
     },
   }),
 };

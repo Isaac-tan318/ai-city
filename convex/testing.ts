@@ -1,5 +1,6 @@
 import { Id, TableNames } from './_generated/dataModel';
 import { internal } from './_generated/api';
+import * as mapData from '../data/city';
 import {
   DatabaseReader,
   internalAction,
@@ -16,6 +17,7 @@ import { fetchEmbedding } from './util/llm';
 import { chatCompletion } from './util/llm';
 import { startConversationMessage } from './agent/conversation';
 import { GameId } from './aiTown/ids';
+import { point } from './util/types';
 
 // Clear all of the tables except for the embeddings cache.
 const excludedTables: Array<TableNames> = ['embeddingsCache'];
@@ -168,6 +170,73 @@ export const randomPositions = internalMutation({
   },
 });
 
+export const skipTime = mutation({
+  args: { skipMs: v.number() },
+  handler: async (ctx, { skipMs }) => {
+    if (process.env.STOP_NOT_ALLOWED) throw new Error('Stop not allowed');
+    const { worldStatus } = await getDefaultWorld(ctx.db);
+    // Route through the engine input system so the change lands in the engine's
+    // in-memory state and gets persisted on the next save (direct DB patches get
+    // overwritten when the engine flushes its world diff).
+    await insertInput(ctx, worldStatus.worldId, 'skipTime', { skipMs });
+  },
+});
+
+export const movePlayerTo = mutation({
+  args: {
+    playerId: v.id('players'),
+    destination: point,
+  },
+  handler: async (ctx, args) => {
+    const { worldStatus } = await getDefaultWorld(ctx.db);
+    // Route through engine inputs so the move is persisted.
+    await insertInput(ctx, worldStatus.worldId, 'moveTo', {
+      playerId: args.playerId,
+      destination: args.destination,
+    });
+  },
+});
+
+export const reinitMap = mutation({
+  handler: async (ctx) => {
+    const { worldStatus } = await getDefaultWorld(ctx.db);
+    const existing = await ctx.db
+      .query('maps')
+      .withIndex('worldId', (q) => q.eq('worldId', worldStatus.worldId))
+      .unique();
+    if (!existing) throw new Error('No map found for default world');
+    await ctx.db.patch(existing._id, {
+      width: (mapData as any).mapwidth,
+      height: (mapData as any).mapheight,
+      tileSetUrl: mapData.tilesetpath,
+      tileSetDimX: mapData.tilesetpxw,
+      tileSetDimY: mapData.tilesetpxh,
+      tileDim: mapData.tiledim,
+      bgTiles: mapData.bgtiles,
+      objectTiles: (mapData as any).objmap ?? [],
+      animatedSprites: (mapData as any).animatedsprites ?? [],
+    });
+    console.log(
+      `Map reloaded from data/city.js — tileset: ${mapData.tilesetpath}, ` +
+      `dims: ${mapData.tilesetpxw}x${mapData.tilesetpxh}, tileSize: ${mapData.tiledim}px`,
+    );
+  },
+});
+
+export const fixMapTilesetUrl = mutation({
+  args: { url: v.string() },
+  handler: async (ctx, { url }) => {
+    const { worldStatus } = await getDefaultWorld(ctx.db);
+    const map = await ctx.db
+      .query('maps')
+      .withIndex('worldId', (q) => q.eq('worldId', worldStatus.worldId))
+      .unique();
+    if (!map) throw new Error('No map found for default world');
+    await ctx.db.patch(map._id, { tileSetUrl: url });
+    console.log(`Updated tileSetUrl to: ${url}`);
+  },
+});
+
 export const testEmbedding = internalAction({
   args: { input: v.string() },
   handler: async (_ctx, args) => {
@@ -196,6 +265,7 @@ export const testConvo = internalAction({
       'c:115' as GameId<'conversations'>,
       'p:0' as GameId<'players'>,
       'p:6' as GameId<'players'>,
+      Date.now(),
     )) as any;
     return await a.readAll();
   },

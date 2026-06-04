@@ -6,47 +6,57 @@ import closeImg from '../../assets/close.svg';
 import interactImg from '../../assets/interact.svg';
 import { SelectElement } from './Player';
 import { Messages } from './Messages';
+import { toast } from 'react-toastify';
 import { toastOnError } from '../toasts';
 import { useSendInput } from '../hooks/sendInput';
 import { GameId } from '../../convex/aiTown/ids';
 import { ServerGame } from '../hooks/serverGame';
+import { computeGameTime } from '../../convex/aiTown/gameTime';
 
 const scenarioOptions = [
   {
-    id: 'restaurant',
-    title: 'Dinner Pact',
-    text: 'Meet for dinner!',
-    requiresTwoAgents: true,
-  },
-  // {
-  //   id: 'park',
-  //   title: 'Park Meetup',
-  //   text: 'Meet at the park!',
-  //   requiresTwoAgents: true,
-  // },
-  // {
-  //   id: 'rain',
-  //   title: 'Sudden Rain',
-  //   text: 'A quick change of plans.',
-  //   requiresTwoAgents: false,
-  // },
-  {
-    id: 'rumor',
-    title: 'Start a Rumor',
-    text: 'Start a rumor..',
-    requiresTwoAgents: true,
+    id: 'park',
+    title: 'Park Meetup',
+    text: 'Meet at the park!',
+    requiresTwoAgents: false,
   },
   {
-    id: 'debate',
-    title: 'Spark a Debate',
-    text: 'Challenge agents to a debate.',
-    requiresTwoAgents: true,
+    id: 'hawker-lunch',
+    title: 'Hawker Lunch Rush',
+    text:
+      "It's lunchtime and everyone is hungry. Head to the Hawker Centre now and sort " +
+      "out what to eat together, minding each other's dietary needs, allergies, and budgets.",
+    requiresTwoAgents: false,
   },
   {
-    id: 'interrogation',
-    title: 'questions',
-    text: 'Probe agents for recent memories.',
-    requiresTwoAgents: true,
+    id: 'late-night-ride',
+    title: 'Late-Night Ride Home',
+    text:
+      "It's past midnight and the trains have stopped running. Gather at the Marina Bay " +
+      'Sands taxi stand right now to figure out who shares a ride home and how to split the fare.',
+    requiresTwoAgents: false,
+  },
+  {
+    id: 'hdb-noise',
+    title: 'HDB Noise Complaint',
+    text:
+      "It's late at night and someone in the HDB Estate is blasting loud music. The " +
+      'neighbours are gathering at the HDB Estate now to settle the noise complaint.',
+    requiresTwoAgents: false,
+  },
+  {
+    id: 'medical-emergency',
+    title: 'Medical Emergency',
+    text:
+      'Someone has suddenly collapsed and feels very unwell. Rush to Changi General ' +
+      'Hospital immediately to help and decide what to do.',
+    requiresTwoAgents: false,
+  },
+  {
+    id: 'custom',
+    title: 'Custom Scenario',
+    text: '',
+    requiresTwoAgents: false,
   },
 ];
 
@@ -86,8 +96,10 @@ export default function PlayerDetails({
   const playerConversation = player && game.world.playerConversation(player);
 
   const [injectorOpen, setInjectorOpen] = useState(false);
-  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
-  const [scenarioText, setScenarioText] = useState('');
+  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(
+    scenarioOptions[0]?.id ?? null,
+  );
+  const [scenarioText, setScenarioText] = useState(scenarioOptions[0]?.text ?? '');
   const [targetAgent1, setTargetAgent1] = useState<GameId<'players'> | ''>('');
   const [targetAgent2, setTargetAgent2] = useState<GameId<'players'> | ''>('');
 
@@ -113,11 +125,32 @@ export default function PlayerDetails({
   );
 
   const playerDescription = playerId && game.playerDescriptions.get(playerId);
+  const agentForPlayer = useMemo(() => {
+    if (!playerId) return undefined;
+    for (const a of game.world.agents.values()) {
+      if (a.playerId === playerId) return a;
+    }
+    return undefined;
+  }, [game, playerId]);
+  const agentDescription = agentForPlayer
+    ? game.agentDescriptions.get(agentForPlayer.id)
+    : undefined;
+  const gameNow = computeGameTime(Date.now(), game.world.worldStartTime);
+  const formatScheduleTime = (mins: number) => {
+    const h24 = Math.floor(mins / 60) % 24;
+    const m = mins % 60;
+    const h12 = h24 % 12 || 12;
+    const ampm = h24 < 12 ? 'AM' : 'PM';
+    return `${h12}:${m.toString().padStart(2, '0')} ${ampm}`;
+  };
 
   const startConversation = useSendInput(engineId, 'startConversation');
   const acceptInvite = useSendInput(engineId, 'acceptInvite');
   const rejectInvite = useSendInput(engineId, 'rejectInvite');
   const leaveConversation = useSendInput(engineId, 'leaveConversation');
+  const startScenarioMeetAtPark = useSendInput(engineId, 'startScenarioMeetAtPark');
+  const startCustomScenario = useSendInput(engineId, 'startCustomScenario');
+  const clearScenario = useSendInput(engineId, 'clearScenario');
 
   const setDefaultSecondTarget = (primaryTarget: GameId<'players'> | '') => {
     if (!primaryTarget) {
@@ -130,6 +163,10 @@ export default function PlayerDetails({
 
   const onOpenInjector = (primaryTarget?: GameId<'players'>) => {
     setInjectorOpen(true);
+    if (!selectedScenarioId && scenarioOptions[0]) {
+      setSelectedScenarioId(scenarioOptions[0].id);
+      setScenarioText(scenarioOptions[0].text ?? '');
+    }
     if (primaryTarget) {
       setTargetAgent1(primaryTarget);
       if (targetAgent2 === primaryTarget || !targetAgent2) {
@@ -156,6 +193,33 @@ export default function PlayerDetails({
     ? scenarioText.trim()
     : 'Select a scenario or write a custom one below.';
 
+  const onStartScenario = async () => {
+    if (!selectedScenarioId) {
+      toast.error('Select a scenario to start.');
+      return;
+    }
+    if (selectedScenarioId === 'park') {
+      await toastOnError(startScenarioMeetAtPark({}));
+      setInjectorOpen(false);
+      return;
+    }
+    // Both the free-form "custom" option and the preset scenarios (Hawker Lunch,
+    // Late-Night Ride, etc.) feed their instruction text to the same injector.
+    // The text is editable in the textarea, so presets act as starting points the
+    // user can tweak before launching.
+    if (!scenarioText.trim()) {
+      toast.error('Write your scenario instructions before starting.');
+      return;
+    }
+    await toastOnError(startCustomScenario({ instruction: scenarioText.trim() }));
+    setInjectorOpen(false);
+  };
+
+  const onClearScenario = async () => {
+    await toastOnError(clearScenario({}));
+    toast.success('Scenario cleared — agents will resume normal behaviour.');
+  };
+
   const scenarioButton = (
     <button
       className="button text-white shadow-solid text-xl cursor-pointer pointer-events-auto"
@@ -163,8 +227,8 @@ export default function PlayerDetails({
       type="button"
     >
       <div className="h-full bg-clay-700 flex items-center gap-2 px-3">
-        <img className="w-5 h-5" src={interactImg} alt="Scenario" />
-        <span>scenario creator</span>
+        <img className="w-5 h-5 shrink-0" src={interactImg} alt="Scenario" />
+        <div className="leading-none">scenario creator</div>
       </div>
     </button>
   );
@@ -173,9 +237,8 @@ export default function PlayerDetails({
     <div
       className={
         'scenario-injector w-full box bg-gradient-to-br from-[#2d2438] to-[#1d1826] ' +
-        (playerId
-          ? 'mt-4 sm:w-[calc(100%+2rem)] sm:-mx-4'
-          : 'mt-36 pt-3 sm:w-[calc(100%+2rem)] sm:-mx-4')
+        'sm:w-[calc(100%+2rem)] sm:-mx-4 ' +
+        (playerId ? 'mt-4' : 'mt-[calc(9rem+75px)] pt-3')
       }
     >
       <div className="bg-brown-700 p-3 flex items-center justify-between text-lg sm:text-xl font-display tracking-widest">
@@ -197,6 +260,7 @@ export default function PlayerDetails({
           <div className="scenario-scroll grid gap-2 sm:grid-cols-2 max-h-56 overflow-y-auto pr-1">
             {scenarioOptions.map((scenario) => {
               const isActive = scenario.id === selectedScenarioId;
+              const isCustom = scenario.id === 'custom';
               return (
                 <button
                   key={scenario.id}
@@ -204,15 +268,19 @@ export default function PlayerDetails({
                     'rounded border px-3 py-2 text-left transition ' +
                     (isActive
                       ? 'border-amber-300 bg-amber-200/10 text-amber-100'
-                      : 'border-white/10 bg-white/5 hover:border-white/30')
+                      : isCustom
+                        ? 'border-dashed border-white/30 bg-white/5 hover:border-amber-300/60'
+                        : 'border-white/10 bg-white/5 hover:border-white/30')
                   }
                   type="button"
                   onClick={() => onSelectScenario(scenario.id)}
                 >
                   <div className="font-display text-sm sm:text-base leading-tight tracking-wider">
-                    {scenario.title}
+                    {isCustom ? '✏️ ' : ''}{scenario.title}
                   </div>
-                  <div className="text-xs leading-snug text-white/70">{scenario.text}</div>
+                  <div className="text-xs leading-snug text-white/70">
+                    {isCustom ? 'Write your own instructions below' : scenario.text}
+                  </div>
                 </button>
               );
             })}
@@ -267,24 +335,51 @@ export default function PlayerDetails({
           <p className="text-sm sm:text-base leading-relaxed text-white/90">{scenarioPreview}</p>
         </div>
 
-        <div className="rounded border border-white/15 bg-black/50 p-3">
+        <div
+          className={
+            'rounded border p-3 transition ' +
+            (selectedScenarioId === 'custom'
+              ? 'border-amber-300/60 bg-black/50'
+              : 'border-white/15 bg-black/50')
+          }
+        >
           <div className="text-xs uppercase tracking-widest text-amber-200/80">
-            Scenario chatbox
+            {selectedScenarioId === 'custom'
+              ? 'Your custom instructions'
+              : 'Scenario chatbox'}
           </div>
           <textarea
-            className="mt-2 w-full resize-none rounded bg-black/30 border border-white/10 px-3 py-2 text-sm sm:text-base"
-            placeholder="Describe the scenario you want to inject..."
-            rows={3}
+            className={
+              'mt-2 w-full resize-none rounded border px-3 py-2 text-sm sm:text-base bg-black/30 ' +
+              (selectedScenarioId === 'custom'
+                ? 'border-amber-300/40 focus:border-amber-300 outline-none'
+                : 'border-white/10')
+            }
+            placeholder={
+              selectedScenarioId === 'custom'
+                ? 'e.g. "Everyone is secretly a spy who must not reveal their identity"'
+                : 'Describe the scenario you want to inject...'
+            }
+            rows={selectedScenarioId === 'custom' ? 4 : 3}
+            autoFocus={selectedScenarioId === 'custom'}
             value={scenarioText}
             onChange={(event) => setScenarioText(event.target.value)}
           />
         </div>
 
-        <div className="flex justify-end">
+        <div className="flex justify-between gap-3">
+          <button
+            className="button text-white shadow-solid text-sm cursor-pointer pointer-events-auto opacity-70 hover:opacity-100"
+            type="button"
+            onClick={onClearScenario}
+            title="Remove any active scenario from all agents"
+          >
+            <div className="h-full bg-clay-700 px-3 py-2 text-center">Clear scenario</div>
+          </button>
           <button
             className="button text-white shadow-solid text-base sm:text-lg cursor-pointer pointer-events-auto"
             type="button"
-            onClick={() => setInjectorOpen(false)}
+            onClick={onStartScenario}
           >
             <div className="h-full bg-clay-700 px-4 py-2 text-center">Start scenario</div>
           </button>
@@ -479,6 +574,41 @@ export default function PlayerDetails({
           )}
         </p>
       </div>
+      {!isMe && agentForPlayer?.schedule && agentForPlayer.schedule.length > 0 && (
+        <div className="box flex-grow mb-4">
+          <h2 className="bg-brown-700 text-base sm:text-lg text-center px-2 py-1">
+            Today's schedule · Day {gameNow.dayNumber}
+          </h2>
+          <ul className="bg-brown-700 text-sm leading-snug px-3 pb-3 pt-2 flex flex-col gap-1">
+            {agentForPlayer.schedule.map((step, idx) => {
+              const next = agentForPlayer.schedule![idx + 1];
+              const isCurrent =
+                gameNow.minutesIntoDay >= step.startMinute &&
+                (!next || gameNow.minutesIntoDay < next.startMinute);
+              const isPast = next ? gameNow.minutesIntoDay >= next.startMinute : false;
+              return (
+                <li
+                  key={idx}
+                  className={
+                    'flex items-start gap-2 ' +
+                    (isCurrent
+                      ? 'text-amber-200 font-semibold'
+                      : isPast
+                        ? 'text-white/50 line-through'
+                        : 'text-white/90')
+                  }
+                >
+                  <span className="font-mono text-xs shrink-0 w-16">
+                    {formatScheduleTime(step.startMinute)}
+                  </span>
+                  <span className="shrink-0">{step.emoji ?? '·'}</span>
+                  <span className="flex-1">{step.description || step.activity}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
       {!isMe && playerConversation && playerStatus?.kind === 'participating' && (
         <Messages
           worldId={worldId}
@@ -487,6 +617,7 @@ export default function PlayerDetails({
           conversation={{ kind: 'active', doc: playerConversation }}
           humanPlayer={humanPlayer}
           scrollViewRef={scrollViewRef}
+          worldStartTime={game.world.worldStartTime}
         />
       )}
       {!playerConversation && previousConversation && (
@@ -501,6 +632,7 @@ export default function PlayerDetails({
             conversation={{ kind: 'archived', doc: previousConversation }}
             humanPlayer={humanPlayer}
             scrollViewRef={scrollViewRef}
+            worldStartTime={game.world.worldStartTime}
           />
         </>
       )}

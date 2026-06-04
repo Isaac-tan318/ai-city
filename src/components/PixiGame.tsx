@@ -1,7 +1,7 @@
 import * as PIXI from 'pixi.js';
-import { useApp } from '@pixi/react';
+import { useApp, useTick } from '@pixi/react';
 import { Player, SelectElement } from './Player.tsx';
-import { useEffect, useRef, useState } from 'react';
+import { MutableRefObject, useEffect, useRef, useState } from 'react';
 import { PixiStaticMap } from './PixiStaticMap.tsx';
 import PixiViewport from './PixiViewport.tsx';
 import { Viewport } from 'pixi-viewport';
@@ -15,6 +15,39 @@ import { PositionIndicator } from './PositionIndicator.tsx';
 import { SHOW_DEBUG_UI } from './Game.tsx';
 import { ServerGame } from '../hooks/serverGame.ts';
 
+const CYCLE_MS = 10 * 60 * 1000;
+const DAY_MS = 5 * 60 * 1000;
+
+// One game-hour in real-world ms (CYCLE_MS represents 24 game-hours).
+const GAME_HOUR_MS = CYCLE_MS / 24;
+
+// p=0 → 6 AM, p=DAY_MS → 6 PM, p=CYCLE_MS → 6 AM next day.
+// Dusk starts at 9 PM (3 hours into the night half) and lasts 1 game-hour.
+// Dawn starts 1 game-hour before the cycle resets (5 AM) and finishes at 6 AM.
+const DUSK_START_MS = DAY_MS + 3 * GAME_HOUR_MS;   // 9 PM
+const DUSK_END_MS   = DAY_MS + 4 * GAME_HOUR_MS;   // 10 PM  (fully dark)
+const DAWN_START_MS = CYCLE_MS - 1 * GAME_HOUR_MS; // 5 AM   (starts brightening)
+// Dawn ends at CYCLE_MS (= 6 AM, p wraps to 0).
+
+function nightAlpha(historicalTime: number, worldStartTime: number): number {
+  const elapsed = historicalTime - worldStartTime;
+  const p = ((elapsed % CYCLE_MS) + CYCLE_MS) % CYCLE_MS;
+
+  if (p < DUSK_START_MS) {
+    // 6 AM → 9 PM: full daylight
+    return 0;
+  } else if (p < DUSK_END_MS) {
+    // 9 PM → 10 PM: dusk — ramp up to full night
+    return 0.3 * ((p - DUSK_START_MS) / (DUSK_END_MS - DUSK_START_MS));
+  } else if (p < DAWN_START_MS) {
+    // 10 PM → 5 AM: full night
+    return 0.3;
+  } else {
+    // 5 AM → 6 AM: dawn — fade back to day
+    return 0.3 * (1 - (p - DAWN_START_MS) / (CYCLE_MS - DAWN_START_MS));
+  }
+}
+
 export const PixiGame = (props: {
   worldId: Id<'worlds'>;
   engineId: Id<'engines'>;
@@ -23,10 +56,12 @@ export const PixiGame = (props: {
   width: number;
   height: number;
   setSelectedElement: SelectElement;
+  viewportRef?: MutableRefObject<Viewport | undefined>;
 }) => {
   // PIXI setup.
   const pixiApp = useApp();
-  const viewportRef = useRef<Viewport | undefined>();
+  const localViewportRef = useRef<Viewport | undefined>();
+  const viewportRef = props.viewportRef ?? localViewportRef;
 
   const humanTokenIdentifier = useQuery(api.world.userStatus, { worldId: props.worldId }) ?? null;
   const humanPlayerId = [...props.game.world.players.values()].find(
@@ -82,7 +117,7 @@ export const PixiGame = (props: {
   const { width, height, tileDim } = props.game.worldMap;
   const players = [...props.game.world.players.values()];
 
-  // Zoom on the user’s avatar when it is created
+  // Zoom on the user's avatar when it is created
   useEffect(() => {
     if (!viewportRef.current || humanPlayerId === undefined) return;
 
@@ -92,6 +127,34 @@ export const PixiGame = (props: {
       scale: 1.5,
     });
   }, [humanPlayerId]);
+
+  // Night overlay — a screen-space PIXI.Graphics added directly to the stage
+  // so it covers the full canvas and doesn't scroll with the viewport.
+  const overlayRef = useRef<PIXI.Graphics | null>(null);
+  useEffect(() => {
+    const g = new PIXI.Graphics();
+    pixiApp.stage.addChild(g);
+    overlayRef.current = g;
+    return () => {
+      pixiApp.stage.removeChild(g);
+      g.destroy();
+      overlayRef.current = null;
+    };
+  }, [pixiApp]);
+
+  useTick(() => {
+    const g = overlayRef.current;
+    const worldStartTime = props.game.world.worldStartTime;
+    if (!g || !props.historicalTime || !worldStartTime) return;
+
+    const alpha = nightAlpha(props.historicalTime, worldStartTime);
+    g.clear();
+    if (alpha > 0) {
+      g.beginFill(0x001530, alpha);
+      g.drawRect(0, 0, props.width, props.height);
+      g.endFill();
+    }
+  });
 
   return (
     <PixiViewport

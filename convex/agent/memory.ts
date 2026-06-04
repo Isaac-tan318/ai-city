@@ -7,6 +7,7 @@ import { asyncMap } from '../util/asyncMap';
 import { GameId, agentId, conversationId, playerId } from '../aiTown/ids';
 import { SerializedPlayer } from '../aiTown/player';
 import { memoryFields } from './schema';
+import { formatGameTimestamp } from '../aiTown/gameTime';
 
 // How long to wait before updating a memory's last access time.
 export const MEMORY_ACCESS_THROTTLE = 300_000; // In ms
@@ -33,7 +34,7 @@ export async function rememberConversation(
     playerId,
     conversationId,
   });
-  const { player, otherPlayer } = data;
+  const { player, otherPlayer, worldStartTime } = data;
   const messages = await ctx.runQuery(selfInternal.loadMessages, { worldId, conversationId });
   if (!messages.length) {
     return;
@@ -44,7 +45,10 @@ export async function rememberConversation(
       role: 'user',
       content: `You are ${player.name}, and you just finished a conversation with ${otherPlayer.name}. I would
       like you to summarize the conversation from ${player.name}'s perspective, using first-person pronouns like
-      "I," and add if you liked or disliked this interaction.`,
+      "I," and add if you liked or disliked this interaction. Then, on a final line beginning with
+      "Commitments:", state any concrete plans you agreed to (who, what, where, and when) — for example
+      "Commitments: meet ${otherPlayer.name} at the hawker centre at 3pm". If you made no concrete plans, write
+      "Commitments: none".`,
     },
   ];
   const authors = new Set<GameId<'players'>>();
@@ -62,9 +66,10 @@ export async function rememberConversation(
     messages: llmMessages,
     max_tokens: 500,
   });
-  const description = `Conversation with ${otherPlayer.name} at ${new Date(
+  const description = `Conversation with ${otherPlayer.name} at ${formatGameTimestamp(
     data.conversation._creationTime,
-  ).toLocaleString()}: ${content}`;
+    worldStartTime,
+  )}: ${content}`;
   const importance = await calculateImportance(description);
   const { embedding } = await fetchEmbedding(description);
   authors.delete(player.id as GameId<'players'>);
@@ -151,6 +156,7 @@ export const loadConversation = internalQuery({
       player: { ...player, name: playerDescription.name },
       conversation,
       otherPlayer: { ...otherPlayer, name: otherPlayerDescription.name },
+      worldStartTime: world.worldStartTime,
     };
   },
 });

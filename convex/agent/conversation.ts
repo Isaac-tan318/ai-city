@@ -7,6 +7,8 @@ import { api, internal } from '../_generated/api';
 import * as embeddingsCache from './embeddingsCache';
 import { GameId, conversationId, playerId } from '../aiTown/ids';
 import { NUM_MEMORIES_TO_SEARCH } from '../constants';
+import { computeGameTime, formatGameTimestamp } from '../aiTown/gameTime';
+import { CITY_LOCATIONS } from '../../data/cityLocations';
 
 const selfInternal = internal.agent.conversation;
 
@@ -16,16 +18,15 @@ export async function startConversationMessage(
   conversationId: GameId<'conversations'>,
   playerId: GameId<'players'>,
   otherPlayerId: GameId<'players'>,
+  gameTimeMs: number,
 ): Promise<string> {
-  const { player, otherPlayer, agent, otherAgent, lastConversation } = await ctx.runQuery(
-    selfInternal.queryPromptData,
-    {
+  const { player, otherPlayer, agent, otherAgent, lastConversation, worldStartTime } =
+    await ctx.runQuery(selfInternal.queryPromptData, {
       worldId,
       playerId,
       otherPlayerId,
       conversationId,
-    },
-  );
+    });
   const embedding = await embeddingsCache.fetch(
     ctx,
     `${player.name} is talking to ${otherPlayer.name}`,
@@ -44,14 +45,20 @@ export async function startConversationMessage(
   const prompt = [
     `You are ${player.name}, and you just started a conversation with ${otherPlayer.name}.`,
   ];
+  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
   prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
-  prompt.push(...previousConversationPrompt(otherPlayer, lastConversation));
+  prompt.push(
+    ...previousConversationPrompt(otherPlayer, lastConversation, worldStartTime, gameTimeMs),
+  );
   prompt.push(...relatedMemoriesPrompt(memories));
   if (memoryWithOtherPlayer) {
     prompt.push(
-      `Be sure to include some detail or question about a previous conversation in your greeting.`,
+      `You may briefly reference your last conversation in one short clause, but keep it light.`,
     );
   }
+  prompt.push(
+    `Keep your greeting to one or two short sentences, like real spoken dialogue — under 200 characters. Don't monologue or give a speech.`,
+  );
   const lastPrompt = `${player.name} to ${otherPlayer.name}:`;
   prompt.push(lastPrompt);
 
@@ -62,7 +69,7 @@ export async function startConversationMessage(
         content: prompt.join('\n'),
       },
     ],
-    max_tokens: 300,
+    max_tokens: 120,
     stop: stopWords(otherPlayer.name, player.name),
   });
   return trimContentPrefx(content, lastPrompt);
@@ -81,18 +88,15 @@ export async function continueConversationMessage(
   conversationId: GameId<'conversations'>,
   playerId: GameId<'players'>,
   otherPlayerId: GameId<'players'>,
+  gameTimeMs: number,
 ): Promise<string> {
-  const { player, otherPlayer, conversation, agent, otherAgent } = await ctx.runQuery(
-    selfInternal.queryPromptData,
-    {
+  const { player, otherPlayer, conversation, agent, otherAgent, worldStartTime } =
+    await ctx.runQuery(selfInternal.queryPromptData, {
       worldId,
       playerId,
       otherPlayerId,
       conversationId,
-    },
-  );
-  const now = Date.now();
-  const started = new Date(conversation.created);
+    });
   const embedding = await embeddingsCache.fetch(
     ctx,
     `What do you think about ${otherPlayer.name}?`,
@@ -100,8 +104,9 @@ export async function continueConversationMessage(
   const memories = await memory.searchMemories(ctx, player.id as GameId<'players'>, embedding, 3);
   const prompt = [
     `You are ${player.name}, and you're currently in a conversation with ${otherPlayer.name}.`,
-    `The conversation started at ${started.toLocaleString()}. It's now ${now.toLocaleString()}.`,
+    `The conversation started at ${formatGameTimestamp(conversation.created, worldStartTime)}.`,
   ];
+  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
   prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
   prompt.push(...relatedMemoriesPrompt(memories));
   prompt.push(
@@ -139,20 +144,20 @@ export async function leaveConversationMessage(
   conversationId: GameId<'conversations'>,
   playerId: GameId<'players'>,
   otherPlayerId: GameId<'players'>,
+  gameTimeMs: number,
 ): Promise<string> {
-  const { player, otherPlayer, conversation, agent, otherAgent } = await ctx.runQuery(
-    selfInternal.queryPromptData,
-    {
+  const { player, otherPlayer, conversation, agent, otherAgent, worldStartTime } =
+    await ctx.runQuery(selfInternal.queryPromptData, {
       worldId,
       playerId,
       otherPlayerId,
       conversationId,
-    },
-  );
+    });
   const prompt = [
     `You are ${player.name}, and you're currently in a conversation with ${otherPlayer.name}.`,
     `You've decided to leave the question and would like to politely tell them you're leaving the conversation.`,
   ];
+  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
   prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
   prompt.push(
     `Below is the current chat history between you and ${otherPlayer.name}.`,
@@ -184,16 +189,21 @@ export async function leaveConversationMessage(
 
 function agentPrompts(
   otherPlayer: { name: string },
-  agent: { identity: string; plan: string } | null,
-  otherAgent: { identity: string; plan: string } | null,
+  agent: { identity: string; scenarioInstruction?: string } | null,
+  otherAgent: { identity: string } | null,
 ): string[] {
   const prompt = [];
   if (agent) {
     prompt.push(`About you: ${agent.identity}`);
-    prompt.push(`Your goals for the conversation: ${agent.plan}`);
   }
   if (otherAgent) {
     prompt.push(`About ${otherPlayer.name}: ${otherAgent.identity}`);
+  }
+  if (agent?.scenarioInstruction) {
+    prompt.push(
+      `SCENARIO DIRECTIVE (follow this right now): ${agent.scenarioInstruction}`,
+      `Weave this directive naturally into the conversation without breaking character.`,
+    );
   }
   return prompt;
 }
@@ -201,16 +211,49 @@ function agentPrompts(
 function previousConversationPrompt(
   otherPlayer: { name: string },
   conversation: { created: number } | null,
+  worldStartTime: number | undefined,
+  gameTimeMs: number,
 ): string[] {
   const prompt = [];
   if (conversation) {
-    const prev = new Date(conversation.created);
-    const now = new Date();
+    const prev = formatGameTimestamp(conversation.created, worldStartTime);
+    const now = formatGameTimestamp(gameTimeMs, worldStartTime);
+    prompt.push(`Last time you chatted with ${otherPlayer.name} it was ${prev}. It's now ${now}.`);
+  }
+  return prompt;
+}
+
+function currentTimeAndPlacePrompt(
+  position: { x: number; y: number },
+  worldStartTime: number | undefined,
+  gameTimeMs: number,
+  agent: { schedule?: any[]; currentStepIndex?: number } | null,
+): string[] {
+  const prompt: string[] = [];
+  if (worldStartTime !== undefined) {
+    const gt = computeGameTime(gameTimeMs, worldStartTime);
     prompt.push(
-      `Last time you chatted with ${
-        otherPlayer.name
-      } it was ${prev.toLocaleString()}. It's now ${now.toLocaleString()}.`,
+      `It is currently Day ${gt.dayNumber}, ${gt.timeStr} (${gt.isDay ? 'daytime' : 'nighttime'}) in Singapore.`,
     );
+  }
+  // Find the nearest named location.
+  let nearest: { name: string; d: number } | null = null;
+  for (const loc of CITY_LOCATIONS) {
+    const dx = loc.x - position.x;
+    const dy = loc.y - position.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (!nearest || d < nearest.d) nearest = { name: loc.name, d };
+  }
+  if (nearest) {
+    if (nearest.d <= 3) prompt.push(`You are at ${nearest.name}.`);
+    else if (nearest.d <= 8) prompt.push(`You are on the street near ${nearest.name}.`);
+    else prompt.push(`You are somewhere in the city, away from major landmarks.`);
+  }
+  if (agent && agent.schedule && agent.currentStepIndex !== undefined) {
+    const step = agent.schedule[agent.currentStepIndex];
+    if (step && step.description) {
+      prompt.push(`Your current plan: ${step.description}.`);
+    }
   }
   return prompt;
 }
@@ -334,13 +377,13 @@ export const queryPromptData = internalQuery({
       player: { name: playerDescription.name, ...player },
       otherPlayer: { name: otherPlayerDescription.name, ...otherPlayer },
       conversation,
-      agent: { identity: agentDescription.identity, plan: agentDescription.plan, ...agent },
+      agent: { identity: agentDescription.identity, ...agent },
       otherAgent: otherAgent && {
         identity: otherAgentDescription!.identity,
-        plan: otherAgentDescription!.plan,
         ...otherAgent,
       },
       lastConversation,
+      worldStartTime: world.worldStartTime,
     };
   },
 });

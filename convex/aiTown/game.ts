@@ -175,6 +175,9 @@ export class Game extends AbstractGame {
   }
 
   tick(now: number) {
+    if (this.world.worldStartTime === undefined) {
+      this.world.worldStartTime = now;
+    }
     for (const player of this.world.players.values()) {
       player.tick(this, now);
     }
@@ -261,6 +264,8 @@ export class Game extends AbstractGame {
     }
     for (const conversation of existingWorld.conversations) {
       if (!newWorld.conversations.some((c) => c.id === conversation.id)) {
+        // Don't archive empty conversations — they clutter history and the graph.
+        if (conversation.numMessages === 0) continue;
         const participants = conversation.participants.map((p) => p.playerId);
         const archivedConversation = {
           worldId,

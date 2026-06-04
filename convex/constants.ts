@@ -64,11 +64,48 @@ export const DELETE_BATCH_SIZE = 64;
 
 export const HUMAN_IDLE_TOO_LONG = 5 * 60 * 1000;
 
-export const ACTIVITIES = [
-  { description: 'reading a book', emoji: '📖', duration: 60_000 },
-  { description: 'daydreaming', emoji: '🤔', duration: 60_000 },
-  { description: 'gardening', emoji: '🥕', duration: 60_000 },
+export type Activity = { description: string; emoji: string; duration: number };
+
+// Generic fallback used for humans or any character without a bespoke list.
+export const ACTIVITIES: Activity[] = [
+  { description: 'reading a book', emoji: '📖', duration: 20_000 },
+  { description: 'daydreaming', emoji: '🤔', duration: 20_000 },
+  { description: 'people-watching', emoji: '👀', duration: 20_000 },
 ];
+
+// Per-character activities so free-roam behaviour reflects who the agent is,
+// rather than everyone reading/daydreaming/gardening at random.
+export const CHARACTER_ACTIVITIES: Record<string, Activity[]> = {
+  Cedric: [
+    { description: 'wiping down the counter', emoji: '☕', duration: 20_000 },
+    { description: 'chatting up a regular', emoji: '💬', duration: 20_000 },
+    { description: 'humming a tune', emoji: '🎶', duration: 20_000 },
+  ],
+  James: [
+    { description: 'waiting for a fare', emoji: '🚗', duration: 20_000 },
+    { description: 'checking the Grab app', emoji: '📱', duration: 20_000 },
+    { description: 'cracking a joke with a passenger', emoji: '😄', duration: 20_000 },
+  ],
+  Sarah: [
+    { description: 'frying up an order', emoji: '🍳', duration: 20_000 },
+    { description: 'wiping down the tables', emoji: '🧽', duration: 20_000 },
+    { description: 'sneaking in an extra egg', emoji: '🥚', duration: 20_000 },
+  ],
+  Isabel: [
+    { description: 'scribbling equations', emoji: '📝', duration: 20_000 },
+    { description: 'reading a paper', emoji: '📄', duration: 20_000 },
+    { description: 'lost in thought', emoji: '🧠', duration: 20_000 },
+  ],
+  Xavier: [
+    { description: "debugging a friend's code", emoji: '💻', duration: 20_000 },
+    { description: 'sipping iced Milo', emoji: '🥤', duration: 20_000 },
+    { description: 'rushing a deadline', emoji: '😩', duration: 20_000 },
+  ],
+};
+
+export function activitiesForName(name?: string): Activity[] {
+  return (name && CHARACTER_ACTIVITIES[name]) || ACTIVITIES;
+}
 
 export const ENGINE_ACTION_DURATION = 30000;
 
@@ -76,3 +113,15 @@ export const ENGINE_ACTION_DURATION = 30000;
 export const MAX_PATHFINDS_PER_STEP = 16;
 
 export const DEFAULT_NAME = 'Me';
+
+// Tile distance at which an agent counts as "arrived" at a scheduled location.
+export const ARRIVAL_RADIUS = 1.5;
+
+// If an agent's current schedule step has been overdue for this many game-minutes
+// AND they still haven't reached the location, trigger a re-plan.
+export const SCHEDULE_DISRUPTION_MINUTES = 60;
+
+// Tile radius within which a settled (arrived) agent will look for another free
+// agent to strike up a conversation with. This is what makes conversations
+// emerge from agents' schedules bringing them to the same place.
+export const SCHEDULE_CHAT_RADIUS = 6;

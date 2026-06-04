@@ -1,10 +1,10 @@
 // That's right! No imports and no dependencies 🤯
 
 const OPENAI_EMBEDDING_DIMENSION = 1536;
-const TOGETHER_EMBEDDING_DIMENSION = 768;
+const TOGETHER_EMBEDDING_DIMENSION = 768; //gemini
 const OLLAMA_EMBEDDING_DIMENSION = 1024;
 
-export const EMBEDDING_DIMENSION: number = 768; //gemini
+export const EMBEDDING_DIMENSION: number = 768;
 
 export function detectMismatchedLLMProvider() {
   switch (EMBEDDING_DIMENSION) {
@@ -41,6 +41,10 @@ export interface LLMConfig {
   embeddingModel: string;
   stopWords: string[];
   apiKey: string | undefined;
+  apiVersion?: string; // Azure OpenAI requires ?api-version=... on every request
+  // Optional separate config for embeddings (e.g. Azure chat + Gemini embeddings)
+  embeddingUrl?: string;
+  embeddingApiKey?: string;
 }
 
 export function getLLMConfig(): LLMConfig {
@@ -79,6 +83,9 @@ export function getLLMConfig(): LLMConfig {
     if (!chatModel) throw new Error('LLM_MODEL is required');
     const embeddingModel = process.env.LLM_EMBEDDING_MODEL;
     if (!embeddingModel) throw new Error('LLM_EMBEDDING_MODEL is required');
+    const apiVersion = process.env.LLM_API_VERSION;
+    const embeddingUrl = process.env.LLM_EMBEDDING_URL;
+    const embeddingApiKey = process.env.LLM_EMBEDDING_API_KEY;
     return {
       provider: 'custom',
       url,
@@ -86,6 +93,9 @@ export function getLLMConfig(): LLMConfig {
       embeddingModel,
       stopWords: [],
       apiKey,
+      apiVersion,
+      embeddingUrl,
+      embeddingApiKey,
     };
   }
   // Assume Ollama
@@ -109,12 +119,46 @@ export function getLLMConfig(): LLMConfig {
   };
 }
 
-const AuthHeaders = (): Record<string, string> =>
-  getLLMConfig().apiKey
-    ? {
-        Authorization: 'Bearer ' + getLLMConfig().apiKey,
-      }
-    : {};
+// Azure OpenAI uses api-key header; all other providers use Authorization: Bearer
+const AuthHeaders = (): Record<string, string> => {
+  const config = getLLMConfig();
+  if (!config.apiKey) return {};
+  if (config.apiVersion) return { 'api-key': config.apiKey };
+  return { Authorization: 'Bearer ' + config.apiKey };
+};
+
+const EmbeddingAuthHeaders = (): Record<string, string> => {
+  const config = getLLMConfig();
+  const key = config.embeddingApiKey ?? config.apiKey;
+  if (!key) return {};
+  // Use Bearer for the embedding endpoint unless it's also Azure (same apiVersion set and no separate embeddingUrl)
+  if (config.apiVersion && !config.embeddingUrl) return { 'api-key': key };
+  return { Authorization: 'Bearer ' + key };
+};
+
+// Builds the chat completions URL.
+// For Azure: {base}/openai/deployments/{deployment}/chat/completions?api-version={version}
+// For others: {base}/chat/completions
+function buildChatUrl(config: LLMConfig): string {
+  const base = config.url.replace(/\/$/, '');
+  if (config.apiVersion) {
+    return `${base}/openai/deployments/${config.chatModel}/chat/completions?api-version=${config.apiVersion}`;
+  }
+  return `${base}/chat/completions`;
+}
+
+// Builds the embeddings URL using the embedding-specific base URL if configured.
+function buildEmbeddingUrl(config: LLMConfig): string {
+  if (config.embeddingUrl) {
+    // Separate provider (e.g. Gemini) — just append /embeddings
+    return `${config.embeddingUrl.replace(/\/$/, '')}/embeddings`;
+  }
+  const base = config.url.replace(/\/$/, '');
+  if (config.apiVersion) {
+    return `${base}/openai/deployments/${config.embeddingModel}/embeddings?api-version=${config.apiVersion}`;
+  }
+  return `${base}/embeddings`;
+}
 
 // Overload for non-streaming
 export async function chatCompletion(
@@ -147,7 +191,7 @@ export async function chatCompletion(
     retries,
     ms,
   } = await retryWithBackoff(async () => {
-    const chatUrl = `${config.url.replace(/\/$/, '')}/chat/completions`;
+    const chatUrl = buildChatUrl(config);
     console.log('[DEBUG] Chat URL:', chatUrl, '| Model:', body.model);
     const result = await fetch(chatUrl, {
       method: 'POST',
@@ -219,20 +263,30 @@ export async function fetchEmbeddingBatch(texts: string[]) {
     retries,
     ms,
   } = await retryWithBackoff(async () => {
-    const embeddingUrl = `${config.url.replace(/\/$/, '')}/embeddings`;
+    const embeddingUrl = buildEmbeddingUrl(config);
     console.log('[DEBUG] Embedding URL:', embeddingUrl, '| Model:', config.embeddingModel);
+    const requestBody: Record<string, unknown> = {
+      model: config.embeddingModel,
+      input: texts.map((text) => text.replace(/\n/g, ' ')),
+    };
+    // Only send `dimensions` for OpenAI, whose text-embedding-3-* models support
+    // Matryoshka dimension truncation. Other providers (e.g. OpenRouter-proxied
+    // BGE) REJECT this param — and OpenRouter returns the rejection as HTTP 200
+    // wrapping a 400 error body, which slips past the !result.ok check below and
+    // then crashes on `json.data.length`. That crash silently bricked every
+    // message-generation and remember operation. BGE is natively 768-dim, so the
+    // param was redundant here anyway.
+    if (config.provider === 'openai') {
+      requestBody.dimensions = EMBEDDING_DIMENSION;
+    }
     const result = await fetch(embeddingUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...AuthHeaders(),
+        ...EmbeddingAuthHeaders(),
       },
 
-      body: JSON.stringify({
-        model: config.embeddingModel,
-        input: texts.map((text) => text.replace(/\n/g, ' ')),
-        dimensions: EMBEDDING_DIMENSION,
-      }),
+      body: JSON.stringify(requestBody),
     });
     if (!result.ok) {
       throw {
@@ -240,7 +294,21 @@ export async function fetchEmbeddingBatch(texts: string[]) {
         error: new Error(`Embedding failed with code ${result.status}: ${await result.text()}`),
       };
     }
-    return (await result.json()) as CreateEmbeddingResponse;
+    const parsed = (await result.json()) as CreateEmbeddingResponse & {
+      error?: { message?: string; code?: number };
+    };
+    // Defensive: some providers (OpenRouter) return HTTP 200 with an { error }
+    // body and no `data`. Surface a clear, retryable error instead of crashing
+    // on `json.data.length` (which would leave the calling agent operation stuck
+    // until ACTION_TIMEOUT).
+    if (!parsed || !Array.isArray(parsed.data)) {
+      const detail = parsed?.error?.message ?? JSON.stringify(parsed)?.slice(0, 300);
+      throw {
+        retry: false,
+        error: new Error(`Embedding response missing data array: ${detail}`),
+      };
+    }
+    return parsed as CreateEmbeddingResponse;
   });
   if (json.data.length !== texts.length) {
     console.error(json);

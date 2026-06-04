@@ -42,6 +42,11 @@ into regular Convex tables, queries, and mutations, only logging key bits into g
 AI Town's data model has a few concepts:
 
 - Worlds (`convex/aiTown/world.ts`) represent a map with many players interacting together.
+- Maps are stored as tile layers in the `maps` table (`convex/aiTown/schema.ts`) and loaded into
+  `WorldMap` (`convex/aiTown/worldMap.ts`). The current city map is defined programmatically in
+  `data/city.js`, and the tileset is generated at runtime using the Canvas API in
+  `src/cityTileset.ts`. The special tileset URL `__city__` (see `data/city.js`) tells the renderer
+  (`src/components/PixiStaticMap.tsx`) to use a procedurally drawn canvas instead of loading a PNG.
 - Players (`convex/aiTown/player.ts`) are the core characters in the game. Players have human readable names and
   descriptions, and they may be associated with a human user. At any point in time, a player may be pathfinding
   towards some destination and has a current location.

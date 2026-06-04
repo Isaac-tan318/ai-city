@@ -18,10 +18,23 @@ import {
 } from '../constants';
 import { FunctionArgs } from 'convex/server';
 import { MutationCtx, internalMutation, internalQuery } from '../_generated/server';
-import { distance } from '../util/geometry';
+import { distance, pointsEqual } from '../util/geometry';
 import { internal } from '../_generated/api';
-import { movePlayer } from './movement';
+import { movePlayer, stopPlayer, pickParkWaypoint } from './movement';
 import { insertInput } from './insertInput';
+import { point, Point } from '../util/types';
+import { computeGameTime } from './gameTime';
+import { ARRIVAL_RADIUS, SCHEDULE_DISRUPTION_MINUTES, SCHEDULE_CHAT_RADIUS } from '../constants';
+import { getLocationById, homeFor } from '../../data/cityLocations';
+
+export type ScheduleStep = {
+  startMinute: number;
+  locationId: string;
+  destination: Point;
+  activity: string;
+  emoji?: string;
+  description: string;
+};
 
 export class Agent {
   id: GameId<'agents'>;
@@ -34,9 +47,42 @@ export class Agent {
     operationId: string;
     started: number;
   };
+  scenarioTarget?: Point;
+  scenarioName?: string;
+  scenarioArrivalTime?: number;
+  scenarioInstruction?: string;
+  home?: Point;
+  schedule?: ScheduleStep[];
+  scheduleGeneratedForDay?: number;
+  currentStepIndex?: number;
+  // Hard cooldown to prevent any path through tickSchedule from re-firing
+  // `agentPlanDay` more than once per ~60s real time per agent. Protects
+  // against ACTION_TIMEOUT re-fires when the LLM is slow.
+  lastPlanAttempt?: number;
+  scheduleNeedsRefresh?: boolean;
+  // Set by a custom-scenario injection to force an immediate re-plan that
+  // bypasses the normal plan cooldown/stagger throttle. Consumed (deleted) the
+  // moment the replan fires.
+  forcePlan?: boolean;
 
   constructor(serialized: SerializedAgent) {
-    const { id, lastConversation, lastInviteAttempt, inProgressOperation } = serialized;
+    const {
+      id,
+      lastConversation,
+      lastInviteAttempt,
+      inProgressOperation,
+      scenarioTarget,
+      scenarioName,
+      scenarioArrivalTime,
+      scenarioInstruction,
+      home,
+      schedule,
+      scheduleGeneratedForDay,
+      currentStepIndex,
+      lastPlanAttempt,
+      scheduleNeedsRefresh,
+      forcePlan,
+    } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
     this.playerId = playerId;
@@ -47,12 +93,76 @@ export class Agent {
     this.lastConversation = lastConversation;
     this.lastInviteAttempt = lastInviteAttempt;
     this.inProgressOperation = inProgressOperation;
+    this.scenarioTarget = scenarioTarget;
+    this.scenarioName = scenarioName;
+    this.scenarioArrivalTime = scenarioArrivalTime;
+    this.scenarioInstruction = scenarioInstruction;
+    this.home = home;
+    this.schedule = schedule;
+    this.scheduleGeneratedForDay = scheduleGeneratedForDay;
+    this.currentStepIndex = currentStepIndex;
+    this.lastPlanAttempt = lastPlanAttempt;
+    this.scheduleNeedsRefresh = scheduleNeedsRefresh;
+    this.forcePlan = forcePlan;
   }
 
   tick(game: Game, now: number) {
     const player = game.world.players.get(this.playerId);
     if (!player) {
       throw new Error(`Invalid player ID ${this.playerId}`);
+    }
+    if (!this.scenarioTarget && !this.scenarioArrivalTime && game.world.scenarioTarget) {
+      this.scenarioTarget = game.world.scenarioTarget;
+      this.scenarioName = game.world.scenarioName;
+    }
+    if (this.scenarioInstruction === undefined && game.world.scenarioInstruction) {
+      this.scenarioInstruction = game.world.scenarioInstruction;
+    }
+    const PARK_RADIUS = 5;
+    if (this.scenarioTarget) {
+      const center = this.scenarioTarget;
+      // Preempt any active conversation so the agent can head to the park.
+      const activeConversation = game.world.playerConversation(player);
+      if (activeConversation) {
+        activeConversation.leave(game, now, player);
+        delete this.toRemember;
+      }
+      delete player.activity;
+
+      const distToCenter = distance(player.position, center);
+
+      if (distToCenter > PARK_RADIUS) {
+        // Approaching the park — ignore player collisions so agents don't jam.
+        if (!player.pathfinding || !pointsEqual(player.pathfinding.destination, center)) {
+          movePlayer(game, now, player, center, false, false);
+        }
+        return;
+      }
+
+      // Inside the meeting zone.
+      if (!this.scenarioArrivalTime) {
+        this.scenarioArrivalTime = now;
+        // Cancel the approach pathfinding so the wander logic takes over.
+        if (player.pathfinding) stopPlayer(player);
+      }
+
+      if (now - this.scenarioArrivalTime >= 30_000) {
+        // 30 s is up — free the agent. Keep scenarioArrivalTime as a done-marker
+        // so the propagation check above won't re-enlist them this session.
+        delete this.scenarioTarget;
+        delete this.scenarioName;
+        if (player.pathfinding) stopPlayer(player);
+        // Fall through to normal agent behaviour.
+      } else {
+        // Wander within the zone. ignorePlayers=true so agents aren't deadlocked
+        // by the pile-up from the approach phase; they spread out naturally as
+        // each picks a different random waypoint each stop.
+        if (!player.pathfinding) {
+          const waypoint = pickParkWaypoint(center, PARK_RADIUS, game.worldMap);
+          if (waypoint) movePlayer(game, now, player, waypoint, false, true);
+        }
+        return;
+      }
     }
     if (this.inProgressOperation) {
       if (now < this.inProgressOperation.started + ACTION_TIMEOUT) {
@@ -61,6 +171,11 @@ export class Agent {
       }
       console.log(`Timing out ${JSON.stringify(this.inProgressOperation)}`);
       delete this.inProgressOperation;
+    }
+    // Schedule + plan execution: give the agent a real daily plan and walk them
+    // through it. Conversation logic still runs below and can interrupt.
+    if (this.tickSchedule(game, now, player)) {
+      return;
     }
     const conversation = game.world.playerConversation(player);
     const member = conversation?.participants.get(player.id);
@@ -181,6 +296,7 @@ export class Agent {
               otherPlayerId: otherPlayer.id,
               messageUuid,
               type: 'start',
+              gameTimeMs: now,
             });
             return;
           } else {
@@ -202,6 +318,7 @@ export class Agent {
             otherPlayerId: otherPlayer.id,
             messageUuid,
             type: 'leave',
+            gameTimeMs: now,
           });
           return;
         }
@@ -229,10 +346,191 @@ export class Agent {
           otherPlayerId: otherPlayer.id,
           messageUuid,
           type: 'continue',
+          gameTimeMs: now,
         });
         return;
       }
     }
+  }
+
+  // Returns true if the schedule handled this tick (caller should return).
+  tickSchedule(game: Game, now: number, player: import('./player').Player): boolean {
+    const gt = computeGameTime(now, game.world.worldStartTime);
+    const conversation = game.world.playerConversation(player);
+    const doingActivity = player.activity && player.activity.until > now;
+
+    // Decide if we need a new plan.
+    const noSchedule = !this.schedule || this.schedule.length === 0;
+    const dayChanged =
+      this.scheduleGeneratedForDay !== undefined && this.scheduleGeneratedForDay !== gt.dayNumber;
+    // Advance to the latest step whose start time has passed BEFORE computing
+    // overdueMinutes. Previously the while loop sat below the disruption check,
+    // so currentStepIndex advanced the instant the next step's startMinute arrived
+    // — keeping overdueMinutes permanently ≤ 0 and the disruption branch
+    // permanently unreachable. Advancing first and measuring from the current
+    // step's own startMinute lets stuck agents correctly trigger a replan.
+    if (this.schedule && this.currentStepIndex !== undefined) {
+      while (
+        this.currentStepIndex < this.schedule.length - 1 &&
+        gt.minutesIntoDay >= this.schedule[this.currentStepIndex + 1].startMinute
+      ) {
+        this.currentStepIndex += 1;
+      }
+    }
+
+    let disrupted = false;
+    if (this.schedule && this.currentStepIndex !== undefined && !noSchedule && !dayChanged) {
+      const step = this.schedule[this.currentStepIndex];
+      if (step) {
+        const overdueMinutes = gt.minutesIntoDay - step.startMinute;
+        const atDest = distance(player.position, step.destination) < ARRIVAL_RADIUS;
+        if (overdueMinutes > SCHEDULE_DISRUPTION_MINUTES && !atDest) {
+          disrupted = true;
+        }
+      }
+    }
+
+    const conversationRefresh = !!this.scheduleNeedsRefresh;
+    const wantsPlan = (noSchedule || dayChanged || disrupted || conversationRefresh) && !conversation && !doingActivity;
+    if (wantsPlan) {
+      // Hard cooldown: never re-fire agentPlanDay more than once per 5 minutes
+      // real time per agent. Protects against ACTION_TIMEOUT re-fires and any
+      // unforeseen tick-loop calling startOperation repeatedly.
+      const PLAN_COOLDOWN_MS = 5 * 60 * 1000;
+      const onCooldown = !!this.lastPlanAttempt && now - this.lastPlanAttempt < PLAN_COOLDOWN_MS;
+      // Stagger: deterministic per-agent offset so 5 agents don't all hit the
+      // LLM in the same engine step at bootstrap / day rollover. Spread over
+      // 2 minutes real time, keyed by agent id.
+      const STAGGER_WINDOW_MS = 2 * 60 * 1000;
+      const idHash = [...this.id].reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 0);
+      const offset = Math.abs(idHash) % STAGGER_WINDOW_MS;
+      // Anchor offset to the start of the current game-day so agents stagger
+      // each day, not just at world boot.
+      const dayStart = (game.world.worldStartTime ?? now) + (gt.dayNumber - 1) * (10 * 60 * 1000);
+      const beforeStagger = now < dayStart + offset;
+      // A custom-scenario injection sets `forcePlan` to demand an IMMEDIATE
+      // re-plan. Bypass both throttles in that case so every agent reacts to the
+      // scenario at once instead of waiting out the cooldown/stagger window.
+      const forcePlan = !!this.forcePlan;
+      // Only fire a (re)plan when we're not throttled. CRUCIAL: when throttled we
+      // deliberately DO NOT `return false` here. Returning false hands control
+      // back to tick(), which then drops the agent into the free-roam wander
+      // branch — random destination + random activity. Because PLAN_COOLDOWN_MS
+      // is 5 real minutes (~12 in-game hours) and `scheduleNeedsRefresh` is set
+      // after every conversation, that made agents abandon their schedule and
+      // stand around at random tiles for minutes after each chat. Instead, fall
+      // through and keep executing the existing schedule (walk to current step).
+      if (forcePlan || (!onCooldown && !beforeStagger)) {
+        const playerName = player.name ?? 'someone';
+        const home = this.home ?? (homeFor(playerName) ?? getLocationById('hdb'))!;
+        const homePoint = this.home ?? { x: home.x, y: home.y };
+        const homeLoc = homeFor(playerName);
+        this.lastPlanAttempt = now;
+        delete this.scheduleNeedsRefresh;
+        delete this.forcePlan;
+        this.startOperation(game, now, 'agentPlanDay', {
+          worldId: game.worldId,
+          agentId: this.id,
+          playerId: this.playerId,
+          playerName,
+          home: homePoint,
+          homeName: homeLoc?.name,
+          dayNumber: gt.dayNumber,
+          currentTimeStr: gt.timeStr,
+          currentMinutesIntoDay: gt.minutesIntoDay,
+          existingSchedule: (disrupted || conversationRefresh || forcePlan) ? this.schedule : undefined,
+          scenarioInstruction: this.scenarioInstruction,
+        });
+        return true;
+      }
+      // Throttled: fall through to execute the existing schedule below.
+    }
+
+    if (!this.schedule || this.currentStepIndex === undefined) return false;
+
+    const step = this.schedule[this.currentStepIndex];
+    if (!step) return false;
+
+    // It isn't time for the first step yet — let the rest of the tick run.
+    if (gt.minutesIntoDay < step.startMinute) return false;
+
+    // Don't yank the agent out of an active conversation. The schedule can wait.
+    if (conversation) return false;
+
+    const atDest = distance(player.position, step.destination) < ARRIVAL_RADIUS;
+
+    // Opportunistic conversations. The reach depends on whether we're still
+    // walking to the scheduled spot or already settled there:
+    //   - In transit: only greet someone we physically pass (within the chat
+    //     radius) so a trip to work isn't derailed across the whole map.
+    //   - Settled at our destination with idle time: reach out MAP-WIDE and walk
+    //     over to meet. Workplaces are far apart (shophouses, MBS, hawker centre,
+    //     A*STAR, Temasek Poly), so agents almost never share a 6-tile radius;
+    //     limiting invites to that radius is why they'd basically stop talking.
+    //     Inviting map-wide and letting the walk-over logic bring them together
+    //     is what actually drives emergent conversations (and the conversation-
+    //     driven re-planning) in the town — the way the original game worked.
+    const onInviteCooldown =
+      this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN;
+    const justChatted =
+      this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN;
+    if (!onInviteCooldown && !justChatted && !this.inProgressOperation) {
+      const freePlayers = [...game.world.players.values()].filter(
+        (p) =>
+          p.id !== player.id &&
+          ![...game.world.conversations.values()].some((c) => c.participants.has(p.id)),
+      );
+      const pool = atDest
+        ? freePlayers
+        : freePlayers.filter(
+            (p) => distance(p.position, player.position) < SCHEDULE_CHAT_RADIUS,
+          );
+      if (pool.length > 0) {
+        // Optimistically record the attempt so we don't re-fire every tick when
+        // no candidate can actually be invited (e.g. all on the pair cooldown).
+        this.lastInviteAttempt = now;
+        this.startOperation(game, now, 'agentDoSomething', {
+          worldId: game.worldId,
+          player: player.serialize(),
+          otherFreePlayers: pool.map((p) => p.serialize()),
+          agent: this.serialize(),
+          map: game.worldMap.serialize(),
+          forceInvite: true,
+        });
+        return true;
+      }
+    }
+
+    if (!atDest) {
+      // Walk to the scheduled location.
+      if (
+        !player.pathfinding ||
+        !pointsEqual(player.pathfinding.destination, step.destination)
+      ) {
+        try {
+          movePlayer(game, now, player, step.destination);
+        } catch (err) {
+          // Movement can throw if in a conversation; ignore and re-try next tick.
+          console.warn(`Schedule move failed for ${player.id}: ${(err as Error).message}`);
+        }
+      }
+      return true;
+    }
+
+    // At the destination — set the activity for the duration of this step.
+    if (!doingActivity) {
+      const nextStep = this.schedule[this.currentStepIndex + 1];
+      const stepEndMinutes = nextStep ? nextStep.startMinute : 24 * 60;
+      const minutesLeft = Math.max(1, stepEndMinutes - gt.minutesIntoDay);
+      // Game-minute → real-ms: each in-game minute lasts CYCLE_MS / (24*60).
+      const realMsPerGameMinute = (10 * 60 * 1000) / (24 * 60);
+      player.activity = {
+        description: step.activity,
+        emoji: step.emoji ?? '💭',
+        until: now + minutesLeft * realMsPerGameMinute,
+      };
+    }
+    return true;
   }
 
   startOperation<Name extends keyof AgentOperations>(
@@ -264,9 +562,29 @@ export class Agent {
       lastConversation: this.lastConversation,
       lastInviteAttempt: this.lastInviteAttempt,
       inProgressOperation: this.inProgressOperation,
+      scenarioTarget: this.scenarioTarget,
+      scenarioName: this.scenarioName,
+      scenarioArrivalTime: this.scenarioArrivalTime,
+      scenarioInstruction: this.scenarioInstruction,
+      home: this.home,
+      schedule: this.schedule,
+      scheduleGeneratedForDay: this.scheduleGeneratedForDay,
+      currentStepIndex: this.currentStepIndex,
+      lastPlanAttempt: this.lastPlanAttempt,
+      scheduleNeedsRefresh: this.scheduleNeedsRefresh,
+      forcePlan: this.forcePlan,
     };
   }
 }
+
+export const scheduleStep = v.object({
+  startMinute: v.number(),
+  locationId: v.string(),
+  destination: point,
+  activity: v.string(),
+  emoji: v.optional(v.string()),
+  description: v.string(),
+});
 
 export const serializedAgent = {
   id: agentId,
@@ -281,6 +599,17 @@ export const serializedAgent = {
       started: v.number(),
     }),
   ),
+  scenarioTarget: v.optional(point),
+  scenarioName: v.optional(v.string()),
+  scenarioArrivalTime: v.optional(v.number()),
+  scenarioInstruction: v.optional(v.string()),
+  home: v.optional(point),
+  schedule: v.optional(v.array(scheduleStep)),
+  scheduleGeneratedForDay: v.optional(v.number()),
+  currentStepIndex: v.optional(v.number()),
+  lastPlanAttempt: v.optional(v.number()),
+  scheduleNeedsRefresh: v.optional(v.boolean()),
+  forcePlan: v.optional(v.boolean()),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 
@@ -297,6 +626,9 @@ export async function runAgentOperation(ctx: MutationCtx, operation: string, arg
       break;
     case 'agentDoSomething':
       reference = internal.aiTown.agentOperations.agentDoSomething;
+      break;
+    case 'agentPlanDay':
+      reference = internal.aiTown.agentOperations.agentPlanDay;
       break;
     default:
       throw new Error(`Unknown operation: ${operation}`);

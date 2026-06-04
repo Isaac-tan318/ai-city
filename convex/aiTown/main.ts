@@ -115,6 +115,8 @@ export const runStep = internalAction({
       });
     } catch (e: unknown) {
       if (e instanceof ConvexError) {
+        // These are intentional stops — the engine was stopped or a newer
+        // generation took over. Let this loop die quietly; do NOT reschedule.
         if (e.data.kind === 'engineNotRunning') {
           console.debug(`Engine is not running: ${e.message}`);
           return;
@@ -124,7 +126,21 @@ export const runStep = internalAction({
           return;
         }
       }
-      throw e;
+      // Any OTHER error (e.g. a transient "no available workers" capacity blip
+      // from the Convex backend, or a flaky LLM/query failure) would otherwise
+      // kill the simulation loop entirely: the self-reschedule above lives at the
+      // end of the try block and never runs once we land here. The world then
+      // freezes until the `restartDeadWorlds` cron notices — up to ~60s later.
+      // Instead, keep the loop alive by rescheduling the next step ourselves with
+      // a short backoff. If a newer generation has taken over in the meantime,
+      // this rescheduled step will load the world, hit the generationNumber
+      // guard, and exit cleanly — so we can't spawn a duplicate loop.
+      console.error(`runStep failed; rescheduling to keep the engine alive:`, e);
+      await ctx.scheduler.runAfter(1000, internal.aiTown.main.runStep, {
+        worldId: args.worldId,
+        generationNumber: args.generationNumber,
+        maxDuration: args.maxDuration,
+      });
     }
   },
 });

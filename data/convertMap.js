@@ -30,13 +30,27 @@ const tileDimension = tiledMapData.tilewidth;
 const width = tiledMapData.width;
 const height = tiledMapData.height;
 
+// Tiled encodes flip/rotation in the top 3 bits of each GID.
+// We strip them out of the tile index but re-encode them in the same upper bits
+// so the renderer can apply the correct PIXI transform.
+const FLIP_MASK = 0xE0000000; // bits 31-29: H, V, diagonal
+const TILE_MASK = 0x1FFFFFFF; // bits 28-0: actual tile ID
+
 // Function to convert Tiled 1D array to 3D array for the game engine
 function convertLayerData(layerData, width, height) {
   let newArray = [];
   for (let i = 0; i < width; i++) {
     newArray[i] = [];
     for (let j = 0; j < height; j++) {
-      newArray[i][j] = layerData[j * width + i] - 1;
+      const gid = layerData[j * width + i];
+      if (gid === 0) {
+        newArray[i][j] = -1;
+      } else {
+        const flags = gid & FLIP_MASK;
+        const id = gid & TILE_MASK;
+        // Store 0-based tile index with flip flags preserved in upper bits
+        newArray[i][j] = flags | (id - 1);
+      }
     }
   }
   return [newArray];
@@ -52,6 +66,7 @@ jsContent += `export const tilesetpxw = ${tilesetpxw};\n`;
 jsContent += `export const tilesetpxh = ${tilesetpxh};\n\n`;
 
 tiledMapData.layers.forEach(layer => {
+  if (layer.type !== 'tilelayer' || !layer.data) return;
   const processedData = convertLayerData(layer.data, layer.width, layer.height);
   jsContent += `export const ${layer.name} = ${JSON.stringify(processedData)};\n`;
 });

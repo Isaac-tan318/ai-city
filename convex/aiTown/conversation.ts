@@ -196,7 +196,13 @@ export class Conversation {
       const agent = [...game.world.agents.values()].find((a) => a.playerId === playerId);
       if (agent) {
         agent.lastConversation = now;
-        agent.toRemember = this.id;
+        // Only remember conversations that actually happened. An abandoned invite
+        // (rejected, or timed out at the invite stage) has no messages and is
+        // deleted here WITHOUT being archived, so agentRememberConversation would
+        // throw "Conversation not found" and brick the agent. Skip those.
+        if (this.numMessages > 0) {
+          agent.toRemember = this.id;
+        }
       }
     }
     game.world.conversations.delete(this.id);

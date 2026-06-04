@@ -446,6 +446,49 @@ export class Agent {
     if (conversation) return false;
 
     const atDest = distance(player.position, step.destination) < ARRIVAL_RADIUS;
+
+    // Opportunistic conversations. The reach depends on whether we're still
+    // walking to the scheduled spot or already settled there:
+    //   - In transit: only greet someone we physically pass (within the chat
+    //     radius) so a trip to work isn't derailed across the whole map.
+    //   - Settled at our destination with idle time: reach out MAP-WIDE and walk
+    //     over to meet. Workplaces are far apart (shophouses, MBS, hawker centre,
+    //     A*STAR, Temasek Poly), so agents almost never share a 6-tile radius;
+    //     limiting invites to that radius is why they'd basically stop talking.
+    //     Inviting map-wide and letting the walk-over logic bring them together
+    //     is what actually drives emergent conversations (and the conversation-
+    //     driven re-planning) in the town — the way the original game worked.
+    const onInviteCooldown =
+      this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN;
+    const justChatted =
+      this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN;
+    if (!onInviteCooldown && !justChatted && !this.inProgressOperation) {
+      const freePlayers = [...game.world.players.values()].filter(
+        (p) =>
+          p.id !== player.id &&
+          ![...game.world.conversations.values()].some((c) => c.participants.has(p.id)),
+      );
+      const pool = atDest
+        ? freePlayers
+        : freePlayers.filter(
+            (p) => distance(p.position, player.position) < SCHEDULE_CHAT_RADIUS,
+          );
+      if (pool.length > 0) {
+        // Optimistically record the attempt so we don't re-fire every tick when
+        // no candidate can actually be invited (e.g. all on the pair cooldown).
+        this.lastInviteAttempt = now;
+        this.startOperation(game, now, 'agentDoSomething', {
+          worldId: game.worldId,
+          player: player.serialize(),
+          otherFreePlayers: pool.map((p) => p.serialize()),
+          agent: this.serialize(),
+          map: game.worldMap.serialize(),
+          forceInvite: true,
+        });
+        return true;
+      }
+    }
+
     if (!atDest) {
       // Walk to the scheduled location.
       if (
@@ -474,37 +517,6 @@ export class Agent {
         emoji: step.emoji ?? '💭',
         until: now + minutesLeft * realMsPerGameMinute,
       };
-    }
-
-    // While settled here, look for a nearby free agent to chat with. Scheduled
-    // agents are otherwise perpetually "busy" (walking or doing an activity), so
-    // without this they would never initiate conversations — and the
-    // conversation-driven re-planning would never fire. This is what lets agents'
-    // plans collide into emergent conversations at shared locations.
-    const onInviteCooldown =
-      this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN;
-    const justChatted =
-      this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN;
-    if (!onInviteCooldown && !justChatted && !this.inProgressOperation) {
-      const nearbyFree = [...game.world.players.values()].filter(
-        (p) =>
-          p.id !== player.id &&
-          distance(p.position, player.position) < SCHEDULE_CHAT_RADIUS &&
-          ![...game.world.conversations.values()].some((c) => c.participants.has(p.id)),
-      );
-      if (nearbyFree.length > 0) {
-        // Optimistically record the attempt so we don't re-fire every tick when
-        // no candidate can actually be invited (e.g. all on the pair cooldown).
-        this.lastInviteAttempt = now;
-        this.startOperation(game, now, 'agentDoSomething', {
-          worldId: game.worldId,
-          player: player.serialize(),
-          otherFreePlayers: nearbyFree.map((p) => p.serialize()),
-          agent: this.serialize(),
-          map: game.worldMap.serialize(),
-          forceInvite: true,
-        });
-      }
     }
     return true;
   }

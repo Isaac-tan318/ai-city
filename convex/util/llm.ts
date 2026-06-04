@@ -265,6 +265,20 @@ export async function fetchEmbeddingBatch(texts: string[]) {
   } = await retryWithBackoff(async () => {
     const embeddingUrl = buildEmbeddingUrl(config);
     console.log('[DEBUG] Embedding URL:', embeddingUrl, '| Model:', config.embeddingModel);
+    const requestBody: Record<string, unknown> = {
+      model: config.embeddingModel,
+      input: texts.map((text) => text.replace(/\n/g, ' ')),
+    };
+    // Only send `dimensions` for OpenAI, whose text-embedding-3-* models support
+    // Matryoshka dimension truncation. Other providers (e.g. OpenRouter-proxied
+    // BGE) REJECT this param — and OpenRouter returns the rejection as HTTP 200
+    // wrapping a 400 error body, which slips past the !result.ok check below and
+    // then crashes on `json.data.length`. That crash silently bricked every
+    // message-generation and remember operation. BGE is natively 768-dim, so the
+    // param was redundant here anyway.
+    if (config.provider === 'openai') {
+      requestBody.dimensions = EMBEDDING_DIMENSION;
+    }
     const result = await fetch(embeddingUrl, {
       method: 'POST',
       headers: {
@@ -272,11 +286,7 @@ export async function fetchEmbeddingBatch(texts: string[]) {
         ...EmbeddingAuthHeaders(),
       },
 
-      body: JSON.stringify({
-        model: config.embeddingModel,
-        input: texts.map((text) => text.replace(/\n/g, ' ')),
-        dimensions: EMBEDDING_DIMENSION,
-      }),
+      body: JSON.stringify(requestBody),
     });
     if (!result.ok) {
       throw {
@@ -284,7 +294,21 @@ export async function fetchEmbeddingBatch(texts: string[]) {
         error: new Error(`Embedding failed with code ${result.status}: ${await result.text()}`),
       };
     }
-    return (await result.json()) as CreateEmbeddingResponse;
+    const parsed = (await result.json()) as CreateEmbeddingResponse & {
+      error?: { message?: string; code?: number };
+    };
+    // Defensive: some providers (OpenRouter) return HTTP 200 with an { error }
+    // body and no `data`. Surface a clear, retryable error instead of crashing
+    // on `json.data.length` (which would leave the calling agent operation stuck
+    // until ACTION_TIMEOUT).
+    if (!parsed || !Array.isArray(parsed.data)) {
+      const detail = parsed?.error?.message ?? JSON.stringify(parsed)?.slice(0, 300);
+      throw {
+        retry: false,
+        error: new Error(`Embedding response missing data array: ${detail}`),
+      };
+    }
+    return parsed as CreateEmbeddingResponse;
   });
   if (json.data.length !== texts.length) {
     console.error(json);

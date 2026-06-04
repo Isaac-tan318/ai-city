@@ -68,38 +68,38 @@ export type Activity = { description: string; emoji: string; duration: number };
 
 // Generic fallback used for humans or any character without a bespoke list.
 export const ACTIVITIES: Activity[] = [
-  { description: 'reading a book', emoji: '📖', duration: 60_000 },
-  { description: 'daydreaming', emoji: '🤔', duration: 60_000 },
-  { description: 'people-watching', emoji: '👀', duration: 60_000 },
+  { description: 'reading a book', emoji: '📖', duration: 20_000 },
+  { description: 'daydreaming', emoji: '🤔', duration: 20_000 },
+  { description: 'people-watching', emoji: '👀', duration: 20_000 },
 ];
 
 // Per-character activities so free-roam behaviour reflects who the agent is,
 // rather than everyone reading/daydreaming/gardening at random.
 export const CHARACTER_ACTIVITIES: Record<string, Activity[]> = {
   Cedric: [
-    { description: 'wiping down the counter', emoji: '☕', duration: 60_000 },
-    { description: 'chatting up a regular', emoji: '💬', duration: 60_000 },
-    { description: 'humming a tune', emoji: '🎶', duration: 60_000 },
+    { description: 'wiping down the counter', emoji: '☕', duration: 20_000 },
+    { description: 'chatting up a regular', emoji: '💬', duration: 20_000 },
+    { description: 'humming a tune', emoji: '🎶', duration: 20_000 },
   ],
   James: [
-    { description: 'waiting for a fare', emoji: '🚗', duration: 60_000 },
-    { description: 'checking the Grab app', emoji: '📱', duration: 60_000 },
-    { description: 'cracking a joke with a passenger', emoji: '😄', duration: 60_000 },
+    { description: 'waiting for a fare', emoji: '🚗', duration: 20_000 },
+    { description: 'checking the Grab app', emoji: '📱', duration: 20_000 },
+    { description: 'cracking a joke with a passenger', emoji: '😄', duration: 20_000 },
   ],
   Sarah: [
-    { description: 'frying up an order', emoji: '🍳', duration: 60_000 },
-    { description: 'wiping down the tables', emoji: '🧽', duration: 60_000 },
-    { description: 'sneaking in an extra egg', emoji: '🥚', duration: 60_000 },
+    { description: 'frying up an order', emoji: '🍳', duration: 20_000 },
+    { description: 'wiping down the tables', emoji: '🧽', duration: 20_000 },
+    { description: 'sneaking in an extra egg', emoji: '🥚', duration: 20_000 },
   ],
   Isabel: [
-    { description: 'scribbling equations', emoji: '📝', duration: 60_000 },
-    { description: 'reading a paper', emoji: '📄', duration: 60_000 },
-    { description: 'lost in thought', emoji: '🧠', duration: 60_000 },
+    { description: 'scribbling equations', emoji: '📝', duration: 20_000 },
+    { description: 'reading a paper', emoji: '📄', duration: 20_000 },
+    { description: 'lost in thought', emoji: '🧠', duration: 20_000 },
   ],
   Xavier: [
-    { description: "debugging a friend's code", emoji: '💻', duration: 60_000 },
-    { description: 'sipping iced Milo', emoji: '🥤', duration: 60_000 },
-    { description: 'rushing a deadline', emoji: '😩', duration: 60_000 },
+    { description: "debugging a friend's code", emoji: '💻', duration: 20_000 },
+    { description: 'sipping iced Milo', emoji: '🥤', duration: 20_000 },
+    { description: 'rushing a deadline', emoji: '😩', duration: 20_000 },
   ],
 };
 

@@ -28,13 +28,27 @@ export const agentRememberConversation = internalAction({
     operationId: v.string(),
   },
   handler: async (ctx, args) => {
-    await rememberConversation(
-      ctx,
-      args.worldId,
-      args.agentId as GameId<'agents'>,
-      args.playerId as GameId<'players'>,
-      args.conversationId as GameId<'conversations'>,
-    );
+    try {
+      await rememberConversation(
+        ctx,
+        args.worldId,
+        args.agentId as GameId<'agents'>,
+        args.playerId as GameId<'players'>,
+        args.conversationId as GameId<'conversations'>,
+      );
+    } catch (err) {
+      // CRITICAL: never let a failed remember leave the agent stuck. If the
+      // conversation can't be loaded (e.g. an abandoned invite that was never
+      // archived → "Conversation not found"), rememberConversation throws. With
+      // no catch, the operation would never reach finishRememberConversation
+      // below, so the agent's inProgressOperation stays set until the 120s
+      // ACTION_TIMEOUT. While stuck, the agent can't accept invites or send
+      // messages — which silently froze conversations town-wide. Swallow the
+      // error and fall through to finish the operation so the agent is freed.
+      console.error(
+        `agentRememberConversation failed for ${args.conversationId}: ${(err as Error).message}`,
+      );
+    }
     await sleep(Math.random() * 1000);
     await ctx.runMutation(api.aiTown.main.sendInput, {
       worldId: args.worldId,

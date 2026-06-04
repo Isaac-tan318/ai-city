@@ -147,8 +147,8 @@ export function ChatHistoryViewer({
         }
       }
       const md = sections.join('\n');
-      const blob = new Blob([md], { type: 'text/markdown' });
-      downloadBlob(blob, `chat-history-${new Date().toISOString().slice(0, 10)}.md`);
+      const blob = new Blob([md], { type: 'text/plain' });
+      downloadBlob(blob, `chat-history-${new Date().toISOString().slice(0, 10)}.txt`);
     } finally {
       setExporting(false);
     }

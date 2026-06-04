@@ -278,6 +278,39 @@ function fallbackSchedule(
   return steps;
 }
 
+// Build a single schedule step from a raw LLM entry object. Returns null if the
+// entry is malformed or maps to no known location.
+function parseStep(
+  entry: any,
+  home: { x: number; y: number } | undefined,
+): ScheduleStep | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const startMinute =
+    typeof entry.start_time === 'string'
+      ? parseTimeOfDay(entry.start_time)
+      : typeof entry.start_minute === 'number'
+        ? entry.start_minute
+        : null;
+  const locId = (entry.location_id ?? entry.location ?? '').toString();
+  let dest: { x: number; y: number } | undefined;
+  if (locId === 'home' && home) {
+    dest = home;
+  } else {
+    const loc = getLocationById(locId);
+    if (loc) dest = { x: loc.x, y: loc.y };
+  }
+  if (!dest) return null;
+  return {
+    // startMinute may be null for a reaction step (caller stamps it with "now").
+    startMinute: startMinute ?? 0,
+    locationId: locId,
+    destination: dest,
+    activity: (entry.activity ?? 'hanging around').toString(),
+    emoji: typeof entry.emoji === 'string' ? entry.emoji : undefined,
+    description: (entry.description ?? entry.activity ?? '').toString(),
+  };
+}
+
 function parseSchedule(
   raw: any,
   home: { x: number; y: number } | undefined,
@@ -285,31 +318,13 @@ function parseSchedule(
   if (!raw || !Array.isArray(raw.schedule)) return null;
   const out: ScheduleStep[] = [];
   for (const entry of raw.schedule) {
-    if (!entry || typeof entry !== 'object') continue;
-    const startMinute =
-      typeof entry.start_time === 'string'
-        ? parseTimeOfDay(entry.start_time)
-        : typeof entry.start_minute === 'number'
-          ? entry.start_minute
-          : null;
-    if (startMinute === null) continue;
-    const locId = (entry.location_id ?? entry.location ?? '').toString();
-    let dest: { x: number; y: number } | undefined;
-    if (locId === 'home' && home) {
-      dest = home;
-    } else {
-      const loc = getLocationById(locId);
-      if (loc) dest = { x: loc.x, y: loc.y };
-    }
-    if (!dest) continue;
-    out.push({
-      startMinute,
-      locationId: locId,
-      destination: dest,
-      activity: (entry.activity ?? 'hanging around').toString(),
-      emoji: typeof entry.emoji === 'string' ? entry.emoji : undefined,
-      description: (entry.description ?? entry.activity ?? '').toString(),
-    });
+    // A normal schedule entry must carry a valid start_time; reaction steps
+    // (parsed separately) are the only ones allowed to omit it.
+    const hasTime =
+      typeof entry?.start_time === 'string' || typeof entry?.start_minute === 'number';
+    if (!hasTime) continue;
+    const step = parseStep(entry, home);
+    if (step) out.push(step);
   }
   out.sort((a, b) => a.startMinute - b.startMinute);
   return out.length > 0 ? out : null;
@@ -327,6 +342,7 @@ export const agentPlanDay = internalAction({
     currentTimeStr: v.string(),
     currentMinutesIntoDay: v.number(),
     existingSchedule: v.optional(v.array(scheduleStep)),
+    scenarioInstruction: v.optional(v.string()),
     operationId: v.string(),
   },
   handler: async (ctx, args) => {
@@ -380,6 +396,12 @@ export const agentPlanDay = internalAction({
     const replanNote = args.existingSchedule
       ? `\nThis is a RE-PLAN (current time: ${args.currentTimeStr}). A conversation may have changed your plans, or the previous schedule was disrupted. Produce a revised schedule for the REST of today only — keep entries whose start_time has already passed, and revise the rest.\nIMPORTANT: If in a recent conversation you agreed to meet someone or do something at a particular place and/or time, you MUST add a schedule entry for it (pick a sensible start_time if none was stated, and map the place to the closest location_id from the list above). Do not drop commitments you made.`
       : '';
+    // A custom scenario was injected by the user (e.g. "a fire breaks out at the
+    // hawker centre", "everyone gather at Marina Bay Sands"). It overrides the
+    // normal routine and must dominate the rest of today's plan.
+    const scenarioNote = args.scenarioInstruction
+      ? `\n*** URGENT SCENARIO — THIS IS HAPPENING RIGHT NOW (${args.currentTimeStr}) AND OVERRIDES YOUR NORMAL ROUTINE ***\n"${args.scenarioInstruction}"\nYou must respond to this immediately and in character. In your JSON response, include a top-level "reaction" object describing the single action you take RIGHT NOW (this instant, at ${args.currentTimeStr}) in response to the scenario — with location_id (the closest match from the list above to where the event calls you), activity, emoji, and description. Do NOT give the reaction a start_time; it happens now. Then the "schedule" array covers the AFTERMATH for the rest of today (all entries strictly after ${args.currentTimeStr}), reflecting how the event reshaped your day.`
+      : '';
 
     const prompt = [
       `You are planning a single day in the life of ${args.playerName}, who lives in Singapore.`,
@@ -387,6 +409,7 @@ export const agentPlanDay = internalAction({
       `Home: ${homeStr}`,
       workStr,
       `Today is Day ${args.dayNumber} (${dayName}, a ${weekday ? 'weekday' : 'weekend day'}). The current in-game time is ${args.currentTimeStr}.`,
+      scenarioNote,
       ``,
       `Available locations (use the location_id verbatim):`,
       locationList,
@@ -400,14 +423,20 @@ export const agentPlanDay = internalAction({
       `If recent memories mention plans or arrangements made in conversation, honour them.`,
       `Pick locations that suit the character's personality and goal.`,
       replanNote,
+      args.scenarioInstruction
+        ? `Remember: the URGENT SCENARIO above takes priority over everything else — the "reaction" object is what you do THIS INSTANT, and the schedule is the aftermath.`
+        : '',
       ``,
       `Respond ONLY with strict JSON of the form:`,
-      `{"schedule":[{"start_time":"07:30","location_id":"shophouses","activity":"opening the cafe","emoji":"☕","description":"setting up for the morning rush"}]}`,
+      args.scenarioInstruction
+        ? `{"reaction":{"location_id":"mbs","activity":"hurrying to shelter","emoji":"🏃","description":"rushing indoors to Marina Bay Sands to take cover"},"schedule":[{"start_time":"23:30","location_id":"home","activity":"going to sleep","emoji":"🌙","description":"settling down after the chaos"}]}`
+        : `{"schedule":[{"start_time":"07:30","location_id":"shophouses","activity":"opening the cafe","emoji":"☕","description":"setting up for the morning rush"}]}`,
     ]
       .filter(Boolean)
       .join('\n');
 
     let parsed: ScheduleStep[] | null = null;
+    let reaction: ScheduleStep | null = null;
     try {
       const { content } = await chatCompletion({
         messages: [{ role: 'user', content: prompt }],
@@ -416,11 +445,26 @@ export const agentPlanDay = internalAction({
       });
       const json = extractJson(content);
       parsed = parseSchedule(json, args.home);
+      // For a scenario re-plan, the LLM returns a separate "reaction" object: the
+      // immediate, in-character action to take RIGHT NOW. We stamp it with the
+      // current minute so it becomes the agent's active step this instant.
+      if (args.scenarioInstruction && json?.reaction) {
+        reaction = parseStep(json.reaction, args.home);
+        if (reaction) reaction.startMinute = args.currentMinutesIntoDay;
+      }
     } catch (err) {
       console.error(`agentPlanDay LLM failed for ${args.playerName}:`, err);
     }
-    const schedule =
+    let schedule =
       parsed ?? fallbackSchedule(args.home, work?.location, weekday, work?.activity);
+    if (reaction) {
+      // Drop any aftermath entries the LLM mistakenly timed at/before "now" so the
+      // reaction is unambiguously the current step, then make it the schedule head.
+      schedule = [
+        reaction,
+        ...schedule.filter((s) => s.startMinute > args.currentMinutesIntoDay),
+      ];
+    }
 
     await sleep(Math.random() * 500);
     await ctx.runMutation(api.aiTown.main.sendInput, {

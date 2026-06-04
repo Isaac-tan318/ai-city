@@ -2,7 +2,7 @@ import { v } from 'convex/values';
 import { agentId, conversationId, parseGameId } from './ids';
 import { Player, activity } from './player';
 import { Conversation, conversationInputs } from './conversation';
-import { blockedWithPositions, movePlayer } from './movement';
+import { blockedWithPositions, movePlayer, stopPlayer } from './movement';
 import { inputHandler } from './inputHandler';
 import { Point, point } from '../util/types';
 import { Descriptions } from '../../data/characters';
@@ -251,6 +251,21 @@ export const agentInputs = {
         agent.scenarioInstruction = instruction;
         delete agent.toRemember;
         delete agent.inProgressOperation;
+        // Force an immediate re-plan that incorporates the scenario:
+        //  - scheduleNeedsRefresh makes tickSchedule WANT to plan.
+        //  - forcePlan bypasses the 5-min cooldown AND the per-agent stagger
+        //    window so every agent reacts at once.
+        //  - clearing lastPlanAttempt removes any lingering cooldown.
+        //  - clearing the current activity is required: tickSchedule won't plan
+        //    while `doingActivity` is true.
+        agent.scheduleNeedsRefresh = true;
+        agent.forcePlan = true;
+        delete agent.lastPlanAttempt;
+        const player = game.world.players.get(agent.playerId);
+        if (player) {
+          delete player.activity;
+          if (player.pathfinding) stopPlayer(player);
+        }
       }
       return null;
     },

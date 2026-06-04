@@ -60,6 +60,10 @@ export class Agent {
   // against ACTION_TIMEOUT re-fires when the LLM is slow.
   lastPlanAttempt?: number;
   scheduleNeedsRefresh?: boolean;
+  // Set by a custom-scenario injection to force an immediate re-plan that
+  // bypasses the normal plan cooldown/stagger throttle. Consumed (deleted) the
+  // moment the replan fires.
+  forcePlan?: boolean;
 
   constructor(serialized: SerializedAgent) {
     const {
@@ -77,6 +81,7 @@ export class Agent {
       currentStepIndex,
       lastPlanAttempt,
       scheduleNeedsRefresh,
+      forcePlan,
     } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
@@ -98,6 +103,7 @@ export class Agent {
     this.currentStepIndex = currentStepIndex;
     this.lastPlanAttempt = lastPlanAttempt;
     this.scheduleNeedsRefresh = scheduleNeedsRefresh;
+    this.forcePlan = forcePlan;
   }
 
   tick(game: Game, now: number) {
@@ -402,6 +408,10 @@ export class Agent {
       // each day, not just at world boot.
       const dayStart = (game.world.worldStartTime ?? now) + (gt.dayNumber - 1) * (10 * 60 * 1000);
       const beforeStagger = now < dayStart + offset;
+      // A custom-scenario injection sets `forcePlan` to demand an IMMEDIATE
+      // re-plan. Bypass both throttles in that case so every agent reacts to the
+      // scenario at once instead of waiting out the cooldown/stagger window.
+      const forcePlan = !!this.forcePlan;
       // Only fire a (re)plan when we're not throttled. CRUCIAL: when throttled we
       // deliberately DO NOT `return false` here. Returning false hands control
       // back to tick(), which then drops the agent into the free-roam wander
@@ -410,13 +420,14 @@ export class Agent {
       // after every conversation, that made agents abandon their schedule and
       // stand around at random tiles for minutes after each chat. Instead, fall
       // through and keep executing the existing schedule (walk to current step).
-      if (!onCooldown && !beforeStagger) {
+      if (forcePlan || (!onCooldown && !beforeStagger)) {
         const playerName = player.name ?? 'someone';
         const home = this.home ?? (homeFor(playerName) ?? getLocationById('hdb'))!;
         const homePoint = this.home ?? { x: home.x, y: home.y };
         const homeLoc = homeFor(playerName);
         this.lastPlanAttempt = now;
         delete this.scheduleNeedsRefresh;
+        delete this.forcePlan;
         this.startOperation(game, now, 'agentPlanDay', {
           worldId: game.worldId,
           agentId: this.id,
@@ -427,7 +438,8 @@ export class Agent {
           dayNumber: gt.dayNumber,
           currentTimeStr: gt.timeStr,
           currentMinutesIntoDay: gt.minutesIntoDay,
-          existingSchedule: (disrupted || conversationRefresh) ? this.schedule : undefined,
+          existingSchedule: (disrupted || conversationRefresh || forcePlan) ? this.schedule : undefined,
+          scenarioInstruction: this.scenarioInstruction,
         });
         return true;
       }
@@ -560,6 +572,7 @@ export class Agent {
       currentStepIndex: this.currentStepIndex,
       lastPlanAttempt: this.lastPlanAttempt,
       scheduleNeedsRefresh: this.scheduleNeedsRefresh,
+      forcePlan: this.forcePlan,
     };
   }
 }
@@ -596,6 +609,7 @@ export const serializedAgent = {
   currentStepIndex: v.optional(v.number()),
   lastPlanAttempt: v.optional(v.number()),
   scheduleNeedsRefresh: v.optional(v.boolean()),
+  forcePlan: v.optional(v.boolean()),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 

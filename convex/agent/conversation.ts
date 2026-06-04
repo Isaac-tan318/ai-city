@@ -7,7 +7,7 @@ import { api, internal } from '../_generated/api';
 import * as embeddingsCache from './embeddingsCache';
 import { GameId, conversationId, playerId } from '../aiTown/ids';
 import { NUM_MEMORIES_TO_SEARCH } from '../constants';
-import { computeGameTime } from '../aiTown/gameTime';
+import { computeGameTime, formatGameTimestamp } from '../aiTown/gameTime';
 import { CITY_LOCATIONS } from '../../data/cityLocations';
 
 const selfInternal = internal.agent.conversation;
@@ -47,7 +47,9 @@ export async function startConversationMessage(
   ];
   prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
   prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
-  prompt.push(...previousConversationPrompt(otherPlayer, lastConversation));
+  prompt.push(
+    ...previousConversationPrompt(otherPlayer, lastConversation, worldStartTime, gameTimeMs),
+  );
   prompt.push(...relatedMemoriesPrompt(memories));
   if (memoryWithOtherPlayer) {
     prompt.push(
@@ -95,7 +97,6 @@ export async function continueConversationMessage(
       otherPlayerId,
       conversationId,
     });
-  const started = new Date(conversation.created);
   const embedding = await embeddingsCache.fetch(
     ctx,
     `What do you think about ${otherPlayer.name}?`,
@@ -103,7 +104,7 @@ export async function continueConversationMessage(
   const memories = await memory.searchMemories(ctx, player.id as GameId<'players'>, embedding, 3);
   const prompt = [
     `You are ${player.name}, and you're currently in a conversation with ${otherPlayer.name}.`,
-    `The conversation started at ${started.toLocaleString()}.`,
+    `The conversation started at ${formatGameTimestamp(conversation.created, worldStartTime)}.`,
   ];
   prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
   prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
@@ -210,16 +211,14 @@ function agentPrompts(
 function previousConversationPrompt(
   otherPlayer: { name: string },
   conversation: { created: number } | null,
+  worldStartTime: number | undefined,
+  gameTimeMs: number,
 ): string[] {
   const prompt = [];
   if (conversation) {
-    const prev = new Date(conversation.created);
-    const now = new Date();
-    prompt.push(
-      `Last time you chatted with ${
-        otherPlayer.name
-      } it was ${prev.toLocaleString()}. It's now ${now.toLocaleString()}.`,
-    );
+    const prev = formatGameTimestamp(conversation.created, worldStartTime);
+    const now = formatGameTimestamp(gameTimeMs, worldStartTime);
+    prompt.push(`Last time you chatted with ${otherPlayer.name} it was ${prev}. It's now ${now}.`);
   }
   return prompt;
 }

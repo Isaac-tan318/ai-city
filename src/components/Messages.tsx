@@ -6,6 +6,7 @@ import { MessageInput } from './MessageInput';
 import { Player } from '../../convex/aiTown/player';
 import { Conversation } from '../../convex/aiTown/conversation';
 import { useEffect, useRef } from 'react';
+import { formatGameTimestamp } from '../../convex/aiTown/gameTime';
 
 export function Messages({
   worldId,
@@ -14,6 +15,7 @@ export function Messages({
   inConversationWithMe,
   humanPlayer,
   scrollViewRef,
+  worldStartTime,
 }: {
   worldId: Id<'worlds'>;
   engineId: Id<'engines'>;
@@ -23,6 +25,7 @@ export function Messages({
   inConversationWithMe: boolean;
   humanPlayer?: Player;
   scrollViewRef: React.RefObject<HTMLDivElement>;
+  worldStartTime?: number;
 }) {
   const humanPlayerId = humanPlayer?.id;
   const descriptions = useQuery(api.world.gameDescriptions, { worldId });
@@ -74,7 +77,7 @@ export function Messages({
         <div className="flex gap-4">
           <span className="uppercase flex-grow">{m.authorName}</span>
           <time dateTime={m._creationTime.toString()}>
-            {new Date(m._creationTime).toLocaleString()}
+            {formatGameTimestamp(m._creationTime, worldStartTime)}
           </time>
         </div>
         <div className={clsx('bubble', m.author === humanPlayerId && 'bubble-mine')}>
@@ -143,7 +146,7 @@ export function Messages({
             <div className="flex gap-4">
               <span className="uppercase flex-grow">{currentlyTypingName}</span>
               <time dateTime={currentlyTyping.since.toString()}>
-                {new Date(currentlyTyping.since).toLocaleString()}
+                {formatGameTimestamp(currentlyTyping.since, worldStartTime)}
               </time>
             </div>
             <div className={clsx('bubble')}>

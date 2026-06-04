@@ -42,6 +42,15 @@ export function computeGameTime(now: number, worldStartTime: number | undefined)
   return { dayNumber, minutesIntoDay, hour, isDay, timeStr };
 }
 
+// Format a past/absolute engine-ms timestamp as an in-game wall time, e.g.
+// "Day 49, 2:08 AM". Use this anywhere we'd otherwise print real calendar time
+// (new Date(ts).toLocaleString()) so conversation/memory timestamps stay on the
+// same accelerated Singapore clock as the "current time" shown to the LLM.
+export function formatGameTimestamp(ts: number, worldStartTime: number | undefined): string {
+  const gt = computeGameTime(ts, worldStartTime);
+  return `Day ${gt.dayNumber}, ${gt.timeStr}`;
+}
+
 // "HH:MM" (24h) → minutes-into-day; tolerant of "H:MM" and "HH:MM AM/PM".
 export function parseTimeOfDay(s: string): number | null {
   const m = s.trim().match(/^(\d{1,2}):(\d{2})\s*([AaPp][Mm])?$/);

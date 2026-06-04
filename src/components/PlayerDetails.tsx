@@ -21,6 +21,38 @@ const scenarioOptions = [
     requiresTwoAgents: false,
   },
   {
+    id: 'hawker-lunch',
+    title: 'Hawker Lunch Rush',
+    text:
+      "It's lunchtime and everyone is hungry. Head to the Hawker Centre now and sort " +
+      "out what to eat together, minding each other's dietary needs, allergies, and budgets.",
+    requiresTwoAgents: false,
+  },
+  {
+    id: 'late-night-ride',
+    title: 'Late-Night Ride Home',
+    text:
+      "It's past midnight and the trains have stopped running. Gather at the Marina Bay " +
+      'Sands taxi stand right now to figure out who shares a ride home and how to split the fare.',
+    requiresTwoAgents: false,
+  },
+  {
+    id: 'hdb-noise',
+    title: 'HDB Noise Complaint',
+    text:
+      "It's late at night and someone in the HDB Estate is blasting loud music. The " +
+      'neighbours are gathering at the HDB Estate now to settle the noise complaint.',
+    requiresTwoAgents: false,
+  },
+  {
+    id: 'medical-emergency',
+    title: 'Medical Emergency',
+    text:
+      'Someone has suddenly collapsed and feels very unwell. Rush to Changi General ' +
+      'Hospital immediately to help and decide what to do.',
+    requiresTwoAgents: false,
+  },
+  {
     id: 'custom',
     title: 'Custom Scenario',
     text: '',
@@ -171,16 +203,16 @@ export default function PlayerDetails({
       setInjectorOpen(false);
       return;
     }
-    if (selectedScenarioId === 'custom') {
-      if (!scenarioText.trim()) {
-        toast.error('Write your scenario instructions before starting.');
-        return;
-      }
-      await toastOnError(startCustomScenario({ instruction: scenarioText.trim() }));
-      setInjectorOpen(false);
+    // Both the free-form "custom" option and the preset scenarios (Hawker Lunch,
+    // Late-Night Ride, etc.) feed their instruction text to the same injector.
+    // The text is editable in the textarea, so presets act as starting points the
+    // user can tweak before launching.
+    if (!scenarioText.trim()) {
+      toast.error('Write your scenario instructions before starting.');
       return;
     }
-    toast.error('This scenario is not wired yet.');
+    await toastOnError(startCustomScenario({ instruction: scenarioText.trim() }));
+    setInjectorOpen(false);
   };
 
   const onClearScenario = async () => {
@@ -585,6 +617,7 @@ export default function PlayerDetails({
           conversation={{ kind: 'active', doc: playerConversation }}
           humanPlayer={humanPlayer}
           scrollViewRef={scrollViewRef}
+          worldStartTime={game.world.worldStartTime}
         />
       )}
       {!playerConversation && previousConversation && (
@@ -599,6 +632,7 @@ export default function PlayerDetails({
             conversation={{ kind: 'archived', doc: previousConversation }}
             humanPlayer={humanPlayer}
             scrollViewRef={scrollViewRef}
+            worldStartTime={game.world.worldStartTime}
           />
         </>
       )}

@@ -66,6 +66,20 @@ export const MAX_CONVERSATION_DURATION = 10 * 60_000; // more time locally
 // Leave a conversation if it has more than 8 messages;
 export const MAX_CONVERSATION_MESSAGES = 8;
 
+// --- Group conversation wind-down ---
+// Hard ceiling on a group conversation's message budget. Without this, the
+// budget scaled with participant count (e.g. 5 people → 32 messages) so big
+// groups dragged on forever. Past this many messages every participant wraps up.
+export const MAX_GROUP_CONVERSATION_MESSAGES = 16;
+// Once a group conversation has had at least this many messages, each agent is
+// eligible to gracefully peel off (say goodbye and leave) instead of everyone
+// staying glued together until the hard cap. This makes groups thin out
+// naturally, one person at a time.
+export const GROUP_LEAVE_MIN_MESSAGES = 6;
+// Per-eligible-turn probability that an agent decides to drift away from a group
+// conversation. Tuned so members leave over several turns rather than all at once.
+export const GROUP_LEAVE_PROBABILITY = 0.35;
+
 // Wait for 1s after sending an input to the engine. We can remove this
 // once we can await on an input being processed.
 export const INPUT_DELAY = 1000;

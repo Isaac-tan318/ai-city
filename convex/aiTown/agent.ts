@@ -15,6 +15,9 @@ import {
   MAX_CONVERSATION_DURATION,
   MAX_CONVERSATION_MESSAGES,
   MAX_CONVERSATION_PARTICIPANTS,
+  MAX_GROUP_CONVERSATION_MESSAGES,
+  GROUP_LEAVE_MIN_MESSAGES,
+  GROUP_LEAVE_PROBABILITY,
   MESSAGE_COOLDOWN,
   MIDPOINT_THRESHOLD,
   PLAYER_CONVERSATION_COOLDOWN,
@@ -341,14 +344,28 @@ export class Agent {
           }
         }
         // See if the conversation has been going on too long and decide to leave.
-        // Groups get a higher message budget so everyone gets a few turns.
+        // Groups get a slightly higher message budget so everyone gets a few
+        // turns, but it's hard-capped so a big huddle can't run forever.
         const participantCount = conversation.participants.size;
-        const maxMessages =
-          participantCount <= 2
-            ? MAX_CONVERSATION_MESSAGES
-            : MAX_CONVERSATION_MESSAGES * (participantCount - 1);
+        const isGroup = participantCount > 2;
+        const maxMessages = isGroup
+          ? Math.min(
+              MAX_CONVERSATION_MESSAGES + 2 * (participantCount - 2),
+              MAX_GROUP_CONVERSATION_MESSAGES,
+            )
+          : MAX_CONVERSATION_MESSAGES;
         const tooLongDeadline = started + MAX_CONVERSATION_DURATION;
-        if (tooLongDeadline < now || conversation.numMessages > maxMessages) {
+        // In a group, let people drift away naturally before the hard caps: once
+        // enough has been said and this agent has had a turn, they may peel off so
+        // the huddle thins out one person at a time instead of all staying glued
+        // until the budget runs out. The 2-person path keeps its original feel.
+        const justSpokeNow = conversation.lastMessage.author === player.id;
+        const wantsToDriftOff =
+          isGroup &&
+          justSpokeNow &&
+          conversation.numMessages >= GROUP_LEAVE_MIN_MESSAGES &&
+          Math.random() < GROUP_LEAVE_PROBABILITY;
+        if (tooLongDeadline < now || conversation.numMessages > maxMessages || wantsToDriftOff) {
           console.log(`${player.id} leaving conversation ${conversation.id}.`);
           const messageUuid = crypto.randomUUID();
           conversation.setIsTyping(now, player, messageUuid);

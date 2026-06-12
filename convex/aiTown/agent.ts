@@ -2,16 +2,19 @@ import { ObjectType, v } from 'convex/values';
 import { GameId, parseGameId } from './ids';
 import { agentId, conversationId, playerId } from './ids';
 import { serializedPlayer } from './player';
+import { Conversation } from './conversation';
 import { Game } from './game';
 import {
   ACTION_TIMEOUT,
   AWKWARD_CONVERSATION_TIMEOUT,
   CONVERSATION_COOLDOWN,
   CONVERSATION_DISTANCE,
+  GROUP_JOIN_RADIUS,
   INVITE_ACCEPT_PROBABILITY,
   INVITE_TIMEOUT,
   MAX_CONVERSATION_DURATION,
   MAX_CONVERSATION_MESSAGES,
+  MAX_CONVERSATION_PARTICIPANTS,
   MESSAGE_COOLDOWN,
   MIDPOINT_THRESHOLD,
   PLAYER_CONVERSATION_COOLDOWN,
@@ -23,7 +26,7 @@ import { internal } from '../_generated/api';
 import { movePlayer, stopPlayer, pickParkWaypoint } from './movement';
 import { insertInput } from './insertInput';
 import { point, Point } from '../util/types';
-import { computeGameTime } from './gameTime';
+import { computeGameTime, CYCLE_MS } from './gameTime';
 import { ARRIVAL_RADIUS, SCHEDULE_DISRUPTION_MINUTES, SCHEDULE_CHAT_RADIUS } from '../constants';
 import { getLocationById, homeFor } from '../../data/cityLocations';
 
@@ -115,6 +118,24 @@ export class Agent {
       this.scenarioTarget = game.world.scenarioTarget;
       this.scenarioName = game.world.scenarioName;
     }
+    // Auto-expire a custom scenario one in-game day after it was injected so
+    // agents stop re-enacting it in every conversation/plan. The episodic
+    // memories they formed during the scenario are kept (stored separately in
+    // the `memories` table) — we only drop the live directive.
+    if (game.world.scenarioInstruction) {
+      if (game.world.scenarioStartTime === undefined) {
+        // Scenario injected before start-time tracking existed (or otherwise
+        // missing its timestamp): start the one-day countdown from now so it
+        // still expires instead of lingering forever.
+        game.world.scenarioStartTime = now;
+      } else if (now - game.world.scenarioStartTime >= CYCLE_MS) {
+        delete game.world.scenarioInstruction;
+        delete game.world.scenarioStartTime;
+        for (const agent of game.world.agents.values()) {
+          delete agent.scenarioInstruction;
+        }
+      }
+    }
     if (this.scenarioInstruction === undefined && game.world.scenarioInstruction) {
       this.scenarioInstruction = game.world.scenarioInstruction;
     }
@@ -172,6 +193,14 @@ export class Agent {
       console.log(`Timing out ${JSON.stringify(this.inProgressOperation)}`);
       delete this.inProgressOperation;
     }
+    // Opportunistic group conversations: if we're free and a multi-party
+    // conversation is already happening nearby with room to spare, walk over and
+    // join it rather than starting our own. This is what turns a cluster of
+    // agents (e.g. gathered at the park or hawker centre) into one 3–5 person
+    // chat instead of several disconnected pairs.
+    if (this.maybeJoinNearbyConversation(game, now, player)) {
+      return;
+    }
     // Schedule + plan execution: give the agent a real daily plan and walk them
     // through it. Conversation logic still runs below and can interrupt.
     if (this.tickSchedule(game, now, player)) {
@@ -219,22 +248,30 @@ export class Agent {
       return;
     }
     if (conversation && member) {
-      const [otherPlayerId, otherMember] = [...conversation.participants.entries()].find(
-        ([id]) => id !== player.id,
-      )!;
-      const otherPlayer = game.world.players.get(otherPlayerId)!;
+      // The "inviter" we walk toward / accept from. For an emergent group join
+      // there may be no single inviter, so fall back to the conversation creator
+      // or any already-participating member.
+      const participatingMembers = [...conversation.participants.entries()].filter(
+        ([id, m]) => id !== player.id && m.status.kind === 'participating',
+      );
+      const anchorId =
+        (participatingMembers[0] && participatingMembers[0][0]) ??
+        (conversation.creator !== player.id ? conversation.creator : undefined) ??
+        [...conversation.participants.keys()].find((id) => id !== player.id);
+      const anchorPlayer = anchorId ? game.world.players.get(anchorId) : undefined;
       if (member.status.kind === 'invited') {
         // Accept a conversation with another agent with some probability and with
         // a human unconditionally.
-        if (otherPlayer.human || Math.random() < INVITE_ACCEPT_PROBABILITY) {
-          console.log(`Agent ${player.id} accepting invite from ${otherPlayer.id}`);
+        const inviter = anchorPlayer;
+        if (!inviter || inviter.human || Math.random() < INVITE_ACCEPT_PROBABILITY) {
+          console.log(`Agent ${player.id} accepting invite to ${conversation.id}`);
           conversation.acceptInvite(game, player);
-          // Stop moving so we can start walking towards the other player.
+          // Stop moving so we can start walking towards the group.
           if (player.pathfinding) {
             delete player.pathfinding;
           }
         } else {
-          console.log(`Agent ${player.id} rejecting invite from ${otherPlayer.id}`);
+          console.log(`Agent ${player.id} rejecting invite to ${conversation.id}`);
           conversation.rejectInvite(game, now, player);
         }
         return;
@@ -242,33 +279,34 @@ export class Agent {
       if (member.status.kind === 'walkingOver') {
         // Leave a conversation if we've been waiting for too long.
         if (member.invited + INVITE_TIMEOUT < now) {
-          console.log(`Giving up on invite to ${otherPlayer.id}`);
+          console.log(`Giving up on invite to ${conversation.id}`);
           conversation.leave(game, now, player);
           return;
         }
-
-        // Don't keep moving around if we're near enough.
-        const playerDistance = distance(player.position, otherPlayer.position);
+        if (!anchorPlayer) {
+          // Nobody to walk toward yet (everyone still walking over). Hold.
+          return;
+        }
+        // Don't keep moving around if we're near enough to the group.
+        const playerDistance = distance(player.position, anchorPlayer.position);
         if (playerDistance < CONVERSATION_DISTANCE) {
           return;
         }
-
-        // Keep moving towards the other player.
-        // If we're close enough to the player, just walk to them directly.
+        // Keep moving towards the anchor. If we're close enough, walk directly.
         if (!player.pathfinding) {
           let destination;
           if (playerDistance < MIDPOINT_THRESHOLD) {
             destination = {
-              x: Math.floor(otherPlayer.position.x),
-              y: Math.floor(otherPlayer.position.y),
+              x: Math.floor(anchorPlayer.position.x),
+              y: Math.floor(anchorPlayer.position.y),
             };
           } else {
             destination = {
-              x: Math.floor((player.position.x + otherPlayer.position.x) / 2),
-              y: Math.floor((player.position.y + otherPlayer.position.y) / 2),
+              x: Math.floor((player.position.x + anchorPlayer.position.x) / 2),
+              y: Math.floor((player.position.y + anchorPlayer.position.y) / 2),
             };
           }
-          console.log(`Agent ${player.id} walking towards ${otherPlayer.id}...`, destination);
+          console.log(`Agent ${player.id} walking towards ${anchorPlayer.id}...`, destination);
           movePlayer(game, now, player, destination);
         }
         return;
@@ -276,7 +314,7 @@ export class Agent {
       if (member.status.kind === 'participating') {
         const started = member.status.started;
         if (conversation.isTyping && conversation.isTyping.playerId !== player.id) {
-          // Wait for the other player to finish typing.
+          // Someone else holds the floor right now — wait for them to finish.
           return;
         }
         if (!conversation.lastMessage) {
@@ -284,8 +322,7 @@ export class Agent {
           const awkwardDeadline = started + AWKWARD_CONVERSATION_TIMEOUT;
           // Send the first message if we're the initiator or if we've been waiting for too long.
           if (isInitiator || awkwardDeadline < now) {
-            // Grab the lock on the conversation and send a "start" message.
-            console.log(`${player.id} initiating conversation with ${otherPlayer.id}.`);
+            console.log(`${player.id} initiating conversation ${conversation.id}.`);
             const messageUuid = crypto.randomUUID();
             conversation.setIsTyping(now, player, messageUuid);
             this.startOperation(game, now, 'agentGenerateMessage', {
@@ -293,21 +330,26 @@ export class Agent {
               playerId: player.id,
               agentId: this.id,
               conversationId: conversation.id,
-              otherPlayerId: otherPlayer.id,
               messageUuid,
               type: 'start',
               gameTimeMs: now,
             });
             return;
           } else {
-            // Wait on the other player to say something up to the awkward deadline.
+            // Wait on someone else to break the ice up to the awkward deadline.
             return;
           }
         }
         // See if the conversation has been going on too long and decide to leave.
+        // Groups get a higher message budget so everyone gets a few turns.
+        const participantCount = conversation.participants.size;
+        const maxMessages =
+          participantCount <= 2
+            ? MAX_CONVERSATION_MESSAGES
+            : MAX_CONVERSATION_MESSAGES * (participantCount - 1);
         const tooLongDeadline = started + MAX_CONVERSATION_DURATION;
-        if (tooLongDeadline < now || conversation.numMessages > MAX_CONVERSATION_MESSAGES) {
-          console.log(`${player.id} leaving conversation with ${otherPlayer.id}.`);
+        if (tooLongDeadline < now || conversation.numMessages > maxMessages) {
+          console.log(`${player.id} leaving conversation ${conversation.id}.`);
           const messageUuid = crypto.randomUUID();
           conversation.setIsTyping(now, player, messageUuid);
           this.startOperation(game, now, 'agentGenerateMessage', {
@@ -315,27 +357,45 @@ export class Agent {
             playerId: player.id,
             agentId: this.id,
             conversationId: conversation.id,
-            otherPlayerId: otherPlayer.id,
             messageUuid,
             type: 'leave',
             gameTimeMs: now,
           });
           return;
         }
-        // Wait for the awkward deadline if we sent the last message.
-        if (conversation.lastMessage.author === player.id) {
-          const awkwardDeadline = conversation.lastMessage.timestamp + AWKWARD_CONVERSATION_TIMEOUT;
-          if (now < awkwardDeadline) {
-            return;
-          }
+        // --- Multi-party turn-taking, governed by the dialogue orchestrator. ---
+        // After each agent message, the orchestrator sets `nextSpeaker`. We only
+        // speak when it's our turn, with two safety valves so the conversation
+        // never deadlocks:
+        //   1. "Open floor" (nextSpeaker unset, e.g. right after a human spoke):
+        //      any agent who didn't just speak may jump in. The isTyping lock
+        //      guarantees only one actually grabs the turn.
+        //   2. "Stalled" (the designated speaker hasn't said anything within the
+        //      awkward timeout — maybe they wandered off or are a quiet human):
+        //      anyone else may step in.
+        const justSpoke = conversation.lastMessage.author === player.id;
+        const stalled =
+          now > conversation.lastMessage.timestamp + AWKWARD_CONVERSATION_TIMEOUT;
+        let myTurn: boolean;
+        if (conversation.nextSpeaker) {
+          myTurn = conversation.nextSpeaker === player.id || (stalled && !justSpoke);
+        } else {
+          // Open floor.
+          myTurn = !justSpoke;
         }
-        // Wait for a cooldown after the last message to simulate "reading" the message.
+        if (!myTurn) {
+          return;
+        }
+        // Even when it's our turn, never reply to ourselves before the awkward
+        // deadline, and always wait out the read cooldown.
+        if (justSpoke && !stalled) {
+          return;
+        }
         const messageCooldown = conversation.lastMessage.timestamp + MESSAGE_COOLDOWN;
         if (now < messageCooldown) {
           return;
         }
-        // Grab the lock and send a message!
-        console.log(`${player.id} continuing conversation with ${otherPlayer.id}.`);
+        console.log(`${player.id} continuing conversation ${conversation.id}.`);
         const messageUuid = crypto.randomUUID();
         conversation.setIsTyping(now, player, messageUuid);
         this.startOperation(game, now, 'agentGenerateMessage', {
@@ -343,7 +403,6 @@ export class Agent {
           playerId: player.id,
           agentId: this.id,
           conversationId: conversation.id,
-          otherPlayerId: otherPlayer.id,
           messageUuid,
           type: 'continue',
           gameTimeMs: now,
@@ -351,6 +410,45 @@ export class Agent {
         return;
       }
     }
+  }
+
+  // If we're free and a multi-party conversation is happening nearby with room
+  // under the participant cap, join it (walking over). Returns true if we joined.
+  maybeJoinNearbyConversation(game: Game, now: number, player: import('./player').Player): boolean {
+    if (this.inProgressOperation) return false;
+    if (game.world.playerConversation(player)) return false;
+    // Respect the post-conversation and invite cooldowns so we don't ping-pong.
+    if (this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN) return false;
+    if (this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN) return false;
+
+    let best: Conversation | undefined;
+    let bestDistance = Infinity;
+    for (const conversation of game.world.conversations.values()) {
+      if (conversation.participants.has(player.id)) continue;
+      if (conversation.participants.size >= MAX_CONVERSATION_PARTICIPANTS) continue;
+      const participating = [...conversation.participants.values()].filter(
+        (m) => m.status.kind === 'participating',
+      );
+      // Only join a conversation that's genuinely underway and not already
+      // winding down.
+      if (participating.length < 2) continue;
+      if (conversation.numMessages > MAX_CONVERSATION_MESSAGES) continue;
+      let nearest = Infinity;
+      for (const m of participating) {
+        const other = game.world.players.get(m.playerId);
+        if (other) nearest = Math.min(nearest, distance(player.position, other.position));
+      }
+      if (nearest < GROUP_JOIN_RADIUS && nearest < bestDistance) {
+        best = conversation;
+        bestDistance = nearest;
+      }
+    }
+    if (!best) return false;
+    console.log(`Agent ${player.id} joining nearby conversation ${best.id}`);
+    best.join(game, now, player);
+    this.lastInviteAttempt = now;
+    if (player.pathfinding) stopPlayer(player);
+    return true;
   }
 
   // Returns true if the schedule handled this tick (caller should return).
@@ -646,6 +744,9 @@ export const agentSendMessage = internalMutation({
     messageUuid: v.string(),
     leaveConversation: v.boolean(),
     operationId: v.string(),
+    // The participant the dialogue orchestrator wants to speak next (omitted when
+    // leaving or when the floor should be open, e.g. only humans remain).
+    nextSpeaker: v.optional(playerId),
   },
   handler: async (ctx, args) => {
     await ctx.db.insert('messages', {
@@ -661,6 +762,7 @@ export const agentSendMessage = internalMutation({
       timestamp: Date.now(),
       leaveConversation: args.leaveConversation,
       operationId: args.operationId,
+      nextSpeaker: args.nextSpeaker,
     });
   },
 });

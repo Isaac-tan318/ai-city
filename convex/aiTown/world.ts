@@ -21,6 +21,10 @@ export const serializedWorld = {
   scenarioTarget: v.optional(point),
   scenarioName: v.optional(v.string()),
   scenarioInstruction: v.optional(v.string()),
+  // Real-epoch ms when the current custom scenario was injected. Used to auto-
+  // expire `scenarioInstruction` after one in-game day so agents stop re-enacting
+  // the scenario (their memories of it remain).
+  scenarioStartTime: v.optional(v.number()),
   historicalLocations: v.optional(historicalLocations),
   worldStartTime: v.optional(v.number()),
 };
@@ -35,10 +39,11 @@ export class World {
   scenarioTarget?: { x: number; y: number };
   scenarioName?: string;
   scenarioInstruction?: string;
+  scenarioStartTime?: number;
   worldStartTime?: number;
 
   constructor(serialized: SerializedWorld) {
-    const { nextId, historicalLocations, scenarioTarget, scenarioName, scenarioInstruction, worldStartTime } = serialized;
+    const { nextId, historicalLocations, scenarioTarget, scenarioName, scenarioInstruction, scenarioStartTime, worldStartTime } = serialized;
 
     this.nextId = nextId;
     this.conversations = parseMap(serialized.conversations, Conversation, (c) => c.id);
@@ -47,6 +52,7 @@ export class World {
     this.scenarioTarget = scenarioTarget;
     this.scenarioName = scenarioName;
     this.scenarioInstruction = scenarioInstruction;
+    this.scenarioStartTime = scenarioStartTime;
     this.worldStartTime = worldStartTime;
 
     if (historicalLocations) {
@@ -70,6 +76,7 @@ export class World {
       scenarioTarget: this.scenarioTarget,
       scenarioName: this.scenarioName,
       scenarioInstruction: this.scenarioInstruction,
+      scenarioStartTime: this.scenarioStartTime,
       worldStartTime: this.worldStartTime,
       historicalLocations:
         this.historicalLocations &&

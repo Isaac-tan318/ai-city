@@ -23,33 +23,26 @@ const scenarioOptions = [
   {
     id: 'hawker-lunch',
     title: 'Hawker Lunch Rush',
-    text:
-      "It's lunchtime and everyone is hungry. Head to the Hawker Centre now and sort " +
-      "out what to eat together, minding each other's dietary needs, allergies, and budgets.",
+    text: "Everyone's hungry — meet at the Hawker Centre and sort out lunch together.",
     requiresTwoAgents: false,
   },
   {
     id: 'late-night-ride',
     title: 'Late-Night Ride Home',
     text:
-      "It's past midnight and the trains have stopped running. Gather at the Marina Bay " +
-      'Sands taxi stand right now to figure out who shares a ride home and how to split the fare.',
+      'Trains have stopped — gather at the Marina Bay Sands taxi stand to share a ride home.',
     requiresTwoAgents: false,
   },
   {
     id: 'hdb-noise',
     title: 'HDB Noise Complaint',
-    text:
-      "It's late at night and someone in the HDB Estate is blasting loud music. The " +
-      'neighbours are gathering at the HDB Estate now to settle the noise complaint.',
+    text: "Someone's blasting music late at night — gather at the HDB Estate to settle it.",
     requiresTwoAgents: false,
   },
   {
     id: 'medical-emergency',
     title: 'Medical Emergency',
-    text:
-      'Someone has suddenly collapsed and feels very unwell. Rush to Changi General ' +
-      'Hospital immediately to help and decide what to do.',
+    text: 'Someone has collapsed — rush to Changi General Hospital to help.',
     requiresTwoAgents: false,
   },
   {
@@ -257,7 +250,7 @@ export default function PlayerDetails({
       <div className="p-4 flex flex-col gap-4 text-sm sm:text-base">
         <div className="grid gap-2">
           <div className="text-xs uppercase tracking-widest text-amber-200/80">Defaults</div>
-          <div className="scenario-scroll grid gap-2 sm:grid-cols-2 max-h-56 overflow-y-auto pr-1">
+          <div className="scenario-scroll grid items-start gap-2 sm:grid-cols-2 max-h-56 overflow-y-auto pr-1">
             {scenarioOptions.map((scenario) => {
               const isActive = scenario.id === selectedScenarioId;
               const isCustom = scenario.id === 'custom';

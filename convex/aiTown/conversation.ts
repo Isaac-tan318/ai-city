@@ -4,11 +4,16 @@ import { conversationId, playerId } from './ids';
 import { Player } from './player';
 import { inputHandler } from './inputHandler';
 
-import { TYPING_TIMEOUT, CONVERSATION_DISTANCE } from '../constants';
+import {
+  TYPING_TIMEOUT,
+  CONVERSATION_DISTANCE,
+  GROUP_JOIN_DISTANCE,
+  MAX_CONVERSATION_PARTICIPANTS,
+  SCENARIO_MAX_PARTICIPANTS,
+} from '../constants';
 import { distance, normalize, vector } from '../util/geometry';
-import { Point } from '../util/types';
 import { Game } from './game';
-import { stopPlayer, blocked, movePlayer } from './movement';
+import { stopPlayer } from './movement';
 import { ConversationMembership, serializedConversationMembership } from './conversationMembership';
 import { parseMap, serializeMap } from '../util/object';
 
@@ -27,9 +32,18 @@ export class Conversation {
   };
   numMessages: number;
   participants: Map<GameId<'players'>, ConversationMembership>;
+  // True for conversations seeded by an enforced gathering scenario (dinner,
+  // shopping). Scenario conversations use the higher participant cap and are
+  // never preempted by the scenario approach logic.
+  scenario?: boolean;
+  // Set by the dialogue orchestrator after each agent message: the participant
+  // who should speak next, decided by an LLM from the conversation history.
+  // Agents defer to the designated speaker (with an awkward-timeout fallback).
+  nextSpeaker?: GameId<'players'>;
 
   constructor(serialized: SerializedConversation) {
-    const { id, creator, created, isTyping, lastMessage, numMessages, participants } = serialized;
+    const { id, creator, created, isTyping, lastMessage, numMessages, participants, scenario } =
+      serialized;
     this.id = parseGameId('conversations', id);
     this.creator = parseGameId('players', creator);
     this.created = created;
@@ -44,79 +58,108 @@ export class Conversation {
     };
     this.numMessages = numMessages;
     this.participants = parseMap(participants, ConversationMembership, (m) => m.playerId);
+    this.scenario = scenario;
+    this.nextSpeaker =
+      serialized.nextSpeaker !== undefined
+        ? parseGameId('players', serialized.nextSpeaker)
+        : undefined;
   }
 
   tick(game: Game, now: number) {
     if (this.isTyping && this.isTyping.since + TYPING_TIMEOUT < now) {
       delete this.isTyping;
     }
-    if (this.participants.size !== 2) {
-      console.warn(`Conversation ${this.id} has ${this.participants.size} participants`);
+    // A conversation needs at least two people. If everyone but one has left,
+    // tear it down so the last participant is freed.
+    if (this.participants.size < 2) {
+      this.stop(game, now);
       return;
     }
-    const [playerId1, playerId2] = [...this.participants.keys()];
-    const member1 = this.participants.get(playerId1)!;
-    const member2 = this.participants.get(playerId2)!;
 
-    const player1 = game.world.players.get(playerId1)!;
-    const player2 = game.world.players.get(playerId2)!;
+    type Entry = { playerId: GameId<'players'>; member: ConversationMembership; player: Player };
+    const entries: Entry[] = [];
+    for (const [pid, member] of this.participants.entries()) {
+      const player = game.world.players.get(pid);
+      // A participant's player may have been removed; drop them next tick via leave.
+      if (player) entries.push({ playerId: pid, member, player });
+    }
 
-    const playerDistance = distance(player1?.position, player2?.position);
+    const participating = entries.filter((e) => e.member.status.kind === 'participating');
+    const walkingOver = entries.filter((e) => e.member.status.kind === 'walkingOver');
 
-    // If the players are both in the "walkingOver" state and they're sufficiently close, transition both
-    // of them to "participating" and stop their paths.
-    if (member1.status.kind === 'walkingOver' && member2.status.kind === 'walkingOver') {
-      if (playerDistance < CONVERSATION_DISTANCE) {
-        console.log(`Starting conversation between ${player1.id} and ${player2.id}`);
+    const startParticipating = (e: Entry) => {
+      console.log(`${e.player.id} joining conversation ${this.id}`);
+      stopPlayer(e.player);
+      e.member.status = { kind: 'participating', started: now };
+      participating.push(e);
+    };
 
-        // First, stop the two players from moving.
-        stopPlayer(player1);
-        stopPlayer(player2);
-
-        member1.status = { kind: 'participating', started: now };
-        member2.status = { kind: 'participating', started: now };
-
-        // Try to move the first player to grid point nearest the other player.
-        const neighbors = (p: Point) => [
-          { x: p.x + 1, y: p.y },
-          { x: p.x - 1, y: p.y },
-          { x: p.x, y: p.y + 1 },
-          { x: p.x, y: p.y - 1 },
-        ];
-        const floorPos1 = { x: Math.floor(player1.position.x), y: Math.floor(player1.position.y) };
-        const p1Candidates = neighbors(floorPos1).filter((p) => !blocked(game, now, p, player1.id));
-        p1Candidates.sort((a, b) => distance(a, player2.position) - distance(b, player2.position));
-        if (p1Candidates.length > 0) {
-          const p1Candidate = p1Candidates[0];
-
-          // Try to move the second player to the grid point nearest the first player's
-          // destination.
-          const p2Candidates = neighbors(p1Candidate).filter(
-            (p) => !blocked(game, now, p, player2.id),
-          );
-          p2Candidates.sort(
-            (a, b) => distance(a, player2.position) - distance(b, player2.position),
-          );
-          if (p2Candidates.length > 0) {
-            const p2Candidate = p2Candidates[0];
-            movePlayer(game, now, player1, p1Candidate, true);
-            movePlayer(game, now, player2, p2Candidate, true);
+    if (participating.length > 0) {
+      // Late joiners slot into an existing huddle once they're close to anyone
+      // already participating (a bit looser than CONVERSATION_DISTANCE).
+      for (const e of walkingOver) {
+        const closeEnough = participating.some(
+          (p) => distance(e.player.position, p.player.position) < GROUP_JOIN_DISTANCE,
+        );
+        if (closeEnough) startParticipating(e);
+      }
+    } else if (walkingOver.length >= 2) {
+      // Bootstrap: the first two walkers within talking distance start the
+      // conversation; any other walkers close to them are pulled in too.
+      let seeded = false;
+      for (let i = 0; i < walkingOver.length && !seeded; i++) {
+        for (let j = i + 1; j < walkingOver.length && !seeded; j++) {
+          if (
+            distance(walkingOver[i].player.position, walkingOver[j].player.position) <
+            CONVERSATION_DISTANCE
+          ) {
+            startParticipating(walkingOver[i]);
+            startParticipating(walkingOver[j]);
+            seeded = true;
           }
+        }
+      }
+      if (seeded) {
+        for (const e of walkingOver) {
+          if (e.member.status.kind !== 'walkingOver') continue;
+          const closeEnough = participating.some(
+            (p) => distance(e.player.position, p.player.position) < GROUP_JOIN_DISTANCE,
+          );
+          if (closeEnough) startParticipating(e);
         }
       }
     }
 
-    // Orient the two players towards each other if they're not moving.
-    if (member1.status.kind === 'participating' && member2.status.kind === 'participating') {
-      const v = normalize(vector(player1.position, player2.position));
-      if (!player1.pathfinding && v) {
-        player1.facing = v;
-      }
-      if (!player2.pathfinding && v) {
-        player2.facing.dx = -v.dx;
-        player2.facing.dy = -v.dy;
+    // Orient each settled participant toward the centroid of the others so the
+    // group faces inward.
+    if (participating.length >= 2) {
+      for (const e of participating) {
+        if (e.player.pathfinding) continue;
+        const others = participating.filter((o) => o.playerId !== e.playerId);
+        const centroid = others.reduce(
+          (acc, o) => ({ x: acc.x + o.player.position.x, y: acc.y + o.player.position.y }),
+          { x: 0, y: 0 },
+        );
+        centroid.x /= others.length;
+        centroid.y /= others.length;
+        const v = normalize(vector(e.player.position, centroid));
+        if (v) e.player.facing = v;
       }
     }
+  }
+
+  // Add a new participant who will walk over and join the huddle. The caller is
+  // responsible for enforcing the participant cap.
+  join(game: Game, now: number, player: Player) {
+    if (this.participants.has(player.id)) return;
+    this.participants.set(
+      player.id,
+      new ConversationMembership({
+        playerId: player.id,
+        invited: now,
+        status: { kind: 'walkingOver' },
+      }),
+    );
   }
 
   static start(game: Game, now: number, player: Player, invitee: Player) {
@@ -213,11 +256,31 @@ export class Conversation {
     if (!member) {
       throw new Error(`Couldn't find membership for ${this.id}:${player.id}`);
     }
-    this.stop(game, now);
+    // Record just this participant leaving so they remember the conversation and
+    // respect the post-conversation cooldown.
+    const agent = [...game.world.agents.values()].find((a) => a.playerId === player.id);
+    if (agent) {
+      agent.lastConversation = now;
+      if (this.numMessages > 0) {
+        agent.toRemember = this.id;
+      }
+    }
+    this.participants.delete(player.id);
+    if (this.isTyping && this.isTyping.playerId === player.id) {
+      delete this.isTyping;
+    }
+    if (this.nextSpeaker === player.id) {
+      delete this.nextSpeaker;
+    }
+    // Once fewer than two people remain, tear down the whole conversation (which
+    // also lets the last person remember it).
+    if (this.participants.size < 2) {
+      this.stop(game, now);
+    }
   }
 
   serialize(): SerializedConversation {
-    const { id, creator, created, isTyping, lastMessage, numMessages } = this;
+    const { id, creator, created, isTyping, lastMessage, numMessages, scenario, nextSpeaker } = this;
     return {
       id,
       creator,
@@ -226,6 +289,8 @@ export class Conversation {
       lastMessage,
       numMessages,
       participants: serializeMap(this.participants),
+      scenario,
+      nextSpeaker,
     };
   }
 }
@@ -249,6 +314,8 @@ export const serializedConversation = {
   ),
   numMessages: v.number(),
   participants: v.array(v.object(serializedConversationMembership)),
+  scenario: v.optional(v.boolean()),
+  nextSpeaker: v.optional(playerId),
 };
 export type SerializedConversation = ObjectType<typeof serializedConversation>;
 
@@ -327,6 +394,11 @@ export const conversationInputs = {
       }
       conversation.lastMessage = { author: playerId, timestamp: args.timestamp };
       conversation.numMessages++;
+      // Clear the orchestrator's designated speaker. For agent messages, the
+      // dialogue manager re-sets it via agentFinishSendingMessage right after
+      // this runs. For a human message, leaving it cleared opens the floor so an
+      // agent jumps in to respond.
+      delete conversation.nextSpeaker;
       return null;
     },
   }),

@@ -37,6 +37,28 @@ export const INVITE_TIMEOUT = 60000;
 export const AWKWARD_CONVERSATION_TIMEOUT = 60_000; // more time locally
 // export const AWKWARD_CONVERSATION_TIMEOUT = 20_000;
 
+// --- Group conversations ---
+// Maximum participants in an emergent (non-scenario) group conversation.
+export const MAX_CONVERSATION_PARTICIPANTS = 5;
+// Maximum participants in an enforced-gathering (scenario) conversation. High
+// enough that every agent (plus a human) can join the same dinner/shopping chat.
+export const SCENARIO_MAX_PARTICIPANTS = 8;
+// A walkingOver member transitions to participating once within this distance
+// of ANY participating member (a bit looser than CONVERSATION_DISTANCE so
+// late joiners can slot into the outside of the huddle).
+export const GROUP_JOIN_DISTANCE = 2.5;
+// A free agent passing within this many tiles of an active group conversation
+// will join it instead of starting a fresh two-person one.
+export const GROUP_JOIN_RADIUS = 6;
+
+// --- Scenario gatherings (enforced dinner/shopping) ---
+// Tile distance at which an agent counts as "arrived" at the gathering target.
+// Loose enough for a small crowd to stand around the same spot.
+export const SCENARIO_ARRIVAL_RADIUS = 3;
+// Hard fallback: release an agent from a gathering this long after arrival even
+// if the group conversation never produced messages (e.g. LLM outage).
+export const SCENARIO_GATHER_TIMEOUT = 5 * 60_000;
+
 // Leave a conversation after participating too long.
 export const MAX_CONVERSATION_DURATION = 10 * 60_000; // more time locally
 // export const MAX_CONVERSATION_DURATION = 2 * 60_000;

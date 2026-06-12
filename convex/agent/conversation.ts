@@ -12,25 +12,27 @@ import { CITY_LOCATIONS } from '../../data/cityLocations';
 
 const selfInternal = internal.agent.conversation;
 
+type OtherParticipant = {
+  id: string;
+  name: string;
+  identity?: string;
+  human: boolean;
+  position: { x: number; y: number };
+};
+
 export async function startConversationMessage(
   ctx: ActionCtx,
   worldId: Id<'worlds'>,
   conversationId: GameId<'conversations'>,
   playerId: GameId<'players'>,
-  otherPlayerId: GameId<'players'>,
   gameTimeMs: number,
 ): Promise<string> {
-  const { player, otherPlayer, agent, otherAgent, lastConversation, worldStartTime } =
-    await ctx.runQuery(selfInternal.queryPromptData, {
-      worldId,
-      playerId,
-      otherPlayerId,
-      conversationId,
-    });
-  const embedding = await embeddingsCache.fetch(
-    ctx,
-    `${player.name} is talking to ${otherPlayer.name}`,
+  const { player, others, agent, lastConversation, worldStartTime } = await ctx.runQuery(
+    selfInternal.queryPromptData,
+    { worldId, playerId, conversationId },
   );
+  const audience = formatNameList(others.map((o) => o.name));
+  const embedding = await embeddingsCache.fetch(ctx, `${player.name} is talking to ${audience}`);
 
   const memories = await memory.searchMemories(
     ctx,
@@ -39,27 +41,31 @@ export async function startConversationMessage(
     Number(process.env.NUM_MEMORIES_TO_SEARCH) || NUM_MEMORIES_TO_SEARCH,
   );
 
+  const primaryOther = others[0];
   const memoryWithOtherPlayer = memories.find(
-    (m) => m.data.type === 'conversation' && m.data.playerIds.includes(otherPlayerId),
+    (m) =>
+      m.data.type === 'conversation' && primaryOther && m.data.playerIds.includes(primaryOther.id),
   );
   const prompt = [
-    `You are ${player.name}, and you just started a conversation with ${otherPlayer.name}.`,
+    others.length > 1
+      ? `You are ${player.name}, and you just joined a group conversation with ${audience}.`
+      : `You are ${player.name}, and you just started a conversation with ${audience}.`,
   ];
   prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
-  prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
+  prompt.push(...selfAndOthersPrompt(agent, others));
   prompt.push(
-    ...previousConversationPrompt(otherPlayer, lastConversation, worldStartTime, gameTimeMs),
+    ...previousConversationPrompt(primaryOther, lastConversation, worldStartTime, gameTimeMs),
   );
   prompt.push(...relatedMemoriesPrompt(memories));
-  if (memoryWithOtherPlayer) {
+  if (memoryWithOtherPlayer && primaryOther) {
     prompt.push(
-      `You may briefly reference your last conversation in one short clause, but keep it light.`,
+      `You may briefly reference your last conversation with ${primaryOther.name} in one short clause, but keep it light.`,
     );
   }
   prompt.push(
     `Keep your greeting to one or two short sentences, like real spoken dialogue — under 200 characters. Don't monologue or give a speech.`,
   );
-  const lastPrompt = `${player.name} to ${otherPlayer.name}:`;
+  const lastPrompt = speakerLabel(player.name, others);
   prompt.push(lastPrompt);
 
   const { content } = await chatCompletion({
@@ -70,7 +76,7 @@ export async function startConversationMessage(
       },
     ],
     max_tokens: 120,
-    stop: stopWords(otherPlayer.name, player.name),
+    stop: stopWords(player.name, others),
   });
   return trimContentPrefx(content, lastPrompt);
 }
@@ -87,30 +93,31 @@ export async function continueConversationMessage(
   worldId: Id<'worlds'>,
   conversationId: GameId<'conversations'>,
   playerId: GameId<'players'>,
-  otherPlayerId: GameId<'players'>,
   gameTimeMs: number,
 ): Promise<string> {
-  const { player, otherPlayer, conversation, agent, otherAgent, worldStartTime } =
-    await ctx.runQuery(selfInternal.queryPromptData, {
-      worldId,
-      playerId,
-      otherPlayerId,
-      conversationId,
-    });
+  const { player, others, conversation, agent, worldStartTime } = await ctx.runQuery(
+    selfInternal.queryPromptData,
+    { worldId, playerId, conversationId },
+  );
+  const audience = formatNameList(others.map((o) => o.name));
   const embedding = await embeddingsCache.fetch(
     ctx,
-    `What do you think about ${otherPlayer.name}?`,
+    others.length === 1
+      ? `What do you think about ${others[0].name}?`
+      : `What do you think about your conversation with ${audience}?`,
   );
   const memories = await memory.searchMemories(ctx, player.id as GameId<'players'>, embedding, 3);
   const prompt = [
-    `You are ${player.name}, and you're currently in a conversation with ${otherPlayer.name}.`,
+    others.length > 1
+      ? `You are ${player.name}, and you're currently in a group conversation with ${audience}.`
+      : `You are ${player.name}, and you're currently in a conversation with ${audience}.`,
     `The conversation started at ${formatGameTimestamp(conversation.created, worldStartTime)}.`,
   ];
   prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
-  prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
+  prompt.push(...selfAndOthersPrompt(agent, others));
   prompt.push(...relatedMemoriesPrompt(memories));
   prompt.push(
-    `Below is the current chat history between you and ${otherPlayer.name}.`,
+    `Below is the current chat history.`,
     `DO NOT greet them again. Do NOT use the word "Hey" too often. Your response should be brief and within 200 characters.`,
   );
 
@@ -119,21 +126,15 @@ export async function continueConversationMessage(
       role: 'system',
       content: prompt.join('\n'),
     },
-    ...(await previousMessages(
-      ctx,
-      worldId,
-      player,
-      otherPlayer,
-      conversation.id as GameId<'conversations'>,
-    )),
+    ...(await previousMessages(ctx, worldId, conversation.id as GameId<'conversations'>)),
   ];
-  const lastPrompt = `${player.name} to ${otherPlayer.name}:`;
+  const lastPrompt = speakerLabel(player.name, others);
   llmMessages.push({ role: 'user', content: lastPrompt });
 
   const { content } = await chatCompletion({
     messages: llmMessages,
     max_tokens: 300,
-    stop: stopWords(otherPlayer.name, player.name),
+    stop: stopWords(player.name, others),
   });
   return trimContentPrefx(content, lastPrompt);
 }
@@ -143,24 +144,21 @@ export async function leaveConversationMessage(
   worldId: Id<'worlds'>,
   conversationId: GameId<'conversations'>,
   playerId: GameId<'players'>,
-  otherPlayerId: GameId<'players'>,
   gameTimeMs: number,
 ): Promise<string> {
-  const { player, otherPlayer, conversation, agent, otherAgent, worldStartTime } =
-    await ctx.runQuery(selfInternal.queryPromptData, {
-      worldId,
-      playerId,
-      otherPlayerId,
-      conversationId,
-    });
+  const { player, others, conversation, agent, worldStartTime } = await ctx.runQuery(
+    selfInternal.queryPromptData,
+    { worldId, playerId, conversationId },
+  );
+  const audience = formatNameList(others.map((o) => o.name));
   const prompt = [
-    `You are ${player.name}, and you're currently in a conversation with ${otherPlayer.name}.`,
-    `You've decided to leave the question and would like to politely tell them you're leaving the conversation.`,
+    `You are ${player.name}, and you're currently in a conversation with ${audience}.`,
+    `You've decided to leave and would like to politely tell them you're heading off.`,
   ];
   prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
-  prompt.push(...agentPrompts(otherPlayer, agent, otherAgent ?? null));
+  prompt.push(...selfAndOthersPrompt(agent, others));
   prompt.push(
-    `Below is the current chat history between you and ${otherPlayer.name}.`,
+    `Below is the current chat history.`,
     `How would you like to tell them that you're leaving? Your response should be brief and within 200 characters.`,
   );
   const llmMessages: LLMMessage[] = [
@@ -168,36 +166,138 @@ export async function leaveConversationMessage(
       role: 'system',
       content: prompt.join('\n'),
     },
-    ...(await previousMessages(
-      ctx,
-      worldId,
-      player,
-      otherPlayer,
-      conversation.id as GameId<'conversations'>,
-    )),
+    ...(await previousMessages(ctx, worldId, conversation.id as GameId<'conversations'>)),
   ];
-  const lastPrompt = `${player.name} to ${otherPlayer.name}:`;
+  const lastPrompt = speakerLabel(player.name, others);
   llmMessages.push({ role: 'user', content: lastPrompt });
 
   const { content } = await chatCompletion({
     messages: llmMessages,
     max_tokens: 300,
-    stop: stopWords(otherPlayer.name, player.name),
+    stop: stopWords(player.name, others),
   });
   return trimContentPrefx(content, lastPrompt);
 }
 
-function agentPrompts(
-  otherPlayer: { name: string },
+// --- Dialogue orchestrator -------------------------------------------------
+// After an agent speaks, decide which participant should speak next so that a
+// 3–5 person conversation flows naturally instead of everyone talking at once
+// (or nobody talking). The floor is only routed among other AGENTS — humans
+// speak whenever they choose, so we never block waiting on a human.
+export async function decideNextSpeaker(
+  ctx: ActionCtx,
+  worldId: Id<'worlds'>,
+  conversationId: GameId<'conversations'>,
+  speakerId: GameId<'players'>,
+): Promise<GameId<'players'> | undefined> {
+  const { player, others } = await ctx.runQuery(selfInternal.queryPromptData, {
+    worldId,
+    playerId: speakerId,
+    conversationId,
+  });
+  const candidates = others.filter((o) => !o.human);
+  if (candidates.length === 0) {
+    // Only humans left to address — open the floor and let them respond.
+    return undefined;
+  }
+  if (candidates.length === 1) {
+    return candidates[0].id as GameId<'players'>;
+  }
+
+  const prevMessages = await ctx.runQuery(api.messages.listMessages, { worldId, conversationId });
+  const recent = prevMessages
+    .slice(-8)
+    .map((m) => `${m.authorName}: ${m.text}`)
+    .join('\n');
+  const candidateNames = candidates.map((c) => c.name);
+  const prompt = [
+    `You are the moderator of a casual group conversation in a small town.`,
+    `Everyone present: ${formatNameList([player.name, ...others.map((o) => o.name)])}.`,
+    `${player.name} just finished speaking. Decide who should speak next so the conversation flows naturally — pick whoever was addressed or asked a question, or whoever would most plausibly jump in.`,
+    `You must choose exactly one of these names: ${candidateNames.join(', ')}.`,
+    ``,
+    `Recent conversation:`,
+    recent,
+    ``,
+    `Reply with ONLY the chosen name, nothing else.`,
+  ].join('\n');
+
+  let chosen: OtherParticipant | undefined;
+  try {
+    const { content } = await chatCompletion({
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 10,
+    });
+    const norm = content.trim().toLowerCase();
+    chosen =
+      candidates.find((c) => norm === c.name.toLowerCase()) ??
+      candidates.find((c) => norm.includes(c.name.toLowerCase()));
+  } catch (err) {
+    console.error(`decideNextSpeaker failed: ${(err as Error).message}`);
+  }
+  if (!chosen) {
+    // Fallback: hand the floor to whoever has gone longest without speaking.
+    chosen =
+      pickLeastRecentSpeaker(candidates, prevMessages) ??
+      candidates[Math.floor(Math.random() * candidates.length)];
+  }
+  return chosen.id as GameId<'players'>;
+}
+
+function pickLeastRecentSpeaker(
+  candidates: OtherParticipant[],
+  messages: { author: string; _creationTime: number }[],
+): OtherParticipant | undefined {
+  const lastSpoke = new Map<string, number>();
+  for (const m of messages) {
+    lastSpoke.set(m.author, m._creationTime);
+  }
+  let best: OtherParticipant | undefined;
+  let bestTime = Infinity;
+  for (const c of candidates) {
+    // Someone who hasn't spoken at all gets top priority (-1).
+    const t = lastSpoke.get(c.id) ?? -1;
+    if (t < bestTime) {
+      bestTime = t;
+      best = c;
+    }
+  }
+  return best;
+}
+
+function formatNameList(names: string[]): string {
+  if (names.length === 0) return 'no one';
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+// The label the model continues from. For a 1:1 chat we keep the explicit
+// "X to Y:" form; for a group we just use "X:" since there's no single recipient.
+function speakerLabel(name: string, others: { name: string }[]): string {
+  return others.length === 1 ? `${name} to ${others[0].name}:` : `${name}:`;
+}
+
+function selfAndOthersPrompt(
   agent: { identity: string; scenarioInstruction?: string } | null,
-  otherAgent: { identity: string } | null,
+  others: OtherParticipant[],
 ): string[] {
-  const prompt = [];
+  const prompt: string[] = [];
   if (agent) {
     prompt.push(`About you: ${agent.identity}`);
   }
-  if (otherAgent) {
-    prompt.push(`About ${otherPlayer.name}: ${otherAgent.identity}`);
+  for (const o of others) {
+    if (o.identity) {
+      prompt.push(`About ${o.name}: ${o.identity}`);
+    }
+  }
+  if (others.length > 1) {
+    prompt.push(
+      `This is a group conversation with ${others.length + 1} people present (${formatNameList([
+        ...others.map((o) => o.name),
+        'you',
+      ])}). Address the group or a specific person naturally, keep your turn short, and don't try to speak for anyone else.`,
+    );
   }
   if (agent?.scenarioInstruction) {
     prompt.push(
@@ -209,13 +309,13 @@ function agentPrompts(
 }
 
 function previousConversationPrompt(
-  otherPlayer: { name: string },
+  otherPlayer: { name: string } | undefined,
   conversation: { created: number } | null,
   worldStartTime: number | undefined,
   gameTimeMs: number,
 ): string[] {
   const prompt = [];
-  if (conversation) {
+  if (conversation && otherPlayer) {
     const prev = formatGameTimestamp(conversation.created, worldStartTime);
     const now = formatGameTimestamp(gameTimeMs, worldStartTime);
     prompt.push(`Last time you chatted with ${otherPlayer.name} it was ${prev}. It's now ${now}.`);
@@ -272,18 +372,14 @@ function relatedMemoriesPrompt(memories: memory.Memory[]): string[] {
 async function previousMessages(
   ctx: ActionCtx,
   worldId: Id<'worlds'>,
-  player: { id: string; name: string },
-  otherPlayer: { id: string; name: string },
   conversationId: GameId<'conversations'>,
 ) {
   const llmMessages: LLMMessage[] = [];
   const prevMessages = await ctx.runQuery(api.messages.listMessages, { worldId, conversationId });
   for (const message of prevMessages) {
-    const author = message.author === player.id ? player : otherPlayer;
-    const recipient = message.author === player.id ? otherPlayer : player;
     llmMessages.push({
       role: 'user',
-      content: `${author.name} to ${recipient.name}: ${message.text}`,
+      content: `${message.authorName}: ${message.text}`,
     });
   }
   return llmMessages;
@@ -293,13 +389,16 @@ export const queryPromptData = internalQuery({
   args: {
     worldId: v.id('worlds'),
     playerId,
-    otherPlayerId: playerId,
     conversationId,
   },
   handler: async (ctx, args) => {
     const world = await ctx.db.get(args.worldId);
     if (!world) {
       throw new Error(`World ${args.worldId} not found`);
+    }
+    const conversation = world.conversations.find((c) => c.id === args.conversationId);
+    if (!conversation) {
+      throw new Error(`Conversation ${args.conversationId} not found`);
     }
     const player = world.players.find((p) => p.id === args.playerId);
     if (!player) {
@@ -312,84 +411,93 @@ export const queryPromptData = internalQuery({
     if (!playerDescription) {
       throw new Error(`Player description for ${args.playerId} not found`);
     }
-    const otherPlayer = world.players.find((p) => p.id === args.otherPlayerId);
-    if (!otherPlayer) {
-      throw new Error(`Player ${args.otherPlayerId} not found`);
-    }
-    const otherPlayerDescription = await ctx.db
-      .query('playerDescriptions')
-      .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('playerId', args.otherPlayerId))
-      .first();
-    if (!otherPlayerDescription) {
-      throw new Error(`Player description for ${args.otherPlayerId} not found`);
-    }
-    const conversation = world.conversations.find((c) => c.id === args.conversationId);
-    if (!conversation) {
-      throw new Error(`Conversation ${args.conversationId} not found`);
-    }
     const agent = world.agents.find((a) => a.playerId === args.playerId);
-    if (!agent) {
-      throw new Error(`Player ${args.playerId} not found`);
-    }
-    const agentDescription = await ctx.db
-      .query('agentDescriptions')
-      .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('agentId', agent.id))
-      .first();
-    if (!agentDescription) {
-      throw new Error(`Agent description for ${agent.id} not found`);
-    }
-    const otherAgent = world.agents.find((a) => a.playerId === args.otherPlayerId);
-    let otherAgentDescription;
-    if (otherAgent) {
-      otherAgentDescription = await ctx.db
+    let agentIdentity: string | undefined;
+    if (agent) {
+      const agentDescription = await ctx.db
         .query('agentDescriptions')
-        .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('agentId', otherAgent.id))
+        .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('agentId', agent.id))
         .first();
-      if (!otherAgentDescription) {
-        throw new Error(`Agent description for ${otherAgent.id} not found`);
-      }
+      agentIdentity = agentDescription?.identity;
     }
-    const lastTogether = await ctx.db
-      .query('participatedTogether')
-      .withIndex('edge', (q) =>
-        q
-          .eq('worldId', args.worldId)
-          .eq('player1', args.playerId)
-          .eq('player2', args.otherPlayerId),
-      )
-      // Order by conversation end time descending.
-      .order('desc')
-      .first();
 
-    let lastConversation = null;
-    if (lastTogether) {
-      lastConversation = await ctx.db
-        .query('archivedConversations')
-        .withIndex('worldId', (q) =>
-          q.eq('worldId', args.worldId).eq('id', lastTogether.conversationId),
-        )
+    // Build the list of OTHER participants (everyone in the conversation but us),
+    // each with their name, identity (if they're an agent), and human flag.
+    const others: OtherParticipant[] = [];
+    for (const membership of conversation.participants) {
+      const pid = membership.playerId;
+      if (pid === args.playerId) continue;
+      const otherPlayer = world.players.find((p) => p.id === pid);
+      if (!otherPlayer) continue; // May have just left the conversation.
+      const desc = await ctx.db
+        .query('playerDescriptions')
+        .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('playerId', pid))
         .first();
-      if (!lastConversation) {
-        throw new Error(`Conversation ${lastTogether.conversationId} not found`);
+      const otherAgent = world.agents.find((a) => a.playerId === pid);
+      let identity: string | undefined;
+      if (otherAgent) {
+        const ad = await ctx.db
+          .query('agentDescriptions')
+          .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('agentId', otherAgent.id))
+          .first();
+        identity = ad?.identity;
+      }
+      others.push({
+        id: pid,
+        name: desc?.name ?? 'Someone',
+        identity,
+        human: !!otherPlayer.human,
+        position: otherPlayer.position,
+      });
+    }
+
+    // The most recent prior conversation with our primary interlocutor, for a
+    // little continuity flavour in the opening line.
+    let lastConversation = null;
+    const primaryOther = others[0];
+    if (primaryOther) {
+      const lastTogether = await ctx.db
+        .query('participatedTogether')
+        .withIndex('edge', (q) =>
+          q.eq('worldId', args.worldId).eq('player1', args.playerId).eq('player2', primaryOther.id),
+        )
+        .order('desc')
+        .first();
+      if (lastTogether) {
+        lastConversation = await ctx.db
+          .query('archivedConversations')
+          .withIndex('worldId', (q) =>
+            q.eq('worldId', args.worldId).eq('id', lastTogether.conversationId),
+          )
+          .first();
       }
     }
     return {
       player: { name: playerDescription.name, ...player },
-      otherPlayer: { name: otherPlayerDescription.name, ...otherPlayer },
+      others,
       conversation,
-      agent: { identity: agentDescription.identity, ...agent },
-      otherAgent: otherAgent && {
-        identity: otherAgentDescription!.identity,
-        ...otherAgent,
-      },
+      agent: agent
+        ? {
+            identity: agentIdentity ?? `${playerDescription.name} is a resident of Singapore.`,
+            ...agent,
+          }
+        : null,
       lastConversation,
       worldStartTime: world.worldStartTime,
     };
   },
 });
 
-function stopWords(otherPlayer: string, player: string) {
-  // These are the words we ask the LLM to stop on. OpenAI only supports 4.
-  const variants = [`${otherPlayer} to ${player}`];
-  return variants.flatMap((stop) => [stop + ':', stop.toLowerCase() + ':']);
+function stopWords(playerName: string, others: { name: string }[]): string[] {
+  // Stop the model from continuing as anyone else in the room. OpenAI allows at
+  // most 4 stop sequences, so we cap the list.
+  const out: string[] = [];
+  for (const o of others) {
+    out.push(`${o.name}:`);
+    if (others.length === 1) {
+      out.push(`${o.name} to ${playerName}:`);
+    }
+    if (out.length >= 4) break;
+  }
+  return out.slice(0, 4);
 }

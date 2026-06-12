@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { agentId, conversationId, parseGameId } from './ids';
+import { agentId, conversationId, parseGameId, playerId } from './ids';
 import { Player, activity } from './player';
 import { Conversation, conversationInputs } from './conversation';
 import { blockedWithPositions, movePlayer, stopPlayer } from './movement';
@@ -151,6 +151,7 @@ export const agentInputs = {
       timestamp: v.number(),
       operationId: v.string(),
       leaveConversation: v.boolean(),
+      nextSpeaker: v.optional(playerId),
     },
     handler: (game, now, args) => {
       const agentId = parseGameId('agents', args.agentId);
@@ -180,6 +181,11 @@ export const agentInputs = {
         conversationId: args.conversationId,
         timestamp: args.timestamp,
       });
+      // finishSendingMessage clears nextSpeaker (open floor); the orchestrator's
+      // choice from this turn re-sets it so the designated agent speaks next.
+      if (args.nextSpeaker && !args.leaveConversation) {
+        conversation.nextSpeaker = parseGameId('players', args.nextSpeaker);
+      }
       if (args.leaveConversation) {
         conversation.leave(game, now, player);
       }
@@ -242,6 +248,7 @@ export const agentInputs = {
       if (!instruction) return null;
 
       game.world.scenarioInstruction = instruction;
+      game.world.scenarioStartTime = now;
 
       // End all ongoing conversations so agents are immediately free to move/react.
       for (const conversation of [...game.world.conversations.values()]) {
@@ -274,6 +281,7 @@ export const agentInputs = {
     args: {},
     handler: (game, _now) => {
       delete game.world.scenarioInstruction;
+      delete game.world.scenarioStartTime;
       delete game.world.scenarioTarget;
       delete game.world.scenarioName;
       for (const agent of game.world.agents.values()) {

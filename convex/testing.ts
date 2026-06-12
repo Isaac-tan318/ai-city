@@ -264,7 +264,6 @@ export const testConvo = internalAction({
       'm1707m46wmefpejw1k50rqz7856qw3ew' as Id<'worlds'>,
       'c:115' as GameId<'conversations'>,
       'p:0' as GameId<'players'>,
-      'p:6' as GameId<'players'>,
       Date.now(),
     )) as any;
     return await a.readAll();

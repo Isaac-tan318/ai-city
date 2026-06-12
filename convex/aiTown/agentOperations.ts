@@ -6,6 +6,7 @@ import { rememberConversation } from '../agent/memory';
 import { GameId, agentId, conversationId, playerId } from './ids';
 import {
   continueConversationMessage,
+  decideNextSpeaker,
   leaveConversationMessage,
   startConversationMessage,
 } from '../agent/conversation';
@@ -67,7 +68,6 @@ export const agentGenerateMessage = internalAction({
     playerId,
     agentId,
     conversationId,
-    otherPlayerId: playerId,
     operationId: v.string(),
     type: v.union(v.literal('start'), v.literal('continue'), v.literal('leave')),
     messageUuid: v.string(),
@@ -96,9 +96,21 @@ export const agentGenerateMessage = internalAction({
       args.worldId,
       args.conversationId as GameId<'conversations'>,
       args.playerId as GameId<'players'>,
-      args.otherPlayerId as GameId<'players'>,
       args.gameTimeMs,
     );
+
+    // After speaking (but not when leaving), the dialogue orchestrator picks who
+    // should hold the floor next so a group chat flows instead of everyone (or
+    // no one) talking. undefined = open floor (e.g. only humans remain).
+    let nextSpeaker: GameId<'players'> | undefined;
+    if (args.type !== 'leave') {
+      nextSpeaker = await decideNextSpeaker(
+        ctx,
+        args.worldId,
+        args.conversationId as GameId<'conversations'>,
+        args.playerId as GameId<'players'>,
+      );
+    }
 
     await ctx.runMutation(internal.aiTown.agent.agentSendMessage, {
       worldId: args.worldId,
@@ -109,6 +121,7 @@ export const agentGenerateMessage = internalAction({
       messageUuid: args.messageUuid,
       leaveConversation: args.type === 'leave',
       operationId: args.operationId,
+      nextSpeaker,
     });
   },
 });

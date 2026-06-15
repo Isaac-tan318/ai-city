@@ -1,9 +1,6 @@
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '../../convex/_generated/api';
-
-const CYCLE_MS = 10 * 60 * 1000;
-const DAY_MS = 5 * 60 * 1000;
-const HOUR_MS = CYCLE_MS / 24;
+import { CYCLE_MS, DAY_MS, computeGameTime, cycleProgressForHour } from '../../convex/aiTown/gameTime';
 
 export function TimeControls({
   historicalTime,
@@ -38,6 +35,16 @@ export function TimeControls({
     skipTime({ skipMs: ms });
   };
 
+  const skipOneHour = () => {
+    // One game-hour is now a different number of real-ms during the day vs. the
+    // night, so derive the skip from the current game time rather than a constant.
+    if (!historicalTime || !worldStartTime) return;
+    const gt = computeGameTime(historicalTime, worldStartTime);
+    let ms = cycleProgressForHour(gt.hour + 1) - cycleProgressForHour(gt.hour);
+    if (ms <= 0) ms += CYCLE_MS; // wrapped past 6 AM into the next cycle
+    skipTime({ skipMs: ms });
+  };
+
   if (!stopAllowed) return null;
 
   return (
@@ -64,9 +71,9 @@ export function TimeControls({
         🌙 Night
       </button>
       <button
-        onClick={() => skipTime({ skipMs: HOUR_MS })}
+        onClick={skipOneHour}
         className="bg-black/60 text-white text-xs font-mono px-2 py-1 rounded hover:bg-black/80 transition-colors"
-        title="Skip forward 1 in-game hour (~25 real seconds)"
+        title="Skip forward 1 in-game hour (~35s by day, ~15s by night)"
       >
         ⏩ +1h
       </button>

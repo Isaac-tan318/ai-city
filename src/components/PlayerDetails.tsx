@@ -16,18 +16,21 @@ import { computeGameTime } from '../../convex/aiTown/gameTime';
 const scenarioOptions = [
   {
     id: 'park',
+    emoji: '🌳',
     title: 'Park Meetup',
     text: 'Meet at the park!',
     requiresTwoAgents: false,
   },
   {
     id: 'hawker-lunch',
+    emoji: '🍜',
     title: 'Hawker Lunch Rush',
     text: "Everyone's hungry — meet at the Hawker Centre and sort out lunch together.",
     requiresTwoAgents: false,
   },
   {
     id: 'late-night-ride',
+    emoji: '🚕',
     title: 'Late-Night Ride Home',
     text:
       'Trains have stopped — gather at the Marina Bay Sands taxi stand to share a ride home.',
@@ -35,18 +38,21 @@ const scenarioOptions = [
   },
   {
     id: 'hdb-noise',
+    emoji: '🔊',
     title: 'HDB Noise Complaint',
     text: "Someone's blasting music late at night — gather at the HDB Estate to settle it.",
     requiresTwoAgents: false,
   },
   {
     id: 'medical-emergency',
+    emoji: '🚑',
     title: 'Medical Emergency',
     text: 'Someone has collapsed — rush to Changi General Hospital to help.',
     requiresTwoAgents: false,
   },
   {
     id: 'custom',
+    emoji: '✏️',
     title: 'Custom Scenario',
     text: '',
     requiresTwoAgents: false,
@@ -182,10 +188,6 @@ export default function PlayerDetails({
     }
   };
 
-  const scenarioPreview = scenarioText.trim()
-    ? scenarioText.trim()
-    : 'Select a scenario or write a custom one below.';
-
   const onStartScenario = async () => {
     if (!selectedScenarioId) {
       toast.error('Select a scenario to start.');
@@ -249,8 +251,10 @@ export default function PlayerDetails({
       </div>
       <div className="p-4 flex flex-col gap-4 text-sm sm:text-base">
         <div className="grid gap-2">
-          <div className="text-xs uppercase tracking-widest text-amber-200/80">Defaults</div>
-          <div className="scenario-scroll grid items-start gap-2 sm:grid-cols-2 max-h-56 overflow-y-auto pr-1">
+          <div className="text-xs uppercase tracking-widest text-amber-200/80">
+            Choose a scenario
+          </div>
+          <div className="scenario-scroll grid grid-cols-2 auto-rows-fr gap-2 max-h-64 overflow-y-auto pr-1">
             {scenarioOptions.map((scenario) => {
               const isActive = scenario.id === selectedScenarioId;
               const isCustom = scenario.id === 'custom';
@@ -258,21 +262,37 @@ export default function PlayerDetails({
                 <button
                   key={scenario.id}
                   className={
-                    'rounded border px-3 py-2 text-left transition ' +
+                    'scenario-card group relative flex h-full flex-col gap-1 rounded-lg border p-3 text-left transition ' +
                     (isActive
-                      ? 'border-amber-300 bg-amber-200/10 text-amber-100'
+                      ? 'border-amber-300 bg-amber-300/15 ring-1 ring-amber-300/60 shadow-[0_0_12px_-2px_rgba(252,211,77,0.5)]'
                       : isCustom
-                        ? 'border-dashed border-white/30 bg-white/5 hover:border-amber-300/60'
-                        : 'border-white/10 bg-white/5 hover:border-white/30')
+                        ? 'border-dashed border-amber-200/40 bg-white/5 hover:border-amber-300/70 hover:bg-amber-300/5'
+                        : 'border-white/10 bg-white/5 hover:border-white/40 hover:bg-white/10')
                   }
                   type="button"
                   onClick={() => onSelectScenario(scenario.id)}
+                  aria-pressed={isActive}
                 >
-                  <div className="font-display text-sm sm:text-base leading-tight tracking-wider">
-                    {isCustom ? '✏️ ' : ''}{scenario.title}
+                  {isActive && (
+                    <span className="absolute right-2 top-2 text-amber-300" aria-hidden>
+                      ✓
+                    </span>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg leading-none" aria-hidden>
+                      {scenario.emoji}
+                    </span>
+                    <span
+                      className={
+                        'font-display text-sm leading-tight tracking-wide ' +
+                        (isActive ? 'text-amber-100' : 'text-white/90')
+                      }
+                    >
+                      {scenario.title}
+                    </span>
                   </div>
-                  <div className="text-xs leading-snug text-white/70">
-                    {isCustom ? 'Write your own instructions below' : scenario.text}
+                  <div className="scenario-clamp text-xs leading-snug text-white/55">
+                    {isCustom ? 'Write your own instructions below.' : scenario.text}
                   </div>
                 </button>
               );
@@ -323,58 +343,59 @@ export default function PlayerDetails({
           </div>
         )}
 
-        <div className="rounded border border-amber-200/20 bg-black/30 p-3">
-          <div className="text-xs uppercase tracking-widest text-amber-200/80">Preview</div>
-          <p className="text-sm sm:text-base leading-relaxed text-white/90">{scenarioPreview}</p>
-        </div>
-
-        <div
-          className={
-            'rounded border p-3 transition ' +
-            (selectedScenarioId === 'custom'
-              ? 'border-amber-300/60 bg-black/50'
-              : 'border-white/15 bg-black/50')
-          }
-        >
-          <div className="text-xs uppercase tracking-widest text-amber-200/80">
-            {selectedScenarioId === 'custom'
-              ? 'Your custom instructions'
-              : 'Scenario chatbox'}
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between">
+            <label
+              htmlFor="scenario-instructions"
+              className="text-xs uppercase tracking-widest text-amber-200/80"
+            >
+              {selectedScenarioId === 'custom' ? 'Your instructions' : 'What gets injected'}
+            </label>
+            <span className="text-[10px] uppercase tracking-widest text-white/35">
+              {scenarioText.trim().length} chars
+            </span>
           </div>
           <textarea
+            id="scenario-instructions"
             className={
-              'mt-2 w-full resize-none rounded border px-3 py-2 text-sm sm:text-base bg-black/30 ' +
-              (selectedScenarioId === 'custom'
-                ? 'border-amber-300/40 focus:border-amber-300 outline-none'
-                : 'border-white/10')
+              'w-full resize-none rounded-lg border px-3 py-2 text-sm sm:text-base bg-black/40 text-white/90 placeholder:text-white/30 transition outline-none ' +
+              'border-amber-200/25 focus:border-amber-300 focus:ring-1 focus:ring-amber-300/50'
             }
             placeholder={
               selectedScenarioId === 'custom'
                 ? 'e.g. "Everyone is secretly a spy who must not reveal their identity"'
                 : 'Describe the scenario you want to inject...'
             }
-            rows={selectedScenarioId === 'custom' ? 4 : 3}
+            rows={4}
             autoFocus={selectedScenarioId === 'custom'}
             value={scenarioText}
             onChange={(event) => setScenarioText(event.target.value)}
           />
+          <p className="text-[11px] leading-snug text-white/40">
+            Every agent reacts to this in character, then reshapes their day around it.
+          </p>
         </div>
 
-        <div className="flex justify-between gap-3">
+        <div className="flex items-stretch gap-3 pt-1">
           <button
-            className="button text-white shadow-solid text-sm cursor-pointer pointer-events-auto opacity-70 hover:opacity-100"
+            className="button text-white shadow-solid text-sm cursor-pointer pointer-events-auto opacity-80 hover:opacity-100"
             type="button"
             onClick={onClearScenario}
             title="Remove any active scenario from all agents"
           >
-            <div className="h-full bg-clay-700 px-3 py-2 text-center">Clear scenario</div>
+            <div className="h-full flex items-center justify-center whitespace-nowrap bg-clay-700 px-4 py-2">
+              Clear
+            </div>
           </button>
           <button
-            className="button text-white shadow-solid text-base sm:text-lg cursor-pointer pointer-events-auto"
+            className="button flex-1 min-w-0 text-white shadow-solid text-sm sm:text-base cursor-pointer pointer-events-auto disabled:opacity-40 disabled:cursor-not-allowed"
             type="button"
             onClick={onStartScenario}
+            disabled={!scenarioText.trim()}
           >
-            <div className="h-full bg-clay-700 px-4 py-2 text-center">Start scenario</div>
+            <div className="h-full flex items-center justify-center gap-2 whitespace-nowrap truncate bg-clay-700 px-3 py-2">
+              <span aria-hidden>▶</span> Start scenario
+            </div>
           </button>
         </div>
       </div>

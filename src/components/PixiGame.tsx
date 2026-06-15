@@ -14,19 +14,15 @@ import { DebugPath } from './DebugPath.tsx';
 import { PositionIndicator } from './PositionIndicator.tsx';
 import { SHOW_DEBUG_UI } from './Game.tsx';
 import { ServerGame } from '../hooks/serverGame.ts';
+import { CYCLE_MS, cycleProgressForHour } from '../../convex/aiTown/gameTime';
 
-const CYCLE_MS = 10 * 60 * 1000;
-const DAY_MS = 5 * 60 * 1000;
-
-// One game-hour in real-world ms (CYCLE_MS represents 24 game-hours).
-const GAME_HOUR_MS = CYCLE_MS / 24;
-
-// p=0 → 6 AM, p=DAY_MS → 6 PM, p=CYCLE_MS → 6 AM next day.
-// Dusk starts at 9 PM (3 hours into the night half) and lasts 1 game-hour.
-// Dawn starts 1 game-hour before the cycle resets (5 AM) and finishes at 6 AM.
-const DUSK_START_MS = DAY_MS + 3 * GAME_HOUR_MS;   // 9 PM
-const DUSK_END_MS   = DAY_MS + 4 * GAME_HOUR_MS;   // 10 PM  (fully dark)
-const DAWN_START_MS = CYCLE_MS - 1 * GAME_HOUR_MS; // 5 AM   (starts brightening)
+// Lighting thresholds expressed as real-ms offsets within a cycle (p=0 → 6 AM,
+// p=CYCLE_MS → 6 AM next day). Derived via cycleProgressForHour so they track the
+// non-uniform day/night speeds — these all fall in the (compressed) night half.
+// Dusk runs 9 PM → 10 PM; dawn runs 5 AM → 6 AM.
+const DUSK_START_MS = cycleProgressForHour(21); // 9 PM
+const DUSK_END_MS   = cycleProgressForHour(22); // 10 PM (fully dark)
+const DAWN_START_MS = cycleProgressForHour(5);  // 5 AM  (starts brightening)
 // Dawn ends at CYCLE_MS (= 6 AM, p wraps to 0).
 
 function nightAlpha(historicalTime: number, worldStartTime: number): number {

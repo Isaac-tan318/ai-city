@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '../../convex/_generated/api';
-import { CYCLE_MS, DAY_MS, computeGameTime, cycleProgressForHour } from '../../convex/aiTown/gameTime';
+import { CYCLE_MS, computeGameTime, cycleProgressForHour } from '../../convex/aiTown/gameTime';
 
 export function TimeControls({
   historicalTime,
@@ -30,8 +30,9 @@ export function TimeControls({
   };
 
   const skipToNight = () => {
-    // Advance to next 6 PM (start of night phase = cycleProgress DAY_MS)
-    const ms = cycleProgress < DAY_MS ? DAY_MS - cycleProgress : CYCLE_MS - cycleProgress + DAY_MS;
+    // Advance to next 6 PM (dusk).
+    const sixPM = cycleProgressForHour(18);
+    const ms = cycleProgress < sixPM ? sixPM - cycleProgress : CYCLE_MS - cycleProgress + sixPM;
     skipTime({ skipMs: ms });
   };
 

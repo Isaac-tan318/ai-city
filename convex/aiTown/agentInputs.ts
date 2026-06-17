@@ -10,6 +10,7 @@ import { AgentDescription } from './agentDescription';
 import { Agent, scheduleStep } from './agent';
 import { WorldMap } from './worldMap';
 import { CITY_LOCATIONS, homeFor } from '../../data/cityLocations';
+import { mergeFixedObligations } from '../../data/routines';
 
 
 const PARK_FOUNTAIN_SHEET = '__city_fountain__';
@@ -71,7 +72,11 @@ export const agentInputs = {
         return null;
       }
       delete agent.inProgressOperation;
-      agent.schedule = args.schedule;
+      const player = game.world.players.get(agent.playerId);
+      const characterName = player?.name ?? '';
+      // Overlay deterministic fixed obligations (work shifts, Sunday service)
+      // on top of the LLM plan so rigid routines land at exact times.
+      agent.schedule = mergeFixedObligations(characterName, args.dayNumber, args.schedule);
       agent.scheduleGeneratedForDay = args.dayNumber;
       agent.currentStepIndex = 0;
       return null;

@@ -7,7 +7,8 @@
 // Each segment maps to its real span of game-hours; only the real-world duration
 // per game-hour differs between the two.
 //
-// Awake: 18 game-hours over 9 real minutes (~30s per game-hour).
+// Awake: 18 game-hours over 9 real minutes — i.e. 2 game-minutes per real
+// second (~30s per game-hour).
 export const AWAKE_MS = 9 * 60 * 1000;
 // Deep night: 6 game-hours over 1 real minute (~10s per game-hour — quick).
 export const DEEP_NIGHT_MS = 1 * 60 * 1000;

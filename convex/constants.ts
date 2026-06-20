@@ -161,3 +161,27 @@ export const SCHEDULE_DISRUPTION_MINUTES = 60;
 // agent to strike up a conversation with. This is what makes conversations
 // emerge from agents' schedules bringing them to the same place.
 export const SCHEDULE_CHAT_RADIUS = 6;
+
+// --- Stage 2: contextual random events ---
+// When an agent settles into a schedule block, the probability that any given
+// activity slot is a short contextual micro-event (office event during work,
+// flexible otherwise) rather than the block's base activity.
+export const CONTEXTUAL_EVENT_PROBABILITY = 0.4;
+// How long a contextual micro-event lasts, in game-minutes, before reverting to
+// the base block activity.
+export const CONTEXTUAL_EVENT_MINUTES = 20;
+
+// --- Stage 3: probabilistic sickness ---
+// Baseline per-day chance a well agent falls sick on a work day, before the
+// consecutive-work-day penalty is added.
+export const SICK_BASE_PROBABILITY = 0.02;
+// Added to the sick chance for each consecutive work day already accrued, so
+// burnout from working many days in a row makes illness more likely.
+export const SICK_PER_WORKDAY_PROBABILITY = 0.04;
+// Hard cap on the daily sick chance regardless of accrued work days.
+export const SICK_MAX_PROBABILITY = 0.5;
+// How many in-game days an illness lasts before the agent recovers.
+export const SICK_DURATION_DAYS = 2;
+// Chance a well agent catches the illness from a sick partner during a single
+// conversation (rolled once per conversation).
+export const CONTAGION_PROBABILITY = 0.25;

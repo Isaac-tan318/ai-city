@@ -40,6 +40,12 @@ export class Conversation {
   // who should speak next, decided by an LLM from the conversation history.
   // Agents defer to the designated speaker (with an awkward-timeout fallback).
   nextSpeaker?: GameId<'players'>;
+  // Every player who has ever actively participated in this conversation, even
+  // after they leave. `participants` only holds the people *currently* present,
+  // so in a group chat where members peel off one at a time it would shrink to
+  // the last person by teardown. We accumulate the full roster here so the
+  // archived history records who was actually in the group chat.
+  allParticipants: Set<GameId<'players'>>;
 
   constructor(serialized: SerializedConversation) {
     const { id, creator, created, isTyping, lastMessage, numMessages, participants, scenario } =
@@ -63,6 +69,14 @@ export class Conversation {
       serialized.nextSpeaker !== undefined
         ? parseGameId('players', serialized.nextSpeaker)
         : undefined;
+    this.allParticipants = new Set(
+      (serialized.allParticipants ?? []).map((p) => parseGameId('players', p)),
+    );
+    // Seed from anyone currently participating so existing conversations (and
+    // worlds archived before this field existed) still capture present members.
+    for (const [pid, member] of this.participants.entries()) {
+      if (member.status.kind === 'participating') this.allParticipants.add(pid);
+    }
   }
 
   tick(game: Game, now: number) {
@@ -91,6 +105,7 @@ export class Conversation {
       console.log(`${e.player.id} joining conversation ${this.id}`);
       stopPlayer(e.player);
       e.member.status = { kind: 'participating', started: now };
+      this.allParticipants.add(e.playerId);
       participating.push(e);
     };
 
@@ -291,6 +306,7 @@ export class Conversation {
       participants: serializeMap(this.participants),
       scenario,
       nextSpeaker,
+      allParticipants: [...this.allParticipants],
     };
   }
 }
@@ -316,6 +332,9 @@ export const serializedConversation = {
   participants: v.array(v.object(serializedConversationMembership)),
   scenario: v.optional(v.boolean()),
   nextSpeaker: v.optional(playerId),
+  // Full roster of everyone who ever participated (see Conversation.allParticipants).
+  // Optional for backward-compat with worlds serialized before this field existed.
+  allParticipants: v.optional(v.array(playerId)),
 };
 export type SerializedConversation = ObjectType<typeof serializedConversation>;
 
@@ -394,6 +413,9 @@ export const conversationInputs = {
       }
       conversation.lastMessage = { author: playerId, timestamp: args.timestamp };
       conversation.numMessages++;
+      // Make sure every author is in the permanent roster, even if they leave
+      // before the conversation is archived.
+      conversation.allParticipants.add(playerId);
       // Clear the orchestrator's designated speaker. For agent messages, the
       // dialogue manager re-sets it via agentFinishSendingMessage right after
       // this runs. For a human message, leaving it cleared opens the floor so an

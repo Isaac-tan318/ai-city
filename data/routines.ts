@@ -198,3 +198,112 @@ export function mergeFixedObligations(
     .filter((iv) => iv.end > iv.start)
     .map((iv) => ({ ...iv.step, startMinute: iv.start }));
 }
+
+// ===========================================================================
+// Stage 2 — CONTEXTUAL random events
+// ===========================================================================
+//
+// Short micro-events tied to the character's CURRENT schedule block. While an
+// agent is settled at a location during work hours, they draw from that
+// location's work pool (meetings, coffee runs, etc.); at any other time/place
+// they draw from a generic "flexible" pool. This is what makes an A*STAR
+// researcher experience office events 9 AM–6 PM but free-form activities
+// outside those hours. The caller (tickSchedule) decides HOW OFTEN to swap one
+// of these in; this module just owns the pools and the selection rule.
+
+export type ContextualEvent = { description: string; emoji: string };
+
+// Work-hour event pools, keyed by the locationId an agent is settled at. Keys
+// correspond to the workplaces in CHARACTER_WORKPLACES / CITY_LOCATIONS.
+const LOCATION_EVENTS: Record<string, ContextualEvent[]> = {
+  astar: [
+    { description: 'in a team stand-up meeting', emoji: '📊' },
+    { description: 'grabbing a coffee from the pantry', emoji: '☕' },
+    { description: 'running an experiment', emoji: '🧪' },
+    { description: 'reviewing a colleague’s paper', emoji: '📄' },
+    { description: 'debugging the lab rig', emoji: '🔧' },
+  ],
+  fusionopolis: [
+    { description: 'in a sprint planning meeting', emoji: '🗓️' },
+    { description: 'whiteboarding with the team', emoji: '🧑‍🏫' },
+    { description: 'grabbing a coffee', emoji: '☕' },
+    { description: 'on a video call with a client', emoji: '💻' },
+  ],
+  mbs: [
+    { description: 'waiting in the taxi queue for a fare', emoji: '🚕' },
+    { description: 'chatting with a tourist', emoji: '🗺️' },
+    { description: 'wiping down the cab', emoji: '🧽' },
+    { description: 'grabbing a quick kopi', emoji: '☕' },
+  ],
+  restaurant: [
+    { description: 'taking a customer’s order', emoji: '📝' },
+    { description: 'firing up the wok', emoji: '🔥' },
+    { description: 'clearing and wiping tables', emoji: '🧽' },
+    { description: 'restocking the chili sauce', emoji: '🌶️' },
+  ],
+  shophouses: [
+    { description: 'pulling an espresso shot', emoji: '☕' },
+    { description: 'steaming milk for a latte', emoji: '🥛' },
+    { description: 'chatting up a regular', emoji: '💬' },
+    { description: 'grinding fresh beans', emoji: '⚙️' },
+  ],
+  university: [
+    { description: 'sitting in a lecture', emoji: '🎓' },
+    { description: 'cramming in the library', emoji: '📚' },
+    { description: 'in a group project huddle', emoji: '👥' },
+    { description: 'queuing for an iced Milo', emoji: '🥤' },
+  ],
+};
+
+// Off-hours / non-work pool: free-form activities for any time the agent isn't
+// on the clock at a work location.
+const FLEXIBLE_EVENTS: ContextualEvent[] = [
+  { description: 'scrolling on the phone', emoji: '📱' },
+  { description: 'people-watching', emoji: '👀' },
+  { description: 'taking a slow stroll', emoji: '🚶' },
+  { description: 'grabbing a snack', emoji: '🍪' },
+  { description: 'listening to music', emoji: '🎧' },
+  { description: 'relaxing for a bit', emoji: '😌' },
+];
+
+// Pick a contextual micro-event appropriate to where/when the agent is. During
+// work hours (09:00–18:00) at a location with a work pool, returns an office-y
+// event; otherwise returns a flexible one.
+export function pickContextualEvent(
+  locationId: string,
+  minutesIntoDay: number,
+): ContextualEvent {
+  const inWorkHours = minutesIntoDay >= SHIFT_START && minutesIntoDay < SHIFT_END;
+  const workPool = LOCATION_EVENTS[locationId];
+  const pool = inWorkHours && workPool ? workPool : FLEXIBLE_EVENTS;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// ===========================================================================
+// Stage 3 — sick-day schedule (deterministic rest at home)
+// ===========================================================================
+//
+// When the probabilistic health roll marks an agent sick, they skip their
+// normal day (and the LLM planner) and rest at home instead. Kept here next to
+// the other schedule builders so all schedule shapes live in one place.
+export function buildSickSchedule(home: { x: number; y: number }): SchedStep[] {
+  const step = (
+    startMinute: number,
+    activity: string,
+    emoji: string,
+  ): SchedStep => ({
+    startMinute,
+    locationId: 'home',
+    destination: home,
+    activity,
+    emoji,
+    description: 'sick at home, resting',
+  });
+  return [
+    step(0, 'resting in bed, feeling unwell', '🤒'),
+    step(8 * 60, 'dozing in and out, feeling lousy', '🤒'),
+    step(12 * 60, 'sipping soup, still under the weather', '🍵'),
+    step(16 * 60, 'resting on the couch', '🤒'),
+    step(20 * 60, 'trying to sleep it off', '😴'),
+  ];
+}

@@ -279,12 +279,17 @@ function speakerLabel(name: string, others: { name: string }[]): string {
 }
 
 function selfAndOthersPrompt(
-  agent: { identity: string; scenarioInstruction?: string } | null,
+  agent: { identity: string; scenarioInstruction?: string; health?: string } | null,
   others: OtherParticipant[],
 ): string[] {
   const prompt: string[] = [];
   if (agent) {
     prompt.push(`About you: ${agent.identity}`);
+  }
+  if (agent?.health === 'sick') {
+    prompt.push(
+      `You're feeling under the weather today — you've come down with a cold. You're low on energy and a little irritable, your replies are shorter and more subdued than usual, and you may mention not feeling well or wanting to head home and rest.`,
+    );
   }
   for (const o of others) {
     if (o.identity) {

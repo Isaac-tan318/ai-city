@@ -266,7 +266,13 @@ export class Game extends AbstractGame {
       if (!newWorld.conversations.some((c) => c.id === conversation.id)) {
         // Don't archive empty conversations — they clutter history and the graph.
         if (conversation.numMessages === 0) continue;
-        const participants = conversation.participants.map((p) => p.playerId);
+        // Use the full roster (everyone who ever participated), not just whoever
+        // happened to remain at teardown. In a group chat members peel off one at
+        // a time, so `participants` alone would lose most of the group. Union with
+        // any current participants as a safety net for older serialized state.
+        const participantSet = new Set<string>(conversation.participants.map((p) => p.playerId));
+        for (const p of conversation.allParticipants ?? []) participantSet.add(p);
+        const participants = [...participantSet];
         const archivedConversation = {
           worldId,
           id: conversation.id,

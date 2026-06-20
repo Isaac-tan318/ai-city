@@ -29,9 +29,21 @@ import { internal } from '../_generated/api';
 import { movePlayer, stopPlayer, pickParkWaypoint } from './movement';
 import { insertInput } from './insertInput';
 import { point, Point } from '../util/types';
-import { computeGameTime, CYCLE_MS } from './gameTime';
-import { ARRIVAL_RADIUS, SCHEDULE_DISRUPTION_MINUTES, SCHEDULE_CHAT_RADIUS } from '../constants';
+import { computeGameTime, CYCLE_MS, isWeekday } from './gameTime';
+import {
+  ARRIVAL_RADIUS,
+  SCHEDULE_DISRUPTION_MINUTES,
+  SCHEDULE_CHAT_RADIUS,
+  CONTEXTUAL_EVENT_PROBABILITY,
+  CONTEXTUAL_EVENT_MINUTES,
+  SICK_BASE_PROBABILITY,
+  SICK_PER_WORKDAY_PROBABILITY,
+  SICK_MAX_PROBABILITY,
+  SICK_DURATION_DAYS,
+  CONTAGION_PROBABILITY,
+} from '../constants';
 import { getLocationById, homeFor } from '../../data/cityLocations';
+import { pickContextualEvent, buildSickSchedule } from '../../data/routines';
 
 export type ScheduleStep = {
   startMinute: number;
@@ -70,6 +82,17 @@ export class Agent {
   // bypasses the normal plan cooldown/stagger throttle. Consumed (deleted) the
   // moment the replan fires.
   forcePlan?: boolean;
+  // --- Stage 3: probabilistic health ---
+  // Current health. Undefined is treated as 'well'.
+  health?: 'well' | 'sick';
+  // In-game days of illness remaining; decremented at each day rollover.
+  sickDaysLeft?: number;
+  // Number of consecutive work days accrued while well; raises the sick chance.
+  consecutiveWorkDays?: number;
+  // The game-day the once-per-day health roll last ran for (so it runs once).
+  healthCheckedForDay?: number;
+  // The conversation we last rolled contagion for (so we roll once per convo).
+  lastContagionConversation?: GameId<'conversations'>;
 
   constructor(serialized: SerializedAgent) {
     const {
@@ -88,6 +111,11 @@ export class Agent {
       lastPlanAttempt,
       scheduleNeedsRefresh,
       forcePlan,
+      health,
+      sickDaysLeft,
+      consecutiveWorkDays,
+      healthCheckedForDay,
+      lastContagionConversation,
     } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
@@ -110,6 +138,14 @@ export class Agent {
     this.lastPlanAttempt = lastPlanAttempt;
     this.scheduleNeedsRefresh = scheduleNeedsRefresh;
     this.forcePlan = forcePlan;
+    this.health = health;
+    this.sickDaysLeft = sickDaysLeft;
+    this.consecutiveWorkDays = consecutiveWorkDays;
+    this.healthCheckedForDay = healthCheckedForDay;
+    this.lastContagionConversation =
+      lastContagionConversation !== undefined
+        ? parseGameId('conversations', lastContagionConversation)
+        : undefined;
   }
 
   tick(game: Game, now: number) {
@@ -474,6 +510,57 @@ export class Agent {
     const conversation = game.world.playerConversation(player);
     const doingActivity = player.activity && player.activity.until > now;
 
+    // --- Stage 3: probabilistic health ---
+    // Catch the illness from a sick conversation partner (rolled once per convo).
+    if (
+      conversation &&
+      this.health !== 'sick' &&
+      this.lastContagionConversation !== conversation.id
+    ) {
+      this.lastContagionConversation = conversation.id;
+      let exposed = false;
+      for (const pid of conversation.participants.keys()) {
+        if (pid === player.id) continue;
+        for (const other of game.world.agents.values()) {
+          if (other.playerId === pid && other.health === 'sick') {
+            exposed = true;
+            break;
+          }
+        }
+        if (exposed) break;
+      }
+      if (exposed && Math.random() < CONTAGION_PROBABILITY) {
+        this.health = 'sick';
+        this.sickDaysLeft = SICK_DURATION_DAYS;
+        this.consecutiveWorkDays = 0;
+      }
+    }
+
+    // Once-per-day health roll: recover when the illness runs its course, or
+    // fall sick on a work day with a burnout-scaled probability.
+    if (this.healthCheckedForDay !== gt.dayNumber) {
+      this.healthCheckedForDay = gt.dayNumber;
+      this.updateHealthForNewDay(gt.dayNumber);
+    }
+
+    // If sick and today's rest schedule isn't set up yet, stay home and rest —
+    // skip the LLM planner entirely. Don't interrupt an active conversation.
+    if (
+      this.health === 'sick' &&
+      this.scheduleGeneratedForDay !== gt.dayNumber &&
+      !conversation
+    ) {
+      const playerName = player.name ?? 'someone';
+      const homeLoc = this.home ?? (homeFor(playerName) ?? getLocationById('hdb'))!;
+      const homePoint = this.home ?? { x: homeLoc.x, y: homeLoc.y };
+      this.schedule = buildSickSchedule(homePoint);
+      this.scheduleGeneratedForDay = gt.dayNumber;
+      this.currentStepIndex = 0;
+      delete this.scheduleNeedsRefresh;
+      if (player.pathfinding) stopPlayer(player);
+      return true;
+    }
+
     // Decide if we need a new plan.
     const noSchedule = !this.schedule || this.schedule.length === 0;
     const dayChanged =
@@ -589,7 +676,8 @@ export class Agent {
       this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN;
     const justChatted =
       this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN;
-    if (!onInviteCooldown && !justChatted && !this.inProgressOperation) {
+    // A sick agent keeps to themselves — don't initiate new conversations.
+    if (!onInviteCooldown && !justChatted && !this.inProgressOperation && this.health !== 'sick') {
       const freePlayers = [...game.world.players.values()].filter(
         (p) =>
           p.id !== player.id &&
@@ -639,11 +727,27 @@ export class Agent {
       const minutesLeft = Math.max(1, stepEndMinutes - gt.minutesIntoDay);
       // Game-minute → real-ms: each in-game minute lasts CYCLE_MS / (24*60).
       const realMsPerGameMinute = (10 * 60 * 1000) / (24 * 60);
-      player.activity = {
-        description: step.activity,
-        emoji: step.emoji ?? '💭',
-        until: now + minutesLeft * realMsPerGameMinute,
-      };
+      // Stage 2: sometimes swap in a short contextual micro-event tied to the
+      // current block (office events during work hours, flexible ones
+      // otherwise), then fall back to the block's base activity afterwards.
+      const event =
+        Math.random() < CONTEXTUAL_EVENT_PROBABILITY
+          ? pickContextualEvent(step.locationId, gt.minutesIntoDay)
+          : null;
+      if (event) {
+        const eventMinutes = Math.min(minutesLeft, CONTEXTUAL_EVENT_MINUTES);
+        player.activity = {
+          description: event.description,
+          emoji: event.emoji,
+          until: now + eventMinutes * realMsPerGameMinute,
+        };
+      } else {
+        player.activity = {
+          description: step.activity,
+          emoji: step.emoji ?? '💭',
+          until: now + minutesLeft * realMsPerGameMinute,
+        };
+      }
     }
     return true;
   }
@@ -688,7 +792,45 @@ export class Agent {
       lastPlanAttempt: this.lastPlanAttempt,
       scheduleNeedsRefresh: this.scheduleNeedsRefresh,
       forcePlan: this.forcePlan,
+      health: this.health,
+      sickDaysLeft: this.sickDaysLeft,
+      consecutiveWorkDays: this.consecutiveWorkDays,
+      healthCheckedForDay: this.healthCheckedForDay,
+      lastContagionConversation: this.lastContagionConversation,
     };
+  }
+
+  // --- Stage 3: once-per-day health bookkeeping ---
+  // Advances illness state at a day rollover: recover after the illness runs its
+  // course, otherwise (on a work day) roll a burnout-scaled chance of falling
+  // sick. Weekends rest and reset the consecutive-work-day streak.
+  updateHealthForNewDay(dayNumber: number) {
+    if (this.health === 'sick') {
+      const left = (this.sickDaysLeft ?? 1) - 1;
+      if (left <= 0) {
+        this.health = 'well';
+        this.sickDaysLeft = 0;
+      } else {
+        this.sickDaysLeft = left;
+      }
+      return;
+    }
+    if (isWeekday(dayNumber)) {
+      const streak = this.consecutiveWorkDays ?? 0;
+      const p = Math.min(
+        SICK_MAX_PROBABILITY,
+        SICK_BASE_PROBABILITY + SICK_PER_WORKDAY_PROBABILITY * streak,
+      );
+      if (Math.random() < p) {
+        this.health = 'sick';
+        this.sickDaysLeft = SICK_DURATION_DAYS;
+        this.consecutiveWorkDays = 0;
+        return;
+      }
+      this.consecutiveWorkDays = streak + 1;
+    } else {
+      this.consecutiveWorkDays = 0;
+    }
   }
 }
 
@@ -725,6 +867,11 @@ export const serializedAgent = {
   lastPlanAttempt: v.optional(v.number()),
   scheduleNeedsRefresh: v.optional(v.boolean()),
   forcePlan: v.optional(v.boolean()),
+  health: v.optional(v.union(v.literal('well'), v.literal('sick'))),
+  sickDaysLeft: v.optional(v.number()),
+  consecutiveWorkDays: v.optional(v.number()),
+  healthCheckedForDay: v.optional(v.number()),
+  lastContagionConversation: v.optional(conversationId),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 

@@ -62,6 +62,99 @@ export const agentRememberConversation = internalAction({
   },
 });
 
+// Loads the static background + name needed to extract a scenario-relevant
+// profile. Kept tiny so the extraction action's only heavy step is the LLM call.
+export const loadScenarioProfileContext = internalQuery({
+  args: { worldId: v.id('worlds'), agentId, playerId },
+  handler: async (ctx, args) => {
+    const agentDescription = await ctx.db
+      .query('agentDescriptions')
+      .withIndex('worldId', (q) =>
+        q.eq('worldId', args.worldId).eq('agentId', args.agentId as GameId<'agents'>),
+      )
+      .unique();
+    const playerDescription = await ctx.db
+      .query('playerDescriptions')
+      .withIndex('worldId', (q) =>
+        q.eq('worldId', args.worldId).eq('playerId', args.playerId as GameId<'players'>),
+      )
+      .unique();
+    const world = await ctx.db.get(args.worldId);
+    return {
+      name: playerDescription?.name ?? 'the character',
+      profile: agentDescription?.profile,
+      scenarioName: world?.scenarioName,
+    };
+  },
+});
+
+// Distil a character's full structured background down to just the traits that
+// matter for the current scenario — the compact view *other* participants see in
+// their prompts (the character itself always sees its full background). Runs once
+// per scenario per character (scheduled lock-free from Agent.tick), never per
+// message, so the extra LLM call doesn't bottleneck the conversation loop.
+export const agentExtractScenarioProfile = internalAction({
+  args: {
+    worldId: v.id('worlds'),
+    agentId,
+    playerId,
+    scenarioInstruction: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { name, profile, scenarioName } = await ctx.runQuery(
+      internal.aiTown.agentOperations.loadScenarioProfileContext,
+      { worldId: args.worldId, agentId: args.agentId, playerId: args.playerId },
+    );
+    // No structured background → nothing to distil; others fall back to identity.
+    if (!profile || Object.keys(profile).length === 0) {
+      return;
+    }
+    const profileLines = Object.entries(profile)
+      .map(([k, val]) => `- ${k}: ${val}`)
+      .join('\n');
+    const scenarioLabel = scenarioName
+      ? `${scenarioName}: ${args.scenarioInstruction}`
+      : args.scenarioInstruction;
+    const prompt = [
+      `Here is ${name}'s full background as key-value pairs:`,
+      profileLines,
+      ``,
+      `The current scenario / activity is:`,
+      `"${scenarioLabel}"`,
+      ``,
+      `In 1-2 sentences, summarise ONLY the traits, constraints, and preferences from ${name}'s background that are most relevant to how others should perceive and interact with ${name} in THIS scenario. Write it as a compact third-person note about ${name} (e.g. "${name} is a strict vegetarian and prefers clear bill-splitting"). Mention nothing irrelevant to this scenario, and do not invent anything not present in the background.`,
+    ].join('\n');
+
+    let scenarioProfile = '';
+    try {
+      const { content } = await chatCompletion({
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 160,
+      });
+      scenarioProfile = content.trim();
+    } catch (err) {
+      // Leave scenarioProfile unset on failure. The trigger guard in Agent.tick
+      // already set scenarioProfileFor optimistically, so this won't retry-storm;
+      // others simply fall back to the default identity for this scenario.
+      console.error(
+        `agentExtractScenarioProfile failed for ${args.agentId}: ${(err as Error).message}`,
+      );
+      return;
+    }
+    if (!scenarioProfile) return;
+
+    await ctx.runMutation(api.aiTown.main.sendInput, {
+      worldId: args.worldId,
+      name: 'agentSetScenarioProfile',
+      args: {
+        agentId: args.agentId,
+        scenarioProfile,
+        scenarioInstruction: args.scenarioInstruction,
+      },
+    });
+  },
+});
+
 export const agentGenerateMessage = internalAction({
   args: {
     worldId: v.id('worlds'),

@@ -16,6 +16,10 @@ type OtherParticipant = {
   id: string;
   name: string;
   identity?: string;
+  // Compact, scenario-relevant summary of this participant (set during an active
+  // scenario by the extraction op). When present it replaces `identity` in our
+  // prompt so we see only what matters about them for the current activity.
+  scenarioProfile?: string;
   human: boolean;
   position: { x: number; y: number };
 };
@@ -279,12 +283,22 @@ function speakerLabel(name: string, others: { name: string }[]): string {
 }
 
 function selfAndOthersPrompt(
-  agent: { identity: string; scenarioInstruction?: string; health?: string } | null,
+  agent: {
+    identity: string;
+    profile?: Record<string, string>;
+    scenarioInstruction?: string;
+    health?: string;
+  } | null,
   others: OtherParticipant[],
 ): string[] {
   const prompt: string[] = [];
   if (agent) {
     prompt.push(`About you: ${agent.identity}`);
+    // Self-full: the character is aware of its own complete structured background.
+    if (agent.profile && Object.keys(agent.profile).length > 0) {
+      const lines = Object.entries(agent.profile).map(([k, val]) => `  - ${k}: ${val}`);
+      prompt.push([`Your background details:`, ...lines].join('\n'));
+    }
   }
   if (agent?.health === 'sick') {
     prompt.push(
@@ -292,8 +306,11 @@ function selfAndOthersPrompt(
     );
   }
   for (const o of others) {
-    if (o.identity) {
-      prompt.push(`About ${o.name}: ${o.identity}`);
+    // Others-filtered: during a scenario, show the compact scenario-relevant
+    // profile; otherwise fall back to their full identity.
+    const about = o.scenarioProfile ?? o.identity;
+    if (about) {
+      prompt.push(`About ${o.name}: ${about}`);
     }
   }
   if (others.length > 1) {
@@ -418,12 +435,15 @@ export const queryPromptData = internalQuery({
     }
     const agent = world.agents.find((a) => a.playerId === args.playerId);
     let agentIdentity: string | undefined;
+    let agentProfile: Record<string, string> | undefined;
     if (agent) {
       const agentDescription = await ctx.db
         .query('agentDescriptions')
         .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('agentId', agent.id))
         .first();
       agentIdentity = agentDescription?.identity;
+      // The character knows its OWN full structured background (self-full).
+      agentProfile = agentDescription?.profile;
     }
 
     // Build the list of OTHER participants (everyone in the conversation but us),
@@ -451,6 +471,9 @@ export const queryPromptData = internalQuery({
         id: pid,
         name: desc?.name ?? 'Someone',
         identity,
+        // Others are filtered: during a scenario we show only their compact
+        // scenario-relevant profile instead of their full identity.
+        scenarioProfile: otherAgent?.scenarioProfile,
         human: !!otherPlayer.human,
         position: otherPlayer.position,
       });
@@ -484,6 +507,7 @@ export const queryPromptData = internalQuery({
       agent: agent
         ? {
             identity: agentIdentity ?? `${playerDescription.name} is a resident of Singapore.`,
+            profile: agentProfile,
             ...agent,
           }
         : null,

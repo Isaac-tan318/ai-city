@@ -233,6 +233,7 @@ export const agentInputs = {
         new AgentDescription({
           agentId: agentId,
           identity: description.identity,
+          profile: description.profile,
         }),
       );
       if (game.world.scenarioTarget) {
@@ -244,6 +245,29 @@ export const agentInputs = {
         }
       }
       return { agentId };
+    },
+  }),
+  // Write-back for the agentExtractScenarioProfile op: store the compact,
+  // scenario-relevant background that others will see for this character.
+  agentSetScenarioProfile: inputHandler({
+    args: {
+      agentId,
+      scenarioProfile: v.string(),
+      scenarioInstruction: v.string(),
+    },
+    handler: (game, _now, args) => {
+      const agentId = parseGameId('agents', args.agentId);
+      const agent = game.world.agents.get(agentId);
+      if (!agent) {
+        throw new Error(`Couldn't find agent: ${agentId}`);
+      }
+      // Ignore an extraction that finished after the scenario changed or ended.
+      if (game.world.scenarioInstruction !== args.scenarioInstruction) {
+        return null;
+      }
+      agent.scenarioProfile = args.scenarioProfile;
+      agent.scenarioProfileFor = args.scenarioInstruction;
+      return null;
     },
   }),
   startCustomScenario: inputHandler({
@@ -261,6 +285,10 @@ export const agentInputs = {
       }
       for (const agent of game.world.agents.values()) {
         agent.scenarioInstruction = instruction;
+        // Drop any stale scenario-relevant background; the next tick re-extracts
+        // for the new scenario (scenarioProfileFor no longer matches instruction).
+        delete agent.scenarioProfile;
+        delete agent.scenarioProfileFor;
         delete agent.toRemember;
         delete agent.inProgressOperation;
         // Force an immediate re-plan that incorporates the scenario:
@@ -294,6 +322,8 @@ export const agentInputs = {
         delete agent.scenarioTarget;
         delete agent.scenarioName;
         delete agent.scenarioArrivalTime;
+        delete agent.scenarioProfile;
+        delete agent.scenarioProfileFor;
       }
       return null;
     },

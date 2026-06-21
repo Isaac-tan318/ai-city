@@ -7,13 +7,14 @@
 // Each segment maps to its real span of game-hours; only the real-world duration
 // per game-hour differs between the two.
 //
-// Awake: 18 game-hours over 9 real minutes — i.e. 2 game-minutes per real
-// second (~30s per game-hour).
-export const AWAKE_MS = 9 * 60 * 1000;
+// Awake: 18 game-hours over 18 real minutes — i.e. 1 game-minute per real
+// second (60s per game-hour).
+export const AWAKE_MS = 18 * 60 * 1000;
 // Deep night: 6 game-hours over 1 real minute (~10s per game-hour — quick).
 export const DEEP_NIGHT_MS = 1 * 60 * 1000;
-// Full day+night cycle in real-world ms (still 10 minutes total, so day
-// counting, scenario timers, and schedules stay aligned).
+// Full day+night cycle in real-world ms (now 19 minutes total: an 18-minute
+// awake stretch plus the 1-minute deep night). Day counting, scenario timers,
+// and schedules all key off this, so they stay aligned automatically.
 export const CYCLE_MS = AWAKE_MS + DEEP_NIGHT_MS;
 
 // In-game game-day length in "game minutes" — we map a full real cycle to 24h.

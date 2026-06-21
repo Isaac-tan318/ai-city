@@ -93,6 +93,16 @@ export class Agent {
   healthCheckedForDay?: number;
   // The conversation we last rolled contagion for (so we roll once per convo).
   lastContagionConversation?: GameId<'conversations'>;
+  // --- Scenario-relevant background ---
+  // Compact, scenario-relevant summary of THIS character that *others* see during
+  // the active scenario. Produced once per scenario by the agentExtractScenarioProfile
+  // LLM op (not per message/tick) and cleared when the scenario ends.
+  scenarioProfile?: string;
+  // The scenario instruction `scenarioProfile` was computed for — used as a cache
+  // key so we only re-extract when the scenario actually changes. Also set
+  // optimistically the moment extraction is scheduled, so the op isn't re-fired
+  // every tick while the LLM call is in flight.
+  scenarioProfileFor?: string;
 
   constructor(serialized: SerializedAgent) {
     const {
@@ -116,6 +126,8 @@ export class Agent {
       consecutiveWorkDays,
       healthCheckedForDay,
       lastContagionConversation,
+      scenarioProfile,
+      scenarioProfileFor,
     } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
@@ -146,6 +158,8 @@ export class Agent {
       lastContagionConversation !== undefined
         ? parseGameId('conversations', lastContagionConversation)
         : undefined;
+    this.scenarioProfile = scenarioProfile;
+    this.scenarioProfileFor = scenarioProfileFor;
   }
 
   tick(game: Game, now: number) {
@@ -172,11 +186,36 @@ export class Agent {
         delete game.world.scenarioStartTime;
         for (const agent of game.world.agents.values()) {
           delete agent.scenarioInstruction;
+          // Drop the cached scenario-relevant background so others revert to the
+          // default identity blurb once the scenario is over.
+          delete agent.scenarioProfile;
+          delete agent.scenarioProfileFor;
         }
       }
     }
     if (this.scenarioInstruction === undefined && game.world.scenarioInstruction) {
       this.scenarioInstruction = game.world.scenarioInstruction;
+    }
+    // When a scenario is active, extract this character's scenario-relevant
+    // background once (the compact view others see). We schedule the extraction
+    // op directly rather than through startOperation: a scenario also forces an
+    // agentPlanDay, and startOperation only allows one in-flight op per agent, so
+    // routing extraction through it would throw. Extraction only writes a
+    // descriptive string and never moves the agent, so it is safe to run
+    // lock-free. Setting scenarioProfileFor optimistically here doubles as the
+    // "already scheduled" guard so we don't re-fire it every tick.
+    if (
+      this.scenarioInstruction &&
+      this.scenarioProfileFor !== this.scenarioInstruction &&
+      game.agentDescriptions.get(this.id)?.profile
+    ) {
+      this.scenarioProfileFor = this.scenarioInstruction;
+      game.scheduleOperation('agentExtractScenarioProfile', {
+        worldId: game.worldId,
+        agentId: this.id,
+        playerId: this.playerId,
+        scenarioInstruction: this.scenarioInstruction,
+      });
     }
     const PARK_RADIUS = 5;
     if (this.scenarioTarget) {
@@ -797,6 +836,8 @@ export class Agent {
       consecutiveWorkDays: this.consecutiveWorkDays,
       healthCheckedForDay: this.healthCheckedForDay,
       lastContagionConversation: this.lastContagionConversation,
+      scenarioProfile: this.scenarioProfile,
+      scenarioProfileFor: this.scenarioProfileFor,
     };
   }
 
@@ -872,6 +913,8 @@ export const serializedAgent = {
   consecutiveWorkDays: v.optional(v.number()),
   healthCheckedForDay: v.optional(v.number()),
   lastContagionConversation: v.optional(conversationId),
+  scenarioProfile: v.optional(v.string()),
+  scenarioProfileFor: v.optional(v.string()),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 
@@ -891,6 +934,9 @@ export async function runAgentOperation(ctx: MutationCtx, operation: string, arg
       break;
     case 'agentPlanDay':
       reference = internal.aiTown.agentOperations.agentPlanDay;
+      break;
+    case 'agentExtractScenarioProfile':
+      reference = internal.aiTown.agentOperations.agentExtractScenarioProfile;
       break;
     default:
       throw new Error(`Unknown operation: ${operation}`);

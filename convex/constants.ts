@@ -137,6 +137,21 @@ export const CHARACTER_ACTIVITIES: Record<string, Activity[]> = {
     { description: 'sipping iced Milo', emoji: '🥤', duration: 20_000 },
     { description: 'rushing a deadline', emoji: '😩', duration: 20_000 },
   ],
+  Rahman: [
+    { description: 'pulling a long teh tarik', emoji: '🫖', duration: 20_000 },
+    { description: 'chatting with a regular', emoji: '💬', duration: 20_000 },
+    { description: 'wiping down the drinks counter', emoji: '🧽', duration: 20_000 },
+  ],
+  Lukas: [
+    { description: 'sketching an experiment in his notebook', emoji: '📓', duration: 20_000 },
+    { description: 'planning a weekend bouldering trip', emoji: '🧗', duration: 20_000 },
+    { description: 'frowning at a vague meeting invite', emoji: '🤨', duration: 20_000 },
+  ],
+  Clara: [
+    { description: 'reviewing a draft paper', emoji: '📄', duration: 20_000 },
+    { description: 'sipping a proper cup of tea', emoji: '🫖', duration: 20_000 },
+    { description: 'mentoring a postdoc', emoji: '🧑‍🔬', duration: 20_000 },
+  ],
 };
 
 export function activitiesForName(name?: string): Activity[] {

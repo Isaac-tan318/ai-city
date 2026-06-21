@@ -90,9 +90,12 @@ export const CITY_LOCATIONS: CityLocation[] = [
 export const CHARACTER_HOMES: Record<string, { locationId: string; x?: number; y?: number }> = {
   Cedric: { locationId: 'shophouses', x: 60, y: 42 }, // back room above his cafe
   Xavier: { locationId: 'shophouses', x: 64, y: 37 }, // upstairs unit two doors down
+  Clara: { locationId: 'shophouses', x: 56, y: 40 }, // rents a restored shophouse unit
   James: { locationId: 'hdb', x: 56, y: 9 }, // HDB block, ground floor
   Sarah: { locationId: 'hdb', x: 65, y: 9 }, // HDB block, middle unit
   Isabel: { locationId: 'hdb', x: 61, y: 17 }, // HDB block, far unit
+  Rahman: { locationId: 'hdb', x: 54, y: 9 }, // HDB block, corner unit
+  Lukas: { locationId: 'hdb', x: 53, y: 16 }, // HDB block, rented unit
 };
 
 // Per-character workplace. On weekdays agents spend their working hours here.
@@ -101,7 +104,10 @@ export const CHARACTER_WORKPLACES: Record<string, { locationId: string; activity
   Cedric: { locationId: 'shophouses', activity: 'working the espresso bar at his cafe' },
   James: { locationId: 'mbs', activity: 'waiting at the taxi stand for fares' },
   Sarah: { locationId: 'restaurant', activity: 'cooking and serving at her hawker stall' },
+  Rahman: { locationId: 'restaurant', activity: 'pulling teh tarik and serving kopi at his drinks stall' },
   Isabel: { locationId: 'astar', activity: 'running experiments in the lab' },
+  Lukas: { locationId: 'astar', activity: 'running materials experiments in the lab' },
+  Clara: { locationId: 'astar', activity: 'leading her genomics lab and reviewing data' },
   Xavier: { locationId: 'university', activity: 'cramming on coding projects on campus' },
 };
 

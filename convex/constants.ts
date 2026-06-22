@@ -197,6 +197,11 @@ export const SCHEDULE_DISRUPTION_MINUTES = 60;
 // emerge from agents' schedules bringing them to the same place.
 export const SCHEDULE_CHAT_RADIUS = 6;
 
+// While on shift (scheduled at their workplace), agents are leashed to within
+// this many tiles of the workplace — they won't wander off or trek across the
+// map to chat, so they stay "at work" instead of disappearing during their shift.
+export const WORK_LEASH_RADIUS = 8;
+
 // --- Stage 2: contextual random events ---
 // When an agent settles into a schedule block, the probability that any given
 // activity slot is a short contextual micro-event (office event during work,

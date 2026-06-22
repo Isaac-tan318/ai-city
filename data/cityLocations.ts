@@ -137,6 +137,21 @@ export function workplaceFor(
   return { location, activity: entry.activity };
 }
 
+// If the character is currently scheduled AT their own workplace (the work shift
+// or the lunch break, both of which sit at the workplace location), return the
+// workplace tile so callers can "leash" the agent nearby and stop them wandering
+// across the map mid-shift. Otherwise undefined (off shift — free to roam).
+export function workLeashAnchor(
+  characterName: string | undefined,
+  step: { locationId: string } | undefined,
+): { x: number; y: number } | undefined {
+  if (!characterName || !step) return undefined;
+  const entry = CHARACTER_WORKPLACES[characterName];
+  if (!entry || step.locationId !== entry.locationId) return undefined;
+  const loc = getLocationById(entry.locationId);
+  return loc ? { x: loc.x, y: loc.y } : undefined;
+}
+
 // Accepts the canonical id or a fuzzy match on name (case-insensitive substring).
 export function resolveLocation(idOrName: string): CityLocation | undefined {
   const key = idOrName.trim().toLowerCase();

@@ -17,7 +17,14 @@ import { api, internal } from '../_generated/api';
 import { sleep } from '../util/sleep';
 import { serializedPlayer } from './player';
 import { chatCompletion } from '../util/llm';
-import { CITY_LOCATIONS, CityLocation, getLocationById, workplaceFor } from '../../data/cityLocations';
+import {
+  CITY_LOCATIONS,
+  CityLocation,
+  getLocationById,
+  workplaceFor,
+  workLeashAnchor,
+} from '../../data/cityLocations';
+import { WORK_LEASH_RADIUS } from '../constants';
 import { point } from '../util/types';
 
 export const agentRememberConversation = internalAction({
@@ -236,6 +243,12 @@ export const agentDoSomething = internalAction({
     const { player, agent } = args;
     const map = new WorldMap(args.map);
     const now = Date.now();
+    // If we're on shift, keep any wandering close to the workplace.
+    const currentStep =
+      agent.schedule && agent.currentStepIndex !== undefined
+        ? agent.schedule[agent.currentStepIndex]
+        : undefined;
+    const leashAnchor = workLeashAnchor(player.name, currentStep);
     // Don't try to start a new conversation if we were just in one.
     const justLeftConversation =
       agent.lastConversation && now < agent.lastConversation + CONVERSATION_COOLDOWN;
@@ -253,7 +266,7 @@ export const agentDoSomething = internalAction({
           args: {
             operationId: args.operationId,
             agentId: agent.id,
-            destination: wanderDestination(map),
+            destination: wanderDestination(map, leashAnchor),
           },
         });
         return;
@@ -302,8 +315,17 @@ export const agentDoSomething = internalAction({
   },
 });
 
-function wanderDestination(worldMap: WorldMap) {
-  // Wander someonewhere at least one tile away from the edge.
+function wanderDestination(worldMap: WorldMap, anchor?: { x: number; y: number }) {
+  // On shift: pick a tile within the leash radius of the workplace so the agent
+  // stays put. Otherwise wander anywhere at least one tile away from the edge.
+  if (anchor) {
+    const r = WORK_LEASH_RADIUS;
+    const clamp = (v: number, max: number) => Math.min(Math.max(1, v), max - 2);
+    return {
+      x: clamp(anchor.x + Math.floor(Math.random() * (2 * r + 1)) - r, worldMap.width),
+      y: clamp(anchor.y + Math.floor(Math.random() * (2 * r + 1)) - r, worldMap.height),
+    };
+  }
   return {
     x: 1 + Math.floor(Math.random() * (worldMap.width - 2)),
     y: 1 + Math.floor(Math.random() * (worldMap.height - 2)),

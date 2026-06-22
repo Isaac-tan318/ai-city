@@ -34,6 +34,7 @@ import {
   ARRIVAL_RADIUS,
   SCHEDULE_DISRUPTION_MINUTES,
   SCHEDULE_CHAT_RADIUS,
+  WORK_LEASH_RADIUS,
   CONTEXTUAL_EVENT_PROBABILITY,
   CONTEXTUAL_EVENT_MINUTES,
   SICK_BASE_PROBABILITY,
@@ -42,7 +43,7 @@ import {
   SICK_DURATION_DAYS,
   CONTAGION_PROBABILITY,
 } from '../constants';
-import { getLocationById, homeFor } from '../../data/cityLocations';
+import { getLocationById, homeFor, workLeashAnchor } from '../../data/cityLocations';
 import { pickContextualEvent, buildSickSchedule } from '../../data/routines';
 
 export type ScheduleStep = {
@@ -733,11 +734,22 @@ export class Agent {
           p.id !== player.id &&
           ![...game.world.conversations.values()].some((c) => c.participants.has(p.id)),
       );
-      const pool = atDest
-        ? freePlayers
-        : freePlayers.filter(
-            (p) => distance(p.position, player.position) < SCHEDULE_CHAT_RADIUS,
-          );
+      // On shift we keep social reach close to the workplace so a worker doesn't
+      // trek across the map to chat and abandon their post.
+      const leashAnchor = workLeashAnchor(player.name, step);
+      let pool: typeof freePlayers;
+      if (!atDest) {
+        // In transit: only greet someone we physically pass.
+        pool = freePlayers.filter(
+          (p) => distance(p.position, player.position) < SCHEDULE_CHAT_RADIUS,
+        );
+      } else if (leashAnchor) {
+        // Settled on shift: only reach coworkers/customers near the workplace.
+        pool = freePlayers.filter((p) => distance(p.position, leashAnchor) < WORK_LEASH_RADIUS);
+      } else {
+        // Settled off-shift: reach map-wide so emergent conversations still form.
+        pool = freePlayers;
+      }
       if (pool.length > 0) {
         // Optimistically record the attempt so we don't re-fire every tick when
         // no candidate can actually be invited (e.g. all on the pair cooldown).

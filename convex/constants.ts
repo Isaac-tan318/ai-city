@@ -59,6 +59,26 @@ export const SCENARIO_ARRIVAL_RADIUS = 3;
 // if the group conversation never produced messages (e.g. LLM outage).
 export const SCENARIO_GATHER_TIMEOUT = 5 * 60_000;
 
+// --- Automatic scenarios (data/scenarios.ts) ---
+// How often (real ms) the engine evaluates scenarios (expiry checks + the start
+// timer). Kept small so a scenario starts promptly once the countdown hits zero.
+export const SCENARIO_EVAL_INTERVAL = 3_000;
+// Default lifetime of an active scenario (real ms) unless its def overrides it.
+export const SCENARIO_DEFAULT_DURATION_MS = 4 * 60_000;
+// Cooldown (real ms) before the same scope/location can host another scenario.
+export const SCENARIO_COOLDOWN_MS = 3 * 60_000;
+// The next scenario starts on a timer — a random gap in this range after the
+// previous start. This is what the on-screen "next scenario" countdown shows.
+export const SCENARIO_INTERVAL_MIN_MS = 60_000;
+export const SCENARIO_INTERVAL_MAX_MS = 120_000;
+// If the timer fires but nothing is eligible (deep night, everything on cooldown),
+// retry after this short delay instead of waiting out a whole interval.
+export const SCENARIO_RETRY_MS = 20_000;
+// Delay before the first scenario fires after the world (re)starts.
+export const SCENARIO_FIRST_DELAY_MS = 30_000;
+// Cap on how many universal (town-wide) scenarios can run at once.
+export const MAX_UNIVERSAL_SCENARIOS = 1;
+
 // Leave a conversation after participating too long.
 export const MAX_CONVERSATION_DURATION = 10 * 60_000; // more time locally
 // export const MAX_CONVERSATION_DURATION = 2 * 60_000;

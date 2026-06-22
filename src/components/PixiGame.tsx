@@ -15,6 +15,7 @@ import { PositionIndicator } from './PositionIndicator.tsx';
 import { SHOW_DEBUG_UI } from './Game.tsx';
 import { ServerGame } from '../hooks/serverGame.ts';
 import { CYCLE_MS, cycleProgressForHour } from '../../convex/aiTown/gameTime';
+import { ScenarioMarker } from './ScenarioMarker.tsx';
 
 // Lighting thresholds expressed as real-ms offsets within a cycle (p=0 → 6 AM,
 // p=CYCLE_MS → 6 AM next day). Derived via cycleProgressForHour so they track the
@@ -52,6 +53,7 @@ export const PixiGame = (props: {
   width: number;
   height: number;
   setSelectedElement: SelectElement;
+  onSelectScenario?: (id: string) => void;
   viewportRef?: MutableRefObject<Viewport | undefined>;
 }) => {
   // PIXI setup.
@@ -184,6 +186,17 @@ export const PixiGame = (props: {
           historicalTime={props.historicalTime}
         />
       ))}
+      {props.onSelectScenario &&
+        (props.game.world.activeScenarios ?? [])
+          .filter((s) => s.scope === 'local')
+          .map((s) => (
+            <ScenarioMarker
+              key={`scenario-${s.id}`}
+              scenario={s}
+              tileDim={tileDim}
+              onSelect={props.onSelectScenario!}
+            />
+          ))}
     </PixiViewport>
   );
 };

@@ -103,6 +103,11 @@ export class Agent {
   // optimistically the moment extraction is scheduled, so the op isn't re-fired
   // every tick while the LLM call is in flight.
   scenarioProfileFor?: string;
+  // The automatic-scenario instance this agent is a participant in (if any),
+  // matching SerializedActiveScenario.id. Set/cleared by the scenario manager
+  // (convex/aiTown/scenarios.ts); distinguishes automatic participants from the
+  // manual global scenario so the two systems don't clobber each other.
+  scenarioId?: string;
 
   constructor(serialized: SerializedAgent) {
     const {
@@ -128,6 +133,7 @@ export class Agent {
       lastContagionConversation,
       scenarioProfile,
       scenarioProfileFor,
+      scenarioId,
     } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
@@ -160,6 +166,7 @@ export class Agent {
         : undefined;
     this.scenarioProfile = scenarioProfile;
     this.scenarioProfileFor = scenarioProfileFor;
+    this.scenarioId = scenarioId;
   }
 
   tick(game: Game, now: number) {
@@ -185,6 +192,10 @@ export class Agent {
         delete game.world.scenarioInstruction;
         delete game.world.scenarioStartTime;
         for (const agent of game.world.agents.values()) {
+          // Skip agents enlisted in an automatic scenario — those are owned by
+          // the scenario manager (convex/aiTown/scenarios.ts), not the manual
+          // global scenario being expired here.
+          if (agent.scenarioId) continue;
           delete agent.scenarioInstruction;
           // Drop the cached scenario-relevant background so others revert to the
           // default identity blurb once the scenario is over.
@@ -838,6 +849,7 @@ export class Agent {
       lastContagionConversation: this.lastContagionConversation,
       scenarioProfile: this.scenarioProfile,
       scenarioProfileFor: this.scenarioProfileFor,
+      scenarioId: this.scenarioId,
     };
   }
 
@@ -915,6 +927,7 @@ export const serializedAgent = {
   lastContagionConversation: v.optional(conversationId),
   scenarioProfile: v.optional(v.string()),
   scenarioProfileFor: v.optional(v.string()),
+  scenarioId: v.optional(v.string()),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 

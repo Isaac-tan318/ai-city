@@ -4,6 +4,12 @@ export type CityLocation = {
   x: number;
   y: number;
   description: string;
+  // Optional cosmetic override for where a scenario marker is drawn. The x/y
+  // above are passable tiles agents stand on (often just outside the building);
+  // markerX/markerY let the on-map scenario beacon sit inside the building roof
+  // instead, without affecting pathfinding or work gathering.
+  markerX?: number;
+  markerY?: number;
 };
 
 // Singapore-themed points of interest. Coordinates were picked as passable tiles
@@ -16,6 +22,9 @@ export const CITY_LOCATIONS: CityLocation[] = [
     name: 'Marina Bay Sands',
     x: 36,
     y: 22,
+    // Beacon sits up in the building, not on the taxi-stand tile below it.
+    markerX: 36,
+    markerY: 20,
     description:
       'Iconic three-tower hotel with the rooftop skypark and reflecting pool. Tourists, business meetings, expensive drinks.',
   },
@@ -32,6 +41,9 @@ export const CITY_LOCATIONS: CityLocation[] = [
     name: 'A*STAR',
     x: 13,
     y: 8,
+    // Beacon sits up in the building, not on the standing tile below it.
+    markerX: 13,
+    markerY: 6,
     description:
       "Singapore's national research agency campus. Scientists, postdocs, gleaming labs.",
   },

@@ -15,6 +15,7 @@ import { GameClock } from './GameClock.tsx';
 import { TimeControls } from './TimeControls.tsx';
 import { ChatHistoryViewer } from './ChatHistoryViewer.tsx';
 import { MiniMap } from './MiniMap.tsx';
+import { ScenariosPanel, ScenarioDetail } from './Scenarios.tsx';
 import type { Viewport } from 'pixi-viewport';
 
 export const SHOW_DEBUG_UI = !!import.meta.env.VITE_SHOW_DEBUG_UI;
@@ -26,6 +27,7 @@ export default function Game() {
     id: GameId<'players'>;
   }>();
   const [showChatHistory, setShowChatHistory] = useState(false);
+  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
   const [gameWrapperRef, { width, height }] = useElementSize();
 
   const worldStatus = useQuery(api.world.defaultWorldStatus);
@@ -66,6 +68,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
                     height={height}
                     historicalTime={historicalTime}
                     setSelectedElement={setSelectedElement}
+                    onSelectScenario={setSelectedScenarioId}
                     viewportRef={viewportRef}
                   />
                 </ConvexProvider>
@@ -74,6 +77,11 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
           </div>
           <GameClock historicalTime={historicalTime} worldStartTime={game.world.worldStartTime} />
           <TimeControls historicalTime={historicalTime} worldStartTime={game.world.worldStartTime} />
+          <ScenariosPanel
+            scenarios={game.world.activeScenarios ?? []}
+            nextScenarioTime={game.world.nextScenarioTime}
+            onSelect={setSelectedScenarioId}
+          />
         </div>
         {/* Right column area */}
         <div
@@ -104,6 +112,16 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
       {showChatHistory && (
         <ChatHistoryViewer worldId={worldId} onClose={() => setShowChatHistory(false)} />
       )}
+      {(() => {
+        // Render the detail modal for the selected scenario; if it has since
+        // expired (no longer in activeScenarios), the modal simply closes.
+        const selected = (game.world.activeScenarios ?? []).find(
+          (s) => s.id === selectedScenarioId,
+        );
+        return selected ? (
+          <ScenarioDetail scenario={selected} onClose={() => setSelectedScenarioId(null)} />
+        ) : null;
+      })()}
       <MiniMap game={game} viewportRef={viewportRef} />
     </>
   );

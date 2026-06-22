@@ -262,7 +262,9 @@ export const agentInputs = {
         throw new Error(`Couldn't find agent: ${agentId}`);
       }
       // Ignore an extraction that finished after the scenario changed or ended.
-      if (game.world.scenarioInstruction !== args.scenarioInstruction) {
+      // Check the agent's own current instruction (works for both the manual
+      // global scenario and an automatic per-participant one).
+      if (agent.scenarioInstruction !== args.scenarioInstruction) {
         return null;
       }
       agent.scenarioProfile = args.scenarioProfile;

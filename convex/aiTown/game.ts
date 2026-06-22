@@ -1,4 +1,4 @@
-import { Infer, v } from 'convex/values';
+import { ConvexError, Infer, v } from 'convex/values';
 import { Doc, Id } from '../_generated/dataModel';
 import {
   ActionCtx,
@@ -25,6 +25,7 @@ import { internal } from '../_generated/api';
 import { HistoricalObject } from '../engine/historicalObject';
 import { AgentDescription, serializedAgentDescription } from './agentDescription';
 import { parseMap, serializeMap } from '../util/object';
+import { tickScenarios } from './scenarios';
 
 const gameState = v.object({
   world: v.object(serializedWorld),
@@ -93,14 +94,23 @@ export class Game extends AbstractGame {
   ): Promise<{ engine: Doc<'engines'>; gameState: GameState }> {
     const worldDoc = await db.get(worldId);
     if (!worldDoc) {
-      throw new Error(`No world found with id ${worldId}`);
+      // The world was deleted out from under a running engine loop (e.g. a
+      // `testing:wipeAllTables`). Tag this so runStep's catch stops the orphaned
+      // loop cleanly instead of rescheduling it forever.
+      throw new ConvexError({
+        kind: 'worldDeleted',
+        message: `No world found with id ${worldId}`,
+      });
     }
     const worldStatus = await db
       .query('worldStatus')
       .withIndex('worldId', (q) => q.eq('worldId', worldId))
       .unique();
     if (!worldStatus) {
-      throw new Error(`No engine found for world ${worldId}`);
+      throw new ConvexError({
+        kind: 'worldDeleted',
+        message: `No engine found for world ${worldId}`,
+      });
     }
     const engine = await loadEngine(db, worldStatus.engineId, generationNumber);
     const playerDescriptionsDocs = await db
@@ -178,6 +188,9 @@ export class Game extends AbstractGame {
     if (this.world.worldStartTime === undefined) {
       this.world.worldStartTime = now;
     }
+    // Start/expire automatic scenarios (throttled internally to
+    // SCENARIO_EVAL_INTERVAL, so cheap to call every tick).
+    tickScenarios(this, now);
     for (const player of this.world.players.values()) {
       player.tick(this, now);
     }

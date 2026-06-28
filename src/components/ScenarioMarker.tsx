@@ -13,19 +13,27 @@ export function ScenarioMarker({
   tileDim: number;
   onSelect: (id: string) => void;
 }) {
+  // Beacon colour reflects progress: green once the goal is met, sky-blue while
+  // participants are still gathering, amber for an active scenario in progress.
+  const color = scenario.goalMet
+    ? 0x22c55e
+    : scenario.phase === 'gathering'
+      ? 0x38bdf8
+      : 0xffc24b;
+
   const draw = useCallback(
     (g: PixiGraphics) => {
       g.clear();
       // Outer halo ring.
-      g.lineStyle(2, 0xffc24b, 0.5);
+      g.lineStyle(2, color, 0.5);
       g.drawCircle(0, 0, tileDim * 0.95);
       // Inner beacon dot.
       g.lineStyle(0);
-      g.beginFill(0xffc24b, 0.9);
+      g.beginFill(color, 0.9);
       g.drawCircle(0, 0, tileDim * 0.2);
       g.endFill();
     },
-    [tileDim],
+    [tileDim, color],
   );
 
   if (scenario.x === undefined || scenario.y === undefined) return null;

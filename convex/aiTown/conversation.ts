@@ -40,6 +40,11 @@ export class Conversation {
   // who should speak next, decided by an LLM from the conversation history.
   // Agents defer to the designated speaker (with an awkward-timeout fallback).
   nextSpeaker?: GameId<'players'>;
+  // Latched true once the scenario goal-judge (decideNextSpeaker) deems this
+  // scenario conversation's goal achieved, so participants may wrap up rather
+  // than running to the hard message/duration cap. Only meaningful for scenario
+  // conversations; ignored by ordinary ones.
+  scenarioGoalMet?: boolean;
   // Every player who has ever actively participated in this conversation, even
   // after they leave. `participants` only holds the people *currently* present,
   // so in a group chat where members peel off one at a time it would shrink to
@@ -48,7 +53,7 @@ export class Conversation {
   allParticipants: Set<GameId<'players'>>;
 
   constructor(serialized: SerializedConversation) {
-    const { id, creator, created, isTyping, lastMessage, numMessages, participants, scenario } =
+    const { id, creator, created, isTyping, lastMessage, numMessages, participants, scenario, scenarioGoalMet } =
       serialized;
     this.id = parseGameId('conversations', id);
     this.creator = parseGameId('players', creator);
@@ -65,6 +70,7 @@ export class Conversation {
     this.numMessages = numMessages;
     this.participants = parseMap(participants, ConversationMembership, (m) => m.playerId);
     this.scenario = scenario;
+    this.scenarioGoalMet = scenarioGoalMet;
     this.nextSpeaker =
       serialized.nextSpeaker !== undefined
         ? parseGameId('players', serialized.nextSpeaker)
@@ -295,7 +301,7 @@ export class Conversation {
   }
 
   serialize(): SerializedConversation {
-    const { id, creator, created, isTyping, lastMessage, numMessages, scenario, nextSpeaker } = this;
+    const { id, creator, created, isTyping, lastMessage, numMessages, scenario, scenarioGoalMet, nextSpeaker } = this;
     return {
       id,
       creator,
@@ -305,6 +311,7 @@ export class Conversation {
       numMessages,
       participants: serializeMap(this.participants),
       scenario,
+      scenarioGoalMet,
       nextSpeaker,
       allParticipants: [...this.allParticipants],
     };
@@ -331,6 +338,7 @@ export const serializedConversation = {
   numMessages: v.number(),
   participants: v.array(v.object(serializedConversationMembership)),
   scenario: v.optional(v.boolean()),
+  scenarioGoalMet: v.optional(v.boolean()),
   nextSpeaker: v.optional(playerId),
   // Full roster of everyone who ever participated (see Conversation.allParticipants).
   // Optional for backward-compat with worlds serialized before this field existed.

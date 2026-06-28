@@ -201,15 +201,21 @@ export const agentGenerateMessage = internalAction({
 
     // After speaking (but not when leaving), the dialogue orchestrator picks who
     // should hold the floor next so a group chat flows instead of everyone (or
-    // no one) talking. undefined = open floor (e.g. only humans remain).
+    // no one) talking. undefined = open floor (e.g. only humans remain). For a
+    // scenario conversation it also reports whether the scenario's goal is met.
     let nextSpeaker: GameId<'players'> | undefined;
+    let goalMet = false;
+    let coveredTopics: number[] = [];
     if (args.type !== 'leave') {
-      nextSpeaker = await decideNextSpeaker(
+      const decision = await decideNextSpeaker(
         ctx,
         args.worldId,
         args.conversationId as GameId<'conversations'>,
         args.playerId as GameId<'players'>,
       );
+      nextSpeaker = decision.nextSpeaker;
+      goalMet = decision.goalMet;
+      coveredTopics = decision.coveredTopics;
     }
 
     await ctx.runMutation(internal.aiTown.agent.agentSendMessage, {
@@ -222,6 +228,8 @@ export const agentGenerateMessage = internalAction({
       leaveConversation: args.type === 'leave',
       operationId: args.operationId,
       nextSpeaker,
+      goalMet,
+      coveredTopics,
     });
   },
 });

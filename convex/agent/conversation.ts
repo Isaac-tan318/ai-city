@@ -6,7 +6,7 @@ import * as memory from './memory';
 import { api, internal } from '../_generated/api';
 import * as embeddingsCache from './embeddingsCache';
 import { GameId, conversationId, playerId } from '../aiTown/ids';
-import { NUM_MEMORIES_TO_SEARCH } from '../constants';
+import { NUM_MEMORIES_TO_SEARCH, SCENARIO_GOAL_CHECK_MIN_MESSAGES } from '../constants';
 import { computeGameTime, formatGameTimestamp } from '../aiTown/gameTime';
 import { CITY_LOCATIONS } from '../../data/cityLocations';
 
@@ -188,13 +188,18 @@ export async function leaveConversationMessage(
 // 3–5 person conversation flows naturally instead of everyone talking at once
 // (or nobody talking). The floor is only routed among other AGENTS — humans
 // speak whenever they choose, so we never block waiting on a human.
+//
+// For SCENARIO conversations this also doubles as the goal-judge: once enough has
+// been said, the same LLM call decides whether the scenario's goal has been met,
+// so the conversation can wrap up instead of running to the hard cap. Returns the
+// designated next speaker (undefined = open floor) plus whether the goal is met.
 export async function decideNextSpeaker(
   ctx: ActionCtx,
   worldId: Id<'worlds'>,
   conversationId: GameId<'conversations'>,
   speakerId: GameId<'players'>,
-): Promise<GameId<'players'> | undefined> {
-  const { player, others } = await ctx.runQuery(selfInternal.queryPromptData, {
+): Promise<{ nextSpeaker?: GameId<'players'>; goalMet: boolean; coveredTopics: number[] }> {
+  const { player, others, agent } = await ctx.runQuery(selfInternal.queryPromptData, {
     worldId,
     playerId: speakerId,
     conversationId,
@@ -202,50 +207,119 @@ export async function decideNextSpeaker(
   const candidates = others.filter((o) => !o.human);
   if (candidates.length === 0) {
     // Only humans left to address — open the floor and let them respond.
-    return undefined;
-  }
-  if (candidates.length === 1) {
-    return candidates[0].id as GameId<'players'>;
+    return { nextSpeaker: undefined, goalMet: false, coveredTopics: [] };
   }
 
+  // Only treat this as a scenario conversation (and judge its goal) when the
+  // speaker is enlisted in a scenario that carries a completion goal.
+  const scenarioGoal = agent?.scenarioInstruction ? agent?.scenarioGoal : undefined;
+  const topics = (agent?.scenarioInstruction ? agent?.scenarioTopics : undefined) ?? [];
   const prevMessages = await ctx.runQuery(api.messages.listMessages, { worldId, conversationId });
+  const checkGoal = !!scenarioGoal && prevMessages.length >= SCENARIO_GOAL_CHECK_MIN_MESSAGES;
+
+  // Fast path: a single other agent and no goal to judge — no LLM call needed.
+  if (candidates.length === 1 && !checkGoal) {
+    return { nextSpeaker: candidates[0].id as GameId<'players'>, goalMet: false, coveredTopics: [] };
+  }
+
   const recent = prevMessages
     .slice(-8)
     .map((m) => `${m.authorName}: ${m.text}`)
     .join('\n');
   const candidateNames = candidates.map((c) => c.name);
-  const prompt = [
+
+  const promptLines = [
     `You are the moderator of a casual group conversation in a small town.`,
     `Everyone present: ${formatNameList([player.name, ...others.map((o) => o.name)])}.`,
-    `${player.name} just finished speaking. Decide who should speak next so the conversation flows naturally — pick whoever was addressed or asked a question, or whoever would most plausibly jump in.`,
-    `You must choose exactly one of these names: ${candidateNames.join(', ')}.`,
-    ``,
-    `Recent conversation:`,
-    recent,
-    ``,
-    `Reply with ONLY the chosen name, nothing else.`,
-  ].join('\n');
+    `${player.name} just finished speaking.`,
+  ];
+  if (checkGoal) {
+    const numberedTopics = topics.map((t, i) => `${i + 1}. ${t}`).join('\n');
+    promptLines.push(
+      `This conversation is part of a scenario. Its overall goal: ${scenarioGoal}`,
+      topics.length > 0 ? `Tasks it should work through:\n${numberedTopics}` : ``,
+      `First, decide who should speak next from: ${candidateNames.join(', ')} (pick whoever was addressed or asked a question, or who would most plausibly jump in).`,
+      topics.length > 0
+        ? `Second, list the task numbers above that the group has SUBSTANTIVELY covered so far (discussed with real content, not merely mentioned in passing).`
+        : ``,
+      `${topics.length > 0 ? 'Third' : 'Second'}, judge whether the group has now SUBSTANTIVELY achieved the overall goal — key points discussed and any decisions or arrangements actually made. Be strict: only true if it would feel natural to wrap up.`,
+      ``,
+      `Recent conversation:`,
+      recent,
+      ``,
+      `Reply with ONLY strict JSON: {"next":"<one of: ${candidateNames.join(', ')}>","covered":[task numbers],"goalMet":true or false}`,
+    );
+  } else {
+    promptLines.push(
+      `Decide who should speak next so the conversation flows naturally — pick whoever was addressed or asked a question, or whoever would most plausibly jump in.`,
+      `You must choose exactly one of these names: ${candidateNames.join(', ')}.`,
+      ``,
+      `Recent conversation:`,
+      recent,
+      ``,
+      `Reply with ONLY the chosen name, nothing else.`,
+    );
+  }
+  const prompt = promptLines.filter(Boolean).join('\n');
 
   let chosen: OtherParticipant | undefined;
+  let goalMet = false;
+  let coveredTopics: number[] = [];
   try {
     const { content } = await chatCompletion({
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: 10,
+      max_tokens: checkGoal ? 60 : 10,
     });
-    const norm = content.trim().toLowerCase();
+    let nameText: string;
+    if (checkGoal) {
+      const parsed = parseGoalJudge(content, topics.length);
+      goalMet = parsed.goalMet;
+      coveredTopics = parsed.covered;
+      nameText = (parsed.next ?? '').toLowerCase();
+    } else {
+      nameText = content.trim().toLowerCase();
+    }
     chosen =
-      candidates.find((c) => norm === c.name.toLowerCase()) ??
-      candidates.find((c) => norm.includes(c.name.toLowerCase()));
+      candidates.find((c) => nameText === c.name.toLowerCase()) ??
+      candidates.find((c) => nameText.includes(c.name.toLowerCase()));
   } catch (err) {
     console.error(`decideNextSpeaker failed: ${(err as Error).message}`);
   }
   if (!chosen) {
-    // Fallback: hand the floor to whoever has gone longest without speaking.
+    // Fallback: the lone candidate, else whoever has gone longest without speaking.
     chosen =
+      (candidates.length === 1 ? candidates[0] : undefined) ??
       pickLeastRecentSpeaker(candidates, prevMessages) ??
       candidates[Math.floor(Math.random() * candidates.length)];
   }
-  return chosen.id as GameId<'players'>;
+  return { nextSpeaker: chosen.id as GameId<'players'>, goalMet, coveredTopics };
+}
+
+// Tolerantly parse the goal-judge's JSON reply
+// {"next": "...", "covered": [1,3], "goalMet": true}. `covered` is returned as
+// 0-based topic indices, bounded to [0, topicCount).
+function parseGoalJudge(
+  content: string,
+  topicCount: number,
+): { next?: string; covered: number[]; goalMet: boolean } {
+  try {
+    const match = content.match(/\{[\s\S]*\}/);
+    const obj = JSON.parse(match ? match[0] : content);
+    const covered = Array.isArray(obj.covered)
+      ? obj.covered
+          .map((n: unknown) => Number(n) - 1)
+          .filter((i: number) => Number.isInteger(i) && i >= 0 && i < topicCount)
+      : [];
+    return {
+      next: typeof obj.next === 'string' ? obj.next : undefined,
+      covered,
+      goalMet: obj.goalMet === true || obj.goalMet === 'true',
+    };
+  } catch {
+    // No parseable JSON: leave the next speaker to the fallback and read goalMet
+    // loosely from the text so a goal that was clearly flagged still registers.
+    return { next: undefined, covered: [], goalMet: /goalmet"?\s*[:=]\s*true/i.test(content) };
+  }
 }
 
 function pickLeastRecentSpeaker(
@@ -287,6 +361,8 @@ function selfAndOthersPrompt(
     identity: string;
     profile?: Record<string, string>;
     scenarioInstruction?: string;
+    scenarioTopics?: string[];
+    scenarioGoal?: string;
     health?: string;
   } | null,
   others: OtherParticipant[],
@@ -326,6 +402,17 @@ function selfAndOthersPrompt(
       `SCENARIO DIRECTIVE (follow this right now): ${agent.scenarioInstruction}`,
       `Weave this directive naturally into the conversation without breaking character.`,
     );
+    if (agent.scenarioTopics && agent.scenarioTopics.length > 0) {
+      prompt.push(
+        `Work through these specific points over the conversation (advance the discussion — don't just repeat yourself or restate the situation):`,
+        ...agent.scenarioTopics.map((t) => `  - ${t}`),
+      );
+    }
+    if (agent.scenarioGoal) {
+      prompt.push(
+        `The goal of this conversation is: ${agent.scenarioGoal}. Keep it productive and moving toward that goal; once it's reached, you can wrap up naturally.`,
+      );
+    }
   }
   return prompt;
 }

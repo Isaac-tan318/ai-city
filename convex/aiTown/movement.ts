@@ -164,6 +164,32 @@ export function findRoute(game: Game, now: number, player: Player, destination: 
   return { path: compressPath(densePath), newDestination };
 }
 
+// Estimate how long (real ms) it would take `player` to walk to `destination`,
+// using the same A* path and tiles-per-second speed the engine uses to actually
+// move them. Deterministic (findRoute uses no Math.random), so it's safe to call
+// from tick. Used by the scenario manager to time the pre-scenario gathering phase.
+export function estimateTravelTimeMs(
+  game: Game,
+  now: number,
+  player: Player,
+  destination: Point,
+): number {
+  try {
+    const route = findRoute(game, now, player, destination);
+    if (route && route.path.length > 0) {
+      // Packed path component is [x, y, dx, dy, t]; t (index 4) is the real-ms
+      // timestamp the player reaches that waypoint (see convex/util/types.ts).
+      const last = route.path[route.path.length - 1];
+      return Math.max(0, last[4] - now);
+    }
+  } catch {
+    // Fall through to the straight-line estimate below.
+  }
+  // Fallback (unreachable / already adjacent / off-grid): straight-line tiles
+  // divided by movement speed (tiles per second).
+  return (distance(player.position, destination) / movementSpeed) * 1000;
+}
+
 export function blocked(
   game: Game,
   now: number,

@@ -209,15 +209,9 @@ p[contenteditable='true']:empty::before {
   height: 0;
 }
 
-.scenario-clamp {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
 .scenario-card {
-  min-height: 84px;
+  min-height: 48px;
+  justify-content: center;
 }
 
 .scenario-select {

@@ -79,6 +79,15 @@ export const SCENARIO_FIRST_DELAY_MS = 30_000;
 // Cap on how many universal (town-wide) scenarios can run at once.
 export const MAX_UNIVERSAL_SCENARIOS = 1;
 
+// --- Local-scenario gathering (travel-time arrival) ---
+// Slack (real ms) added to the slowest participant's estimated travel time when
+// computing how long the "gathering" phase lasts, so everyone has a moment to
+// settle once they arrive before the scenario content begins.
+export const SCENARIO_GATHER_BUFFER_MS = 8_000;
+// Hard cap (real ms) on the gathering phase. If a participant is blocked or
+// can't reach the spot, the scenario promotes to active anyway so it never stalls.
+export const SCENARIO_GATHER_MAX_MS = 90_000;
+
 // Leave a conversation after participating too long.
 export const MAX_CONVERSATION_DURATION = 10 * 60_000; // more time locally
 // export const MAX_CONVERSATION_DURATION = 2 * 60_000;
@@ -99,6 +108,23 @@ export const GROUP_LEAVE_MIN_MESSAGES = 6;
 // Per-eligible-turn probability that an agent decides to drift away from a group
 // conversation. Tuned so members leave over several turns rather than all at once.
 export const GROUP_LEAVE_PROBABILITY = 0.35;
+
+// --- Scenario conversation termination (goal-driven) ---
+// Scenario conversations (those between automatic-scenario participants) ignore
+// the random drift-off and run until their goal is judged achieved or a hard cap
+// is hit, so the scenario's core content actually gets covered.
+// Minimum messages before a scenario conversation may end on its goal being met
+// (+2 per extra group participant beyond two).
+export const SCENARIO_CONVO_MIN_MESSAGES = 8;
+// Hard ceiling on a scenario conversation's message budget. Past this, everyone
+// wraps up regardless of whether the goal was judged met.
+export const SCENARIO_CONVO_MAX_MESSAGES = 24;
+// Only start asking the LLM goal-judge whether the goal is met once a scenario
+// conversation has had at least this many messages (saves tokens early on).
+export const SCENARIO_GOAL_CHECK_MIN_MESSAGES = 6;
+// Time safety valve: leave a scenario conversation that has run this long even if
+// the goal was never judged met.
+export const SCENARIO_MAX_CONVO_DURATION = 15 * 60_000;
 
 // Wait for 1s after sending an input to the engine. We can remove this
 // once we can await on an input being processed.

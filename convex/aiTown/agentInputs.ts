@@ -2,52 +2,80 @@ import { v } from 'convex/values';
 import { agentId, conversationId, parseGameId, playerId } from './ids';
 import { Player, activity } from './player';
 import { Conversation, conversationInputs } from './conversation';
-import { blockedWithPositions, movePlayer, stopPlayer } from './movement';
+import { movePlayer, stopPlayer } from './movement';
 import { inputHandler } from './inputHandler';
-import { Point, point } from '../util/types';
+import { point } from '../util/types';
 import { Descriptions } from '../../data/characters';
 import { AgentDescription } from './agentDescription';
 import { Agent, scheduleStep } from './agent';
-import { WorldMap } from './worldMap';
 import { CITY_LOCATIONS, homeFor } from '../../data/cityLocations';
 import { mergeFixedObligations } from '../../data/routines';
+import { CYCLE_MS } from './gameTime';
+import type { SerializedActiveScenario } from './world';
+import type { Game } from './game';
 
-
-const PARK_FOUNTAIN_SHEET = '__city_fountain__';
-
-// Returns the nearest open tile to the fountain centroid.
-function getParkTarget(worldMap: WorldMap): Point {
-  const fountains = worldMap.animatedSprites.filter((s) => s.sheet === PARK_FOUNTAIN_SHEET);
-  let center: Point;
-  if (fountains.length > 0) {
-    const sum = fountains.reduce(
-      (acc, s) => ({ x: acc.x + s.x, y: acc.y + s.y }),
-      { x: 0, y: 0 },
-    );
-    center = {
-      x: Math.round(sum.x / fountains.length / worldMap.tileDim),
-      y: Math.round(sum.y / fountains.length / worldMap.tileDim),
-    };
-  } else {
-    center = { x: Math.floor(worldMap.width / 2), y: Math.floor(worldMap.height / 2) };
+// Inject a town-wide scenario: set the global directive, force every agent to
+// re-plan around it (which naturally walks them to wherever it calls them — no
+// special movement code), and surface it in the on-screen scenarios panel. Shared
+// by the custom-scenario injector and the "meet at the park" button.
+function injectScenario(
+  game: Game,
+  now: number,
+  opts: { instruction: string; name: string; emoji: string; background: string },
+) {
+  game.world.scenarioInstruction = opts.instruction;
+  game.world.scenarioStartTime = now;
+  // End ongoing conversations so agents are immediately free to react.
+  for (const conversation of [...game.world.conversations.values()]) {
+    conversation.stop(game, now);
   }
-  for (let radius = 0; radius <= 15; radius++) {
-    for (let dx = -radius; dx <= radius; dx++) {
-      for (let dy = -radius; dy <= radius; dy++) {
-        if (Math.abs(dx) + Math.abs(dy) !== radius) continue;
-        const candidate = { x: center.x + dx, y: center.y + dy };
-        if (
-          candidate.x >= 0 &&
-          candidate.y >= 0 &&
-          candidate.x < worldMap.width &&
-          candidate.y < worldMap.height &&
-          blockedWithPositions(candidate, [], worldMap) === null
-        )
-          return candidate;
-      }
+  for (const agent of game.world.agents.values()) {
+    agent.scenarioInstruction = opts.instruction;
+    // Drop any stale scenario-relevant background; the next tick re-extracts.
+    delete agent.scenarioProfile;
+    delete agent.scenarioProfileFor;
+    delete agent.toRemember;
+    delete agent.inProgressOperation;
+    // Force an immediate re-plan that incorporates the scenario (bypassing the
+    // plan cooldown/stagger) so every agent reacts at once.
+    agent.scheduleNeedsRefresh = true;
+    agent.forcePlan = true;
+    delete agent.lastPlanAttempt;
+    const player = game.world.players.get(agent.playerId);
+    if (player) {
+      delete player.activity;
+      if (player.pathfinding) stopPlayer(player);
     }
   }
-  return center;
+
+  // Surface it in the scenarios panel (the automatic manager skips 'manual'
+  // entries — they live and die with the global scenarioInstruction above).
+  const participantIds = [...game.world.agents.values()].map((a) => a.playerId);
+  const manualEntry: SerializedActiveScenario = {
+    id: `manual-${now}`,
+    defId: 'manual',
+    scope: 'universal',
+    name: opts.name,
+    emoji: opts.emoji,
+    instruction: opts.instruction,
+    whatHappens: opts.instruction,
+    background: opts.background,
+    relationships: 'Everyone in town is caught up in it.',
+    context: 'Happening right now, town-wide.',
+    goals: 'React to the situation in character and let it reshape the rest of your day.',
+    participantIds,
+    participantNames: participantIds.map(
+      (pid) => game.playerDescriptions.get(pid)?.name ?? 'Someone',
+    ),
+    startTime: now,
+    // Manual scenarios have no gathering phase — they take over the whole town
+    // immediately and end with the global scenarioInstruction.
+    contentStartTime: now,
+    phase: 'active',
+    endTime: now + CYCLE_MS,
+  };
+  const others = (game.world.activeScenarios ?? []).filter((s) => s.defId !== 'manual');
+  game.world.activeScenarios = [...others, manualEntry];
 }
 
 export const agentInputs = {
@@ -74,9 +102,18 @@ export const agentInputs = {
       delete agent.inProgressOperation;
       const player = game.world.players.get(agent.playerId);
       const characterName = player?.name ?? '';
-      // Overlay deterministic fixed obligations (work shifts, Sunday service)
-      // on top of the LLM plan so rigid routines land at exact times.
-      agent.schedule = mergeFixedObligations(characterName, args.dayNumber, args.schedule);
+      // Overlay deterministic fixed obligations (work shifts, Sunday service) on
+      // top of the LLM plan so rigid routines land at exact times — UNLESS a
+      // MANUAL scenario is active (scenarioInstruction set but no scenarioId).
+      // Those are the town-wide gatherings that should take over the whole day, so
+      // we let their re-planned schedule stand instead of having the work shift
+      // override (and fight) the gathering during work hours. Automatic scenarios
+      // (which carry a scenarioId) keep their obligations — a local work scenario
+      // like a lab crunch wants the worker pinned at their workplace.
+      const manualScenarioActive = !!agent.scenarioInstruction && !agent.scenarioId;
+      agent.schedule = manualScenarioActive
+        ? args.schedule
+        : mergeFixedObligations(characterName, args.dayNumber, args.schedule);
       agent.scheduleGeneratedForDay = args.dayNumber;
       agent.currentStepIndex = 0;
       return null;
@@ -157,6 +194,8 @@ export const agentInputs = {
       operationId: v.string(),
       leaveConversation: v.boolean(),
       nextSpeaker: v.optional(playerId),
+      goalMet: v.optional(v.boolean()),
+      coveredTopics: v.optional(v.array(v.number())),
     },
     handler: (game, now, args) => {
       const agentId = parseGameId('agents', args.agentId);
@@ -190,6 +229,26 @@ export const agentInputs = {
       // choice from this turn re-sets it so the designated agent speaks next.
       if (args.nextSpeaker && !args.leaveConversation) {
         conversation.nextSpeaker = parseGameId('players', args.nextSpeaker);
+      }
+      // Latch the scenario goal as met so the termination logic lets participants
+      // wrap up (once the per-scenario minimum message count is reached).
+      if (args.goalMet) {
+        conversation.scenarioGoalMet = true;
+      }
+      // Mirror the goal-judge's progress onto the active-scenario entry so the UI
+      // can show which tasks are done and whether the goal is achieved.
+      if (agent.scenarioId && (args.goalMet || (args.coveredTopics?.length ?? 0) > 0)) {
+        const sc = (game.world.activeScenarios ?? []).find((s) => s.id === agent.scenarioId);
+        if (sc) {
+          if (args.goalMet) sc.goalMet = true;
+          if (args.coveredTopics && args.coveredTopics.length > 0) {
+            const done = sc.topicsDone ?? (sc.topics ?? []).map(() => false);
+            for (const i of args.coveredTopics) {
+              if (i >= 0 && i < done.length) done[i] = true;
+            }
+            sc.topicsDone = done;
+          }
+        }
       }
       if (args.leaveConversation) {
         conversation.leave(game, now, player);
@@ -277,38 +336,13 @@ export const agentInputs = {
     handler: (game, now, args) => {
       const instruction = args.instruction.trim();
       if (!instruction) return null;
-
-      game.world.scenarioInstruction = instruction;
-      game.world.scenarioStartTime = now;
-
-      // End all ongoing conversations so agents are immediately free to move/react.
-      for (const conversation of [...game.world.conversations.values()]) {
-        conversation.stop(game, now);
-      }
-      for (const agent of game.world.agents.values()) {
-        agent.scenarioInstruction = instruction;
-        // Drop any stale scenario-relevant background; the next tick re-extracts
-        // for the new scenario (scenarioProfileFor no longer matches instruction).
-        delete agent.scenarioProfile;
-        delete agent.scenarioProfileFor;
-        delete agent.toRemember;
-        delete agent.inProgressOperation;
-        // Force an immediate re-plan that incorporates the scenario:
-        //  - scheduleNeedsRefresh makes tickSchedule WANT to plan.
-        //  - forcePlan bypasses the 5-min cooldown AND the per-agent stagger
-        //    window so every agent reacts at once.
-        //  - clearing lastPlanAttempt removes any lingering cooldown.
-        //  - clearing the current activity is required: tickSchedule won't plan
-        //    while `doingActivity` is true.
-        agent.scheduleNeedsRefresh = true;
-        agent.forcePlan = true;
-        delete agent.lastPlanAttempt;
-        const player = game.world.players.get(agent.playerId);
-        if (player) {
-          delete player.activity;
-          if (player.pathfinding) stopPlayer(player);
-        }
-      }
+      injectScenario(game, now, {
+        instruction,
+        name: 'Custom Scenario',
+        emoji: '🎬',
+        background:
+          'A custom scenario you injected. It overrides everyone’s normal routine for the rest of the in-game day.',
+      });
       return null;
     },
   }),
@@ -327,35 +361,27 @@ export const agentInputs = {
         delete agent.scenarioProfile;
         delete agent.scenarioProfileFor;
       }
+      // Remove the manual scenario's panel entry (leave automatic ones alone).
+      const remaining = (game.world.activeScenarios ?? []).filter((s) => s.defId !== 'manual');
+      game.world.activeScenarios = remaining.length > 0 ? remaining : undefined;
       return null;
     },
   }),
   startScenarioMeetAtPark: inputHandler({
     args: {},
     handler: (game, now) => {
-      const target = getParkTarget(game.worldMap);
-      game.world.scenarioTarget = target;
-      game.world.scenarioName = 'meetAtPark';
-      // Preempt all ongoing conversations so agents are immediately free to move.
-      for (const conversation of [...game.world.conversations.values()]) {
-        conversation.stop(game, now);
-      }
-      for (const agent of game.world.agents.values()) {
-        agent.scenarioTarget = target;
-        agent.scenarioName = 'meetAtPark';
-        // Drop any pending conversation memory from the just-stopped convos.
-        delete agent.toRemember;
-        // Orphan any in-flight LLM operation — finishDoSomething will see an
-        // operationId mismatch and bail out, preventing destination overrides.
-        delete agent.inProgressOperation;
-        // Reset arrival timer so the 30-second stay clock starts fresh.
-        delete agent.scenarioArrivalTime;
-        const player = game.world.players.get(agent.playerId);
-        if (!player) continue;
-        delete player.activity;
-        movePlayer(game, now, player, target, false, false);
-      }
-      return { target };
+      // Just a normal scenario now: inject a directive to gather at the park and
+      // let each agent's re-plan walk them to "gardens" naturally — no bespoke
+      // walk-to-center / mill-around movement code.
+      injectScenario(game, now, {
+        instruction:
+          'A spontaneous town gathering is happening at Gardens by the Bay right now. Drop what you are doing and head to the park (location "gardens") to meet everyone, then mingle and enjoy the get-together.',
+        name: 'Meet at the Park',
+        emoji: '🌳',
+        background:
+          'A spontaneous town-wide get-together at Gardens by the Bay — everyone heads to the park to mingle.',
+      });
+      return null;
     },
   }),
 };

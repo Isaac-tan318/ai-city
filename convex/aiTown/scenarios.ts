@@ -14,21 +14,27 @@
 import type { Game } from './game';
 import type { Agent } from './agent';
 import type { SerializedActiveScenario } from './world';
-import { GameId } from './ids';
+import { GameId, parseGameId } from './ids';
 import {
   LOCAL_SCENARIOS,
   UNIVERSAL_SCENARIOS,
+  scenarioById,
   type ScenarioDef,
   type ScenarioScope,
 } from '../../data/scenarios';
 import { CHARACTER_WORKPLACES, getLocationById } from '../../data/cityLocations';
 import { computeGameTime } from './gameTime';
+import { estimateTravelTimeMs } from './movement';
+import { distance } from '../util/geometry';
 import {
   MAX_UNIVERSAL_SCENARIOS,
+  SCENARIO_ARRIVAL_RADIUS,
   SCENARIO_COOLDOWN_MS,
   SCENARIO_DEFAULT_DURATION_MS,
   SCENARIO_EVAL_INTERVAL,
   SCENARIO_FIRST_DELAY_MS,
+  SCENARIO_GATHER_BUFFER_MS,
+  SCENARIO_GATHER_MAX_MS,
   SCENARIO_INTERVAL_MAX_MS,
   SCENARIO_INTERVAL_MIN_MS,
   SCENARIO_RETRY_MS,
@@ -63,10 +69,20 @@ export function tickScenarios(game: Game, now: number): void {
   // per-scope cooldown so the same place/scope doesn't immediately re-fire.
   const stillActive: SerializedActiveScenario[] = [];
   for (const sc of world.activeScenarios ?? []) {
+    // Manual scenarios are owned by the injector (startCustomScenario / clearScenario
+    // and the global-scenario expiry); the automatic manager just leaves them be.
+    if (sc.defId === 'manual') {
+      stillActive.push(sc);
+      continue;
+    }
     if (sc.endTime <= now) {
       clearScenarioParticipants(game, sc.id);
       cooldowns[scopeKeyFor(sc.scope, sc.locationId)] = now + SCENARIO_COOLDOWN_MS;
     } else {
+      // While gathering, promote to active once everyone has arrived at the spot
+      // (or the gather deadline passes), so the content window runs from the real
+      // start rather than being eaten by travel time.
+      maybePromoteScenario(game, now, sc);
       stillActive.push(sc);
     }
   }
@@ -159,11 +175,40 @@ function startScenario(game: Game, now: number, def: ScenarioDef): SerializedAct
   const id = `${def.id}-${now}`;
   const loc = def.locationId ? getLocationById(def.locationId) : undefined;
   const participantNames = participants.map((a) => nameOf(game, a) ?? 'Someone');
+  const duration = def.durationMs ?? SCENARIO_DEFAULT_DURATION_MS;
+
+  // Local scenarios have a fixed spot (the workplace standing tile). Compute how
+  // long the slowest participant needs to walk there and run a "gathering" phase
+  // first, so the scenario's content only begins once everyone has arrived.
+  // Universal scenarios have no spot — agents react wherever they are, so they
+  // start active immediately.
+  const gatherPoint = def.scope === 'local' && loc ? { x: loc.x, y: loc.y } : undefined;
+  let contentStartTime = now;
+  let phase: 'gathering' | 'active' = 'active';
+  if (gatherPoint) {
+    let maxEta = 0;
+    for (const a of participants) {
+      const p = game.world.players.get(a.playerId);
+      if (!p) continue;
+      maxEta = Math.max(maxEta, estimateTravelTimeMs(game, now, p, gatherPoint));
+    }
+    const gatherFor = Math.min(maxEta + SCENARIO_GATHER_BUFFER_MS, SCENARIO_GATHER_MAX_MS);
+    contentStartTime = now + gatherFor;
+    phase = 'gathering';
+  }
 
   for (const a of participants) {
     a.scenarioInstruction = def.instruction;
     a.scenarioName = def.name;
     a.scenarioId = id;
+    a.scenarioTopics = def.topics;
+    a.scenarioGoal = def.completionGoal;
+    // Dispatch local-scenario participants to the gathering spot. Agent.tick walks
+    // them there deterministically until they arrive (see the gather branch).
+    if (gatherPoint) {
+      a.scenarioTarget = gatherPoint;
+      a.scenarioArrivalTime = contentStartTime;
+    }
     // Force re-extraction of the scenario-relevant profile for this scenario.
     delete a.scenarioProfile;
     delete a.scenarioProfileFor;
@@ -185,11 +230,48 @@ function startScenario(game: Game, now: number, def: ScenarioDef): SerializedAct
     relationships: def.relationships,
     context: `${def.context} Present: ${participantNames.join(', ')}.`,
     goals: def.goals,
+    topics: def.topics,
+    completionGoal: def.completionGoal,
+    topicsDone: def.topics.map(() => false),
+    goalMet: false,
     participantIds: participants.map((a) => a.playerId) as GameId<'players'>[],
     participantNames,
     startTime: now,
-    endTime: now + (def.durationMs ?? SCENARIO_DEFAULT_DURATION_MS),
+    contentStartTime,
+    phase,
+    endTime: contentStartTime + duration,
   };
+}
+
+// Promote a gathering local scenario to active once every participant has reached
+// the spot (or the gather deadline passes). Resets the content window to start now
+// and releases the gather targets so the normal conversation logic forms the group.
+function maybePromoteScenario(game: Game, now: number, sc: SerializedActiveScenario): void {
+  if (sc.phase !== 'gathering') return;
+  const loc = sc.locationId ? getLocationById(sc.locationId) : undefined;
+  const gatherPoint = loc ? { x: loc.x, y: loc.y } : undefined;
+  let allArrived = true;
+  if (gatherPoint) {
+    for (const pid of sc.participantIds) {
+      const player = game.world.players.get(parseGameId('players', pid));
+      if (!player) continue; // Left the world — don't block the scenario on them.
+      if (distance(player.position, gatherPoint) >= SCENARIO_ARRIVAL_RADIUS) {
+        allArrived = false;
+        break;
+      }
+    }
+  }
+  const deadline = sc.contentStartTime ?? sc.startTime;
+  if (!allArrived && now < deadline) return;
+
+  sc.phase = 'active';
+  sc.contentStartTime = now;
+  sc.endTime = now + (scenarioById(sc.defId)?.durationMs ?? SCENARIO_DEFAULT_DURATION_MS);
+  for (const agent of game.world.agents.values()) {
+    if (agent.scenarioId !== sc.id) continue;
+    delete agent.scenarioTarget;
+    delete agent.scenarioArrivalTime;
+  }
 }
 
 function clearScenarioParticipants(game: Game, scenarioId: string): void {
@@ -198,6 +280,10 @@ function clearScenarioParticipants(game: Game, scenarioId: string): void {
     delete agent.scenarioInstruction;
     delete agent.scenarioName;
     delete agent.scenarioId;
+    delete agent.scenarioTopics;
+    delete agent.scenarioGoal;
+    delete agent.scenarioTarget;
+    delete agent.scenarioArrivalTime;
     delete agent.scenarioProfile;
     delete agent.scenarioProfileFor;
   }

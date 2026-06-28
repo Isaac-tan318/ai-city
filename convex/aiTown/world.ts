@@ -32,9 +32,26 @@ export const serializedActiveScenario = v.object({
   relationships: v.string(),
   context: v.string(),
   goals: v.string(),
+  // Concrete discussion beats and the completion goal for the scenario's
+  // conversations (see data/scenarios.ts). Optional for backward-compat with
+  // worlds serialized before these fields existed.
+  topics: v.optional(v.array(v.string())),
+  completionGoal: v.optional(v.string()),
+  // Live completion tracking, surfaced in the UI. `topicsDone[i]` flips true once
+  // the dialogue goal-judge sees topic `i` substantively covered; `goalMet` flips
+  // true once the overall goal is judged achieved.
+  topicsDone: v.optional(v.array(v.boolean())),
+  goalMet: v.optional(v.boolean()),
   participantIds: v.array(playerId),
   participantNames: v.array(v.string()),
   startTime: v.number(),
+  // When the scenario's content begins. For local scenarios this is after the
+  // gathering phase (participants travel to the spot first); for universal ones
+  // it equals startTime. Optional/defaulted for backward-compat.
+  contentStartTime: v.optional(v.number()),
+  // 'gathering' while participants are still travelling to a local scenario's
+  // location; 'active' once they've arrived (or universal scenarios, immediately).
+  phase: v.optional(v.union(v.literal('gathering'), v.literal('active'))),
   endTime: v.number(),
 });
 export type SerializedActiveScenario = Infer<typeof serializedActiveScenario>;

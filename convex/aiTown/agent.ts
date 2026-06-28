@@ -26,12 +26,13 @@ import { FunctionArgs } from 'convex/server';
 import { MutationCtx, internalMutation, internalQuery } from '../_generated/server';
 import { distance, pointsEqual } from '../util/geometry';
 import { internal } from '../_generated/api';
-import { movePlayer, stopPlayer, pickParkWaypoint } from './movement';
+import { movePlayer, stopPlayer } from './movement';
 import { insertInput } from './insertInput';
 import { point, Point } from '../util/types';
 import { computeGameTime, CYCLE_MS, isWeekday } from './gameTime';
 import {
   ARRIVAL_RADIUS,
+  SCENARIO_ARRIVAL_RADIUS,
   SCHEDULE_DISRUPTION_MINUTES,
   SCHEDULE_CHAT_RADIUS,
   WORK_LEASH_RADIUS,
@@ -42,6 +43,9 @@ import {
   SICK_MAX_PROBABILITY,
   SICK_DURATION_DAYS,
   CONTAGION_PROBABILITY,
+  SCENARIO_CONVO_MIN_MESSAGES,
+  SCENARIO_CONVO_MAX_MESSAGES,
+  SCENARIO_MAX_CONVO_DURATION,
 } from '../constants';
 import { getLocationById, homeFor, workLeashAnchor } from '../../data/cityLocations';
 import { pickContextualEvent, buildSickSchedule } from '../../data/routines';
@@ -109,6 +113,11 @@ export class Agent {
   // (convex/aiTown/scenarios.ts); distinguishes automatic participants from the
   // manual global scenario so the two systems don't clobber each other.
   scenarioId?: string;
+  // Concrete discussion beats and the completion goal for the current scenario's
+  // conversations (copied from the ScenarioDef). Injected into the conversation
+  // prompt and used by the dialogue goal-judge; cleared when the scenario ends.
+  scenarioTopics?: string[];
+  scenarioGoal?: string;
 
   constructor(serialized: SerializedAgent) {
     const {
@@ -135,6 +144,8 @@ export class Agent {
       scenarioProfile,
       scenarioProfileFor,
       scenarioId,
+      scenarioTopics,
+      scenarioGoal,
     } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
@@ -168,16 +179,14 @@ export class Agent {
     this.scenarioProfile = scenarioProfile;
     this.scenarioProfileFor = scenarioProfileFor;
     this.scenarioId = scenarioId;
+    this.scenarioTopics = scenarioTopics;
+    this.scenarioGoal = scenarioGoal;
   }
 
   tick(game: Game, now: number) {
     const player = game.world.players.get(this.playerId);
     if (!player) {
       throw new Error(`Invalid player ID ${this.playerId}`);
-    }
-    if (!this.scenarioTarget && !this.scenarioArrivalTime && game.world.scenarioTarget) {
-      this.scenarioTarget = game.world.scenarioTarget;
-      this.scenarioName = game.world.scenarioName;
     }
     // Auto-expire a custom scenario one in-game day after it was injected so
     // agents stop re-enacting it in every conversation/plan. The episodic
@@ -203,6 +212,9 @@ export class Agent {
           delete agent.scenarioProfile;
           delete agent.scenarioProfileFor;
         }
+        // Drop the manual scenario's panel entry too, now that it has expired.
+        const remaining = (game.world.activeScenarios ?? []).filter((s) => s.defId !== 'manual');
+        game.world.activeScenarios = remaining.length > 0 ? remaining : undefined;
       }
     }
     if (this.scenarioInstruction === undefined && game.world.scenarioInstruction) {
@@ -229,52 +241,6 @@ export class Agent {
         scenarioInstruction: this.scenarioInstruction,
       });
     }
-    const PARK_RADIUS = 5;
-    if (this.scenarioTarget) {
-      const center = this.scenarioTarget;
-      // Preempt any active conversation so the agent can head to the park.
-      const activeConversation = game.world.playerConversation(player);
-      if (activeConversation) {
-        activeConversation.leave(game, now, player);
-        delete this.toRemember;
-      }
-      delete player.activity;
-
-      const distToCenter = distance(player.position, center);
-
-      if (distToCenter > PARK_RADIUS) {
-        // Approaching the park — ignore player collisions so agents don't jam.
-        if (!player.pathfinding || !pointsEqual(player.pathfinding.destination, center)) {
-          movePlayer(game, now, player, center, false, false);
-        }
-        return;
-      }
-
-      // Inside the meeting zone.
-      if (!this.scenarioArrivalTime) {
-        this.scenarioArrivalTime = now;
-        // Cancel the approach pathfinding so the wander logic takes over.
-        if (player.pathfinding) stopPlayer(player);
-      }
-
-      if (now - this.scenarioArrivalTime >= 30_000) {
-        // 30 s is up — free the agent. Keep scenarioArrivalTime as a done-marker
-        // so the propagation check above won't re-enlist them this session.
-        delete this.scenarioTarget;
-        delete this.scenarioName;
-        if (player.pathfinding) stopPlayer(player);
-        // Fall through to normal agent behaviour.
-      } else {
-        // Wander within the zone. ignorePlayers=true so agents aren't deadlocked
-        // by the pile-up from the approach phase; they spread out naturally as
-        // each picks a different random waypoint each stop.
-        if (!player.pathfinding) {
-          const waypoint = pickParkWaypoint(center, PARK_RADIUS, game.worldMap);
-          if (waypoint) movePlayer(game, now, player, waypoint, false, true);
-        }
-        return;
-      }
-    }
     if (this.inProgressOperation) {
       if (now < this.inProgressOperation.started + ACTION_TIMEOUT) {
         // Wait on the operation to finish.
@@ -289,6 +255,32 @@ export class Agent {
     // agents (e.g. gathered at the park or hawker centre) into one 3–5 person
     // chat instead of several disconnected pairs.
     if (this.maybeJoinNearbyConversation(game, now, player)) {
+      return;
+    }
+    // Scenario gathering: while a local scenario is in its gathering phase the
+    // manager sets `scenarioTarget` to the spot. Walk there deterministically so
+    // we're guaranteed to arrive before the scenario's content begins, then HOLD
+    // at the spot. We don't fall through to the schedule here — otherwise a
+    // schedule step pointing elsewhere (e.g. a lunch block) would tug us away and
+    // we'd oscillate around the gather point. The manager clears `scenarioTarget`
+    // and starts the content window once everyone has gathered, after which the
+    // normal opportunistic-conversation logic forms the group.
+    if (this.scenarioTarget && !game.world.playerConversation(player)) {
+      const arrived = distance(player.position, this.scenarioTarget) < SCENARIO_ARRIVAL_RADIUS;
+      if (!arrived) {
+        if (
+          !player.pathfinding ||
+          !pointsEqual(player.pathfinding.destination, this.scenarioTarget)
+        ) {
+          try {
+            movePlayer(game, now, player, this.scenarioTarget);
+          } catch (err) {
+            console.warn(`Scenario gather move failed for ${player.id}: ${(err as Error).message}`);
+          }
+        }
+      } else if (player.pathfinding) {
+        stopPlayer(player);
+      }
       return;
     }
     // Schedule + plan execution: give the agent a real daily plan and walk them
@@ -353,7 +345,22 @@ export class Agent {
         // Accept a conversation with another agent with some probability and with
         // a human unconditionally.
         const inviter = anchorPlayer;
-        if (!inviter || inviter.human || Math.random() < INVITE_ACCEPT_PROBABILITY) {
+        // On shift, decline a (non-human) invite that would pull us away from our
+        // workplace; a human can always reach us.
+        const shiftStep =
+          this.schedule && this.currentStepIndex !== undefined
+            ? this.schedule[this.currentStepIndex]
+            : undefined;
+        const onShiftAnchor = workLeashAnchor(player.name, shiftStep);
+        const pullsOffPost =
+          !!onShiftAnchor &&
+          !!inviter &&
+          !inviter.human &&
+          distance(onShiftAnchor, inviter.position) >= WORK_LEASH_RADIUS;
+        if (pullsOffPost) {
+          console.log(`Agent ${player.id} declining off-post invite to ${conversation.id}`);
+          conversation.rejectInvite(game, now, player);
+        } else if (!inviter || inviter.human || Math.random() < INVITE_ACCEPT_PROBABILITY) {
           console.log(`Agent ${player.id} accepting invite to ${conversation.id}`);
           conversation.acceptInvite(game, player);
           // Stop moving so we can start walking towards the group.
@@ -431,28 +438,45 @@ export class Agent {
           }
         }
         // See if the conversation has been going on too long and decide to leave.
-        // Groups get a slightly higher message budget so everyone gets a few
-        // turns, but it's hard-capped so a big huddle can't run forever.
         const participantCount = conversation.participants.size;
         const isGroup = participantCount > 2;
-        const maxMessages = isGroup
-          ? Math.min(
-              MAX_CONVERSATION_MESSAGES + 2 * (participantCount - 2),
-              MAX_GROUP_CONVERSATION_MESSAGES,
-            )
-          : MAX_CONVERSATION_MESSAGES;
-        const tooLongDeadline = started + MAX_CONVERSATION_DURATION;
-        // In a group, let people drift away naturally before the hard caps: once
-        // enough has been said and this agent has had a turn, they may peel off so
-        // the huddle thins out one person at a time instead of all staying glued
-        // until the budget runs out. The 2-person path keeps its original feel.
         const justSpokeNow = conversation.lastMessage.author === player.id;
-        const wantsToDriftOff =
-          isGroup &&
-          justSpokeNow &&
-          conversation.numMessages >= GROUP_LEAVE_MIN_MESSAGES &&
-          Math.random() < GROUP_LEAVE_PROBABILITY;
-        if (tooLongDeadline < now || conversation.numMessages > maxMessages || wantsToDriftOff) {
+        let shouldLeave: boolean;
+        if (this.isInScenarioConversation(game, conversation)) {
+          // Scenario conversation: ignore the random drift-off and keep going until
+          // the goal-judge marks the goal met (after a per-scenario minimum) or a
+          // hard message/time cap is hit, so the scenario's core content gets covered.
+          const minMsgs = SCENARIO_CONVO_MIN_MESSAGES + (isGroup ? 2 * (participantCount - 2) : 0);
+          const goalDone = !!conversation.scenarioGoalMet && conversation.numMessages >= minMsgs;
+          shouldLeave =
+            started + SCENARIO_MAX_CONVO_DURATION < now ||
+            conversation.numMessages > SCENARIO_CONVO_MAX_MESSAGES ||
+            goalDone;
+        } else {
+          // Ordinary chat. Groups get a slightly higher message budget so everyone
+          // gets a few turns, but it's hard-capped so a big huddle can't run forever.
+          const maxMessages = isGroup
+            ? Math.min(
+                MAX_CONVERSATION_MESSAGES + 2 * (participantCount - 2),
+                MAX_GROUP_CONVERSATION_MESSAGES,
+              )
+            : MAX_CONVERSATION_MESSAGES;
+          const tooLongDeadline = started + MAX_CONVERSATION_DURATION;
+          // In a group, let people drift away naturally before the hard caps: once
+          // enough has been said and this agent has had a turn, they may peel off so
+          // the huddle thins out one person at a time instead of all staying glued
+          // until the budget runs out. The 2-person path keeps its original feel.
+          const wantsToDriftOff =
+            isGroup &&
+            justSpokeNow &&
+            conversation.numMessages >= GROUP_LEAVE_MIN_MESSAGES &&
+            Math.random() < GROUP_LEAVE_PROBABILITY;
+          shouldLeave =
+            tooLongDeadline < now ||
+            conversation.numMessages > maxMessages ||
+            wantsToDriftOff;
+        }
+        if (shouldLeave) {
           console.log(`${player.id} leaving conversation ${conversation.id}.`);
           const messageUuid = crypto.randomUUID();
           conversation.setIsTyping(now, player, messageUuid);
@@ -516,6 +540,24 @@ export class Agent {
     }
   }
 
+  // True if this agent is enlisted in an automatic scenario and at least one OTHER
+  // currently-participating member of `conversation` shares the same scenario
+  // instance — i.e. this conversation is the scenario's gathering, which gets the
+  // goal-driven termination rules instead of the ordinary drift-off/caps.
+  isInScenarioConversation(game: Game, conversation: Conversation): boolean {
+    if (!this.scenarioId) return false;
+    for (const [pid, member] of conversation.participants.entries()) {
+      if (pid === this.playerId) continue;
+      if (member.status.kind !== 'participating') continue;
+      for (const other of game.world.agents.values()) {
+        if (other.playerId === pid && other.scenarioId === this.scenarioId) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   // If we're free and a multi-party conversation is happening nearby with room
   // under the participant cap, join it (walking over). Returns true if we joined.
   maybeJoinNearbyConversation(game: Game, now: number, player: import('./player').Player): boolean {
@@ -524,6 +566,14 @@ export class Agent {
     // Respect the post-conversation and invite cooldowns so we don't ping-pong.
     if (this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN) return false;
     if (this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN) return false;
+
+    // On shift: only join conversations near our own workplace, so we don't trek
+    // off to a chat and abandon our post.
+    const step =
+      this.schedule && this.currentStepIndex !== undefined
+        ? this.schedule[this.currentStepIndex]
+        : undefined;
+    const leashAnchor = workLeashAnchor(player.name, step);
 
     let best: Conversation | undefined;
     let bestDistance = Infinity;
@@ -534,14 +584,26 @@ export class Agent {
         (m) => m.status.kind === 'participating',
       );
       // Only join a conversation that's genuinely underway and not already
-      // winding down.
+      // winding down. Scenario gatherings run longer, so allow joining one up to
+      // its higher cap (a late participant should still be able to slot in).
       if (participating.length < 2) continue;
-      if (conversation.numMessages > MAX_CONVERSATION_MESSAGES) continue;
+      const joinMsgCap = this.isInScenarioConversation(game, conversation)
+        ? SCENARIO_CONVO_MAX_MESSAGES
+        : MAX_CONVERSATION_MESSAGES;
+      if (conversation.numMessages > joinMsgCap) continue;
       let nearest = Infinity;
+      let nearestToWork = Infinity;
       for (const m of participating) {
         const other = game.world.players.get(m.playerId);
-        if (other) nearest = Math.min(nearest, distance(player.position, other.position));
+        if (other) {
+          nearest = Math.min(nearest, distance(player.position, other.position));
+          if (leashAnchor) {
+            nearestToWork = Math.min(nearestToWork, distance(leashAnchor, other.position));
+          }
+        }
       }
+      // While on shift, skip conversations happening away from the workplace.
+      if (leashAnchor && nearestToWork >= WORK_LEASH_RADIUS) continue;
       if (nearest < GROUP_JOIN_RADIUS && nearest < bestDistance) {
         best = conversation;
         bestDistance = nearest;
@@ -862,6 +924,8 @@ export class Agent {
       scenarioProfile: this.scenarioProfile,
       scenarioProfileFor: this.scenarioProfileFor,
       scenarioId: this.scenarioId,
+      scenarioTopics: this.scenarioTopics,
+      scenarioGoal: this.scenarioGoal,
     };
   }
 
@@ -940,6 +1004,8 @@ export const serializedAgent = {
   scenarioProfile: v.optional(v.string()),
   scenarioProfileFor: v.optional(v.string()),
   scenarioId: v.optional(v.string()),
+  scenarioTopics: v.optional(v.array(v.string())),
+  scenarioGoal: v.optional(v.string()),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 
@@ -982,6 +1048,10 @@ export const agentSendMessage = internalMutation({
     // The participant the dialogue orchestrator wants to speak next (omitted when
     // leaving or when the floor should be open, e.g. only humans remain).
     nextSpeaker: v.optional(playerId),
+    // For scenario conversations: whether the goal-judge deemed the goal met, and
+    // the 0-based indices of scenario topics it judged substantively covered.
+    goalMet: v.optional(v.boolean()),
+    coveredTopics: v.optional(v.array(v.number())),
   },
   handler: async (ctx, args) => {
     await ctx.db.insert('messages', {
@@ -998,6 +1068,8 @@ export const agentSendMessage = internalMutation({
       leaveConversation: args.leaveConversation,
       operationId: args.operationId,
       nextSpeaker: args.nextSpeaker,
+      goalMet: args.goalMet,
+      coveredTopics: args.coveredTopics,
     });
   },
 });

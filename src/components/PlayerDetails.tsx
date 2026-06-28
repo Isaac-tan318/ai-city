@@ -291,9 +291,6 @@ export default function PlayerDetails({
                       {scenario.title}
                     </span>
                   </div>
-                  <div className="scenario-clamp text-xs leading-snug text-white/55">
-                    {isCustom ? 'Write your own instructions below.' : scenario.text}
-                  </div>
                 </button>
               );
             })}

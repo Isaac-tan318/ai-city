@@ -35,6 +35,14 @@ export type ScenarioDef = {
   relationships: string;
   context: string;
   goals: string;
+  // --- Dialogue steering ---
+  // Concrete discussion beats injected into participants' conversation prompts so
+  // they work through real content instead of repeating themselves.
+  topics: string[];
+  // One sentence describing when the conversation has accomplished its purpose.
+  // The dialogue goal-judge (decideNextSpeaker) uses this to decide the chat may
+  // wrap up; otherwise it runs to the max-turn cap.
+  completionGoal: string;
 };
 
 export const UNIVERSAL_SCENARIOS: ScenarioDef[] = [
@@ -56,6 +64,15 @@ export const UNIVERSAL_SCENARIOS: ScenarioDef[] = [
       'It is pouring right now and nobody planned for it. Shelter is limited and everyone is a little damp and stuck in place for a while.',
     goals:
       'Find or share shelter, offer an umbrella to someone who has none, complain good-naturedly about the weather, and pass the time with whoever is stuck alongside you.',
+    topics: [
+      'where the nearest dry shelter is and whether there is room',
+      'sharing an umbrella or a dry spot with someone who has none',
+      'how long this storm is likely to last',
+      'what plans the rain has just ruined or delayed',
+      'how everyone will get home without getting soaked',
+    ],
+    completionGoal:
+      'everyone present has sorted out shelter or an umbrella and agreed a plan for once the rain eases',
   },
   {
     id: 'national_day',
@@ -75,6 +92,15 @@ export const UNIVERSAL_SCENARIOS: ScenarioDef[] = [
       'It is National Day. People are deciding where and with whom to watch the fireworks and trading memories of past parades.',
     goals:
       'Share your celebration plans, invite others to watch the fireworks together, reminisce about past National Days, and soak up the patriotic mood.',
+    topics: [
+      'the best spot to catch the flypast',
+      'plans for watching the evening fireworks over the bay',
+      'favourite memories from past National Day parades',
+      'food and where to gather beforehand',
+      'who is coming along and how to meet up',
+    ],
+    completionGoal:
+      'the group has agreed where and with whom to watch the fireworks or flypast together',
   },
   {
     id: 'mrt_breakdown',
@@ -94,6 +120,15 @@ export const UNIVERSAL_SCENARIOS: ScenarioDef[] = [
       'The trains are down right now. People are late, frustrated, and bargaining for alternative transport.',
     goals:
       'Vent about the breakdown, share the fastest workaround, offer or angle for a shared ride, and help each other actually get moving.',
+    topics: [
+      'which line is down and how bad the jam is',
+      'the fastest alternative route or shuttle',
+      'sharing a cab to split the fare',
+      'who is running late and what for',
+      'whether to wait it out or set off now',
+    ],
+    completionGoal:
+      'each person has a concrete way to get where they need to be (a shared cab arranged or a route chosen)',
   },
   {
     id: 'haze',
@@ -113,6 +148,15 @@ export const UNIVERSAL_SCENARIOS: ScenarioDef[] = [
       'The haze is bad right now. People are masked up, indoors where possible, and worried about the vulnerable.',
     goals:
       'Compare PSI readings, share masks or advice, check on anyone who might be at risk, and rethink any outdoor plans.',
+    topics: [
+      'the current PSI reading and whether it is still climbing',
+      'masks — who has spares and where to get more',
+      'staying indoors and running air purifiers',
+      'checking on the elderly or anyone with breathing trouble',
+      'which outdoor plans to cancel or move inside',
+    ],
+    completionGoal:
+      'the group has shared masks or advice and agreed how to look after anyone vulnerable and adjust their outdoor plans',
   },
   {
     id: 'cny_eve',
@@ -132,6 +176,15 @@ export const UNIVERSAL_SCENARIOS: ScenarioDef[] = [
       'It is the eve of Lunar New Year. People are heading to or planning reunion dinners and sorting out who is visiting whom.',
     goals:
       'Exchange new-year greetings, compare reunion-dinner and visiting plans, talk ang pao, and share a little family nostalgia.',
+    topics: [
+      'reunion-dinner menu and who is hosting',
+      'getting the ang pao ready',
+      'the visiting schedule — who visits whom and when',
+      'exchanging auspicious new-year greetings',
+      'a little nostalgia about past family gatherings',
+    ],
+    completionGoal:
+      'the group has exchanged greetings and compared or coordinated their reunion-dinner and visiting plans',
   },
 ];
 
@@ -156,6 +209,15 @@ export const LOCAL_SCENARIOS: ScenarioDef[] = [
       'It is deadline day. The proposal is nearly done but not quite, and there is no time to spare.',
     goals:
       'Clara should steer the framing and keep morale up; Lukas should nail down the experimental results and methods; Isabel should pressure-test the ideas and catch flaws — together get the proposal submitted in time.',
+    topics: [
+      'whether the latest experimental results actually hold up',
+      'how to frame the proposal’s central claim',
+      'the budget numbers and justification',
+      'who writes which section of what remains',
+      'the submission logistics and the midnight deadline',
+    ],
+    completionGoal:
+      'the team has divided up the remaining sections and agreed the proposal can be finished and submitted in time',
   },
   {
     id: 'astar_demo_day',
@@ -176,6 +238,15 @@ export const LOCAL_SCENARIOS: ScenarioDef[] = [
       'The visitors arrive any moment. The lab is tidied, the slides are ready, and everyone is a little nervous.',
     goals:
       'Clara should host the tour and tie the story together; Lukas and Isabel should each explain their part clearly and field tough questions without getting lost in jargon.',
+    topics: [
+      'who explains which part of the demo',
+      'the single key message to leave the visitors with',
+      'how to handle tough or sceptical questions',
+      'the running order of the tour',
+      'last-minute setup and tidying',
+    ],
+    completionGoal:
+      'the team has agreed who presents what and is ready to receive the visitors',
   },
   // --- Hawker Centre / kopitiam ---
   {
@@ -197,6 +268,15 @@ export const LOCAL_SCENARIOS: ScenarioDef[] = [
       'The queue is out the door right now and tickets are stacking up. There’s no time to stand still.',
     goals:
       'Sarah should fire out orders and command the floor; Rahman should keep the drinks flowing and soothe impatient customers; together clear the backlog and keep the regulars happy.',
+    topics: [
+      'clearing the backlog of tickets',
+      'splitting the work — who handles food vs drinks',
+      'calling out and keeping track of orders',
+      'clearing and turning over tables fast',
+      'keeping the regulars and the queue happy',
+    ],
+    completionGoal:
+      'they have split the work to clear the backlog and have the lunch rush under control',
   },
   {
     id: 'hawker_inspection',
@@ -217,6 +297,15 @@ export const LOCAL_SCENARIOS: ScenarioDef[] = [
       'The inspector is here right now, a few stalls away and getting closer.',
     goals:
       'Sarah should whip her stall into shape and keep her composure; Rahman should pass the word and help the others; both should aim to come through the inspection clean.',
+    topics: [
+      'what the inspector is most likely to check',
+      'the cleaning and tidying to do right now',
+      'passing the warning down the row of stalls',
+      'keeping calm and composed',
+      'who deals with the inspector when they arrive',
+    ],
+    completionGoal:
+      'their stalls are tidied and they have coordinated to get through the inspection cleanly',
   },
   // --- Café (shophouses) ---
   {
@@ -238,6 +327,15 @@ export const LOCAL_SCENARIOS: ScenarioDef[] = [
       'The throwdown is underway right now, milk jugs at the ready and a crowd watching each pour.',
     goals:
       'Cedric should run the throwdown, hype every pour, and rope newcomers in; everyone else should pick favourites, trash-talk gently, and have a go.',
+    topics: [
+      'the running order — who pours next',
+      'judging the rosettas and tulips',
+      'hyping up the crowd',
+      'roping newcomers into having a go',
+      'who is winning so far',
+    ],
+    completionGoal:
+      'they have run a few rounds, judged the pours, and crowned a winner (or agreed to keep it going)',
   },
   // --- Taxi stand / MBS ---
   {
@@ -259,6 +357,15 @@ export const LOCAL_SCENARIOS: ScenarioDef[] = [
       'The crowd is surging right now and the queue is barely holding together.',
     goals:
       'James should work the queue, snag good fares, and help confused tourists; everyone should keep the line orderly and the mood from boiling over.',
+    topics: [
+      'managing the taxi queue so it keeps moving',
+      'surge pricing and which fares are worth taking',
+      'the best routes out of the bay',
+      'helping confused tourists and delegates',
+      'keeping tempers from boiling over',
+    ],
+    completionGoal:
+      'they have the queue moving in an orderly way and have sorted out fares and directions for the crowd',
   },
   // --- Temasek Poly ---
   {
@@ -280,6 +387,15 @@ export const LOCAL_SCENARIOS: ScenarioDef[] = [
       'The deadline is tonight and nothing is quite finished yet.',
     goals:
       'Xavier should rally his team, debug the worst fires, and keep spirits up with memes; everyone should get their part in and submit before the portal closes.',
+    topics: [
+      'which parts of the project are still unfinished',
+      'debugging the worst bugs first',
+      'who owns which remaining piece',
+      'fuelling up on caffeine and snacks',
+      'submitting before the portal closes',
+    ],
+    completionGoal:
+      'they have split the remaining work and have a plan to ship the project before the deadline',
   },
 ];
 

@@ -9,6 +9,7 @@ import {
   decideNextSpeaker,
   leaveConversationMessage,
   startConversationMessage,
+  summarizeGoalMessage,
 } from '../agent/conversation';
 import { assertNever } from '../util/assertNever';
 import { serializedAgent, ScheduleStep, scheduleStep } from './agent';
@@ -36,14 +37,16 @@ export const agentRememberConversation = internalAction({
     operationId: v.string(),
   },
   handler: async (ctx, args) => {
+    let affinityDeltas: { playerId: string; delta: number }[] = [];
     try {
-      await rememberConversation(
+      const result = await rememberConversation(
         ctx,
         args.worldId,
         args.agentId as GameId<'agents'>,
         args.playerId as GameId<'players'>,
         args.conversationId as GameId<'conversations'>,
       );
+      affinityDeltas = result?.affinityDeltas ?? [];
     } catch (err) {
       // CRITICAL: never let a failed remember leave the agent stuck. If the
       // conversation can't be loaded (e.g. an abandoned invite that was never
@@ -58,6 +61,17 @@ export const agentRememberConversation = internalAction({
       );
     }
     await sleep(Math.random() * 1000);
+    // Apply any affinity shifts the summary judged, then free the agent.
+    if (affinityDeltas.length > 0) {
+      await ctx.runMutation(api.aiTown.main.sendInput, {
+        worldId: args.worldId,
+        name: 'agentApplyAffinity',
+        args: {
+          agentId: args.agentId,
+          deltas: affinityDeltas,
+        },
+      });
+    }
     await ctx.runMutation(api.aiTown.main.sendInput, {
       worldId: args.worldId,
       name: 'finishRememberConversation',
@@ -169,7 +183,12 @@ export const agentGenerateMessage = internalAction({
     agentId,
     conversationId,
     operationId: v.string(),
-    type: v.union(v.literal('start'), v.literal('continue'), v.literal('leave')),
+    type: v.union(
+      v.literal('start'),
+      v.literal('continue'),
+      v.literal('leave'),
+      v.literal('summary'),
+    ),
     messageUuid: v.string(),
     // Engine wall-clock timestamp from the tick that triggered this operation.
     // Passed to the prompt builder so the time the LLM is told matches the game
@@ -188,6 +207,9 @@ export const agentGenerateMessage = internalAction({
       case 'leave':
         completionFn = leaveConversationMessage;
         break;
+      case 'summary':
+        completionFn = summarizeGoalMessage;
+        break;
       default:
         assertNever(args.type);
     }
@@ -203,10 +225,12 @@ export const agentGenerateMessage = internalAction({
     // should hold the floor next so a group chat flows instead of everyone (or
     // no one) talking. undefined = open floor (e.g. only humans remain). For a
     // scenario conversation it also reports whether the scenario's goal is met.
+    // No next-speaker / goal re-judging for the terminal turns (leaving, or the
+    // one-off goal summary that comes after the goal is already met).
     let nextSpeaker: GameId<'players'> | undefined;
     let goalMet = false;
     let coveredTopics: number[] = [];
-    if (args.type !== 'leave') {
+    if (args.type !== 'leave' && args.type !== 'summary') {
       const decision = await decideNextSpeaker(
         ctx,
         args.worldId,
@@ -226,6 +250,7 @@ export const agentGenerateMessage = internalAction({
       text,
       messageUuid: args.messageUuid,
       leaveConversation: args.type === 'leave',
+      isGoalSummary: args.type === 'summary',
       operationId: args.operationId,
       nextSpeaker,
       goalMet,

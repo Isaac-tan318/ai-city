@@ -118,6 +118,16 @@ export class Agent {
   // prompt and used by the dialogue goal-judge; cleared when the scenario ends.
   scenarioTopics?: string[];
   scenarioGoal?: string;
+  // --- Relationships ---
+  // Mutable, directional affinity this agent feels toward other players, keyed by
+  // the other player's id (0–100; see convex/aiTown/affinity.ts). Lazily created:
+  // an entry only exists once an interaction has moved it off the default.
+  affinities?: Record<string, number>;
+  // Transient marker of the most recent affinity shift, so the map can flash a
+  // 💗/💔 above this character right after a conversation. `at` is the engine time
+  // it happened; `net` is the summed delta (>0 warmed, <0 cooled). The frontend
+  // only shows it for AFFINITY_INDICATOR_MS, so it doesn't need clearing.
+  lastAffinityChange?: { at: number; net: number };
 
   constructor(serialized: SerializedAgent) {
     const {
@@ -146,6 +156,8 @@ export class Agent {
       scenarioId,
       scenarioTopics,
       scenarioGoal,
+      affinities,
+      lastAffinityChange,
     } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
@@ -181,6 +193,8 @@ export class Agent {
     this.scenarioId = scenarioId;
     this.scenarioTopics = scenarioTopics;
     this.scenarioGoal = scenarioGoal;
+    this.affinities = affinities;
+    this.lastAffinityChange = lastAffinityChange;
   }
 
   tick(game: Game, now: number) {
@@ -436,6 +450,45 @@ export class Agent {
             // Wait on someone else to break the ice up to the awkward deadline.
             return;
           }
+        }
+        // Scenario goal just achieved: before anyone wraps up, the designated
+        // speaker posts a single message summarising HOW the group achieved it.
+        // Skipped once the hard caps are hit so a failed summary can't deadlock the
+        // wrap-up — the leave logic below still fires.
+        const overScenarioCap =
+          started + SCENARIO_MAX_CONVO_DURATION < now ||
+          conversation.numMessages > SCENARIO_CONVO_MAX_MESSAGES;
+        if (
+          conversation.scenarioGoalMet &&
+          !conversation.goalSummaryPosted &&
+          !overScenarioCap &&
+          this.isInScenarioConversation(game, conversation)
+        ) {
+          const justSpoke = conversation.lastMessage.author === player.id;
+          const stalled = now > conversation.lastMessage.timestamp + AWKWARD_CONVERSATION_TIMEOUT;
+          const myTurn = conversation.nextSpeaker
+            ? conversation.nextSpeaker === player.id || (stalled && !justSpoke)
+            : !justSpoke;
+          if (!myTurn || (justSpoke && !stalled)) {
+            // Not our turn (or cooling down) — wait for the designated speaker to
+            // post the summary before anyone leaves.
+            return;
+          }
+          if (now >= conversation.lastMessage.timestamp + MESSAGE_COOLDOWN) {
+            console.log(`${player.id} summarising the goal for ${conversation.id}.`);
+            const messageUuid = crypto.randomUUID();
+            conversation.setIsTyping(now, player, messageUuid);
+            this.startOperation(game, now, 'agentGenerateMessage', {
+              worldId: game.worldId,
+              playerId: player.id,
+              agentId: this.id,
+              conversationId: conversation.id,
+              messageUuid,
+              type: 'summary',
+              gameTimeMs: now,
+            });
+          }
+          return;
         }
         // See if the conversation has been going on too long and decide to leave.
         const participantCount = conversation.participants.size;
@@ -926,6 +979,8 @@ export class Agent {
       scenarioId: this.scenarioId,
       scenarioTopics: this.scenarioTopics,
       scenarioGoal: this.scenarioGoal,
+      affinities: this.affinities,
+      lastAffinityChange: this.lastAffinityChange,
     };
   }
 
@@ -1006,6 +1061,10 @@ export const serializedAgent = {
   scenarioId: v.optional(v.string()),
   scenarioTopics: v.optional(v.array(v.string())),
   scenarioGoal: v.optional(v.string()),
+  // Directional affinity toward other players, keyed by player id (0–100).
+  affinities: v.optional(v.record(v.string(), v.number())),
+  // Most recent affinity shift, for the transient map indicator.
+  lastAffinityChange: v.optional(v.object({ at: v.number(), net: v.number() })),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 
@@ -1044,6 +1103,8 @@ export const agentSendMessage = internalMutation({
     text: v.string(),
     messageUuid: v.string(),
     leaveConversation: v.boolean(),
+    // True for the one-off "how we achieved the goal" wrap-up message.
+    isGoalSummary: v.optional(v.boolean()),
     operationId: v.string(),
     // The participant the dialogue orchestrator wants to speak next (omitted when
     // leaving or when the floor should be open, e.g. only humans remain).
@@ -1066,6 +1127,7 @@ export const agentSendMessage = internalMutation({
       agentId: args.agentId,
       timestamp: Date.now(),
       leaveConversation: args.leaveConversation,
+      isGoalSummary: args.isGoalSummary,
       operationId: args.operationId,
       nextSpeaker: args.nextSpeaker,
       goalMet: args.goalMet,

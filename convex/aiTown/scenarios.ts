@@ -16,7 +16,6 @@ import type { Agent } from './agent';
 import type { SerializedActiveScenario } from './world';
 import { GameId, parseGameId } from './ids';
 import {
-  LOCAL_SCENARIOS,
   UNIVERSAL_SCENARIOS,
   scenarioById,
   type ScenarioDef,
@@ -24,7 +23,7 @@ import {
 } from '../../data/scenarios';
 import { CHARACTER_WORKPLACES, getLocationById } from '../../data/cityLocations';
 import { computeGameTime } from './gameTime';
-import { estimateTravelTimeMs } from './movement';
+import { estimateTravelTimeMs, stopPlayer } from './movement';
 import { distance } from '../util/geometry';
 import {
   MAX_UNIVERSAL_SCENARIOS,
@@ -134,15 +133,8 @@ function pickEligibleScenario(
       if ((cooldowns['universal'] ?? 0) <= now) candidates.push(def);
     }
   }
-  // Local: only during work hours (9–18), one per workplace, off cooldown.
-  if (hour >= 9 && hour < 18) {
-    for (const def of LOCAL_SCENARIOS) {
-      const key = scopeKeyFor('local', def.locationId);
-      if (occupied.has(key)) continue;
-      if ((cooldowns[key] ?? 0) > now) continue;
-      candidates.push(def);
-    }
-  }
+  // Work-related (local) scenarios are intentionally NOT eligible for random
+  // firing — they only run when manually triggered from the scenario generator.
 
   if (candidates.length === 0) return undefined;
   return candidates[Math.floor(Math.random() * candidates.length)];
@@ -152,8 +144,17 @@ function nameOf(game: Game, agent: Agent): string | undefined {
   return game.playerDescriptions.get(agent.playerId)?.name;
 }
 
-function startScenario(game: Game, now: number, def: ScenarioDef): SerializedActiveScenario | undefined {
+export function startScenario(
+  game: Game,
+  now: number,
+  def: ScenarioDef,
+  // Optional override for the injected directive (used by the manual generator so
+  // an edited instruction still flows through this pipeline). Topics/goal/gather
+  // all stay from the def.
+  instructionOverride?: string,
+): SerializedActiveScenario | undefined {
   const world = game.world;
+  const instruction = instructionOverride?.trim() || def.instruction;
   // Only enlist agents with no scenario directive at all — so we never double-book
   // an agent across two automatic scenarios, nor steal one already enlisted in the
   // manual global scenario (which sets scenarioInstruction without a scenarioId).
@@ -198,7 +199,7 @@ function startScenario(game: Game, now: number, def: ScenarioDef): SerializedAct
   }
 
   for (const a of participants) {
-    a.scenarioInstruction = def.instruction;
+    a.scenarioInstruction = instruction;
     a.scenarioName = def.name;
     a.scenarioId = id;
     a.scenarioTopics = def.topics;
@@ -224,7 +225,7 @@ function startScenario(game: Game, now: number, def: ScenarioDef): SerializedAct
     // Prefer the cosmetic marker tile (inside the building) when set.
     x: loc ? loc.markerX ?? loc.x : undefined,
     y: loc ? loc.markerY ?? loc.y : undefined,
-    instruction: def.instruction,
+    instruction,
     whatHappens: def.whatHappens,
     background: def.background,
     relationships: def.relationships,
@@ -241,6 +242,64 @@ function startScenario(game: Game, now: number, def: ScenarioDef): SerializedAct
     phase,
     endTime: contentStartTime + duration,
   };
+}
+
+// Manually start a specific catalogue scenario through the SAME pipeline the
+// automatic manager uses — so a workplace (local) scenario enlists only that
+// workplace's workers and runs its gathering phase, exactly like a random one,
+// instead of the town-wide injectScenario. A manual trigger overrides whatever is
+// running: it resets every scenario directive and stops ongoing conversations so
+// the right participants are free to gather. Returns false if too few of the right
+// people are around to meet the scenario's minParticipants.
+export function injectCatalogScenario(
+  game: Game,
+  now: number,
+  def: ScenarioDef,
+  instructionOverride?: string,
+): boolean {
+  const world = game.world;
+  // Stop conversations FIRST: this clears each one's isTyping and tears it down.
+  // (It also stamps toRemember on participants, which we clear just below.)
+  for (const conversation of [...world.conversations.values()]) {
+    conversation.stop(game, now);
+  }
+  delete world.scenarioInstruction;
+  delete world.scenarioStartTime;
+  delete world.scenarioTarget;
+  delete world.scenarioName;
+  for (const agent of world.agents.values()) {
+    delete agent.scenarioInstruction;
+    delete agent.scenarioName;
+    delete agent.scenarioId;
+    delete agent.scenarioTopics;
+    delete agent.scenarioGoal;
+    delete agent.scenarioTarget;
+    delete agent.scenarioArrivalTime;
+    delete agent.scenarioProfile;
+    delete agent.scenarioProfileFor;
+    // Free transient blockers so an enlisted participant heads straight to the
+    // gathering spot instead of standing frozen. A just-stopped conversation can
+    // leave an in-flight message op (inProgressOperation) — which Agent.tick would
+    // otherwise wait out for ACTION_TIMEOUT — plus a toRemember pointing at the now
+    // deleted conversation. Mirrors the town-wide injector (injectScenario).
+    delete agent.inProgressOperation;
+    delete agent.toRemember;
+  }
+  for (const player of world.players.values()) {
+    delete player.activity;
+    if (player.pathfinding) stopPlayer(player);
+  }
+  world.activeScenarios = undefined;
+
+  const inst = startScenario(game, now, def, instructionOverride);
+  if (!inst) {
+    return false;
+  }
+  world.activeScenarios = [inst];
+  // Hold the random scheduler off briefly so it doesn't stack another scenario on
+  // top of the one we just triggered.
+  world.nextScenarioTime = now + SCENARIO_INTERVAL_MIN_MS;
+  return true;
 }
 
 // Promote a gathering local scenario to active once every participant has reached

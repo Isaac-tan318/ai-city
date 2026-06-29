@@ -10,6 +10,7 @@ import { useHistoricalValue } from '../hooks/useHistoricalValue.ts';
 import { PlayerDescription } from '../../convex/aiTown/playerDescription.ts';
 import { WorldMap } from '../../convex/aiTown/worldMap.ts';
 import { ServerGame } from '../hooks/serverGame.ts';
+import { AFFINITY_INDICATOR_MS } from '../../convex/constants.ts';
 
 export type SelectElement = (element?: { kind: 'player'; id: GameId<'players'> }) => void;
 
@@ -57,11 +58,18 @@ export const Player = ({
   const isSpeaking = !![...game.world.conversations.values()].find(
     (c) => c.isTyping?.playerId === player.id,
   );
-  const isThinking =
-    !isSpeaking &&
-    !![...game.world.agents.values()].find(
-      (a) => a.playerId === player.id && !!a.inProgressOperation,
-    );
+  const agentForPlayer = [...game.world.agents.values()].find((a) => a.playerId === player.id);
+  const isThinking = !isSpeaking && !!agentForPlayer?.inProgressOperation;
+  // Right after a conversation, flash a 💗/💔 above the character for a few seconds
+  // to show whether their affinity just rose or fell. `at` is wall-clock ms, so we
+  // gate on Date.now(); the marker hides itself once the window lapses.
+  const recentAffinity = agentForPlayer?.lastAffinityChange;
+  const affinityChange =
+    recentAffinity && Date.now() - recentAffinity.at < AFFINITY_INDICATOR_MS
+      ? recentAffinity.net > 0
+        ? 'up'
+        : 'down'
+      : undefined;
   const tileDim = game.worldMap.tileDim;
   const historicalFacing = { dx: historicalLocation.dx, dy: historicalLocation.dy };
   return (
@@ -73,6 +81,7 @@ export const Player = ({
         isMoving={historicalLocation.speed > 0}
         isThinking={isThinking}
         isSpeaking={isSpeaking}
+        affinityChange={affinityChange}
         emoji={
           player.activity && player.activity.until > (historicalTime ?? Date.now())
             ? player.activity?.emoji

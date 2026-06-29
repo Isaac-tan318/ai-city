@@ -146,6 +146,24 @@ export const DELETE_BATCH_SIZE = 64;
 
 export const HUMAN_IDLE_TOO_LONG = 5 * 60 * 1000;
 
+// --- Relationship affinity ---
+// How warmly one character regards another, on a 0–100 scale. Affinity is
+// directional (A→B can differ from B→A) and stored per-agent; family pairs start
+// warmer. Entries are created lazily (only once an interaction moves them), so an
+// agent with no stored entry for someone uses one of these defaults.
+export const MIN_AFFINITY = 0;
+export const MAX_AFFINITY = 100;
+// Neutral starting point for two unrelated characters.
+export const DEFAULT_AFFINITY = 50;
+// Family members start out closer than strangers.
+export const FAMILY_BASE_AFFINITY = 75;
+// Clamp on how far affinity can move from a single conversation, so one chat can
+// nudge a relationship without wild swings.
+export const MAX_AFFINITY_CHANGE_PER_CONVERSATION = 10;
+// How long (real ms) the post-conversation 💗/💔 affinity indicator stays up above
+// a character on the map after their affinity shifts.
+export const AFFINITY_INDICATOR_MS = 6000;
+
 export type Activity = { description: string; emoji: string; duration: number };
 
 // Generic fallback used for humans or any character without a bespoke list.

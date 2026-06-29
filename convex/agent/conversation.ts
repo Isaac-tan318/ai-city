@@ -6,6 +6,7 @@ import * as memory from './memory';
 import { api, internal } from '../_generated/api';
 import * as embeddingsCache from './embeddingsCache';
 import { GameId, conversationId, playerId } from '../aiTown/ids';
+import { FamilyTie, affinityLabel, affinityToward, familyRelation } from '../aiTown/affinity';
 import { NUM_MEMORIES_TO_SEARCH, SCENARIO_GOAL_CHECK_MIN_MESSAGES } from '../constants';
 import { computeGameTime, formatGameTimestamp } from '../aiTown/gameTime';
 import { CITY_LOCATIONS } from '../../data/cityLocations';
@@ -22,6 +23,11 @@ type OtherParticipant = {
   scenarioProfile?: string;
   human: boolean;
   position: { x: number; y: number };
+  // How the speaker relates to this participant: the directional family label (if
+  // any) and the speaker's current affinity toward them (0–100). Computed in
+  // queryPromptData from the speaker's own family + affinities.
+  relationship?: string;
+  affinity?: number;
 };
 
 export async function startConversationMessage(
@@ -178,6 +184,49 @@ export async function leaveConversationMessage(
   const { content } = await chatCompletion({
     messages: llmMessages,
     max_tokens: 300,
+    stop: stopWords(player.name, others),
+  });
+  return trimContentPrefx(content, lastPrompt);
+}
+
+// Once the scenario goal-judge marks the goal met, the designated speaker posts a
+// short wrap-up that says HOW the group achieved it (the decision/arrangement they
+// reached and who's doing what) — so the chat ends on the outcome, not just goodbyes.
+export async function summarizeGoalMessage(
+  ctx: ActionCtx,
+  worldId: Id<'worlds'>,
+  conversationId: GameId<'conversations'>,
+  playerId: GameId<'players'>,
+  gameTimeMs: number,
+): Promise<string> {
+  const { player, others, conversation, agent, worldStartTime } = await ctx.runQuery(
+    selfInternal.queryPromptData,
+    { worldId, playerId, conversationId },
+  );
+  const audience = formatNameList(others.map((o) => o.name));
+  const goal = agent?.scenarioGoal;
+  const prompt = [
+    `You are ${player.name}, wrapping up a conversation with ${audience}.`,
+    goal
+      ? `Your group has just achieved what you set out to do: ${goal}`
+      : `Your group has just reached a conclusion.`,
+    `In one or two short sentences (under 200 characters), tell the others — in character, first person — HOW you pulled it off: the key decision or arrangement you reached and who's doing what. Just the upshot, not a recap of the whole chat. Don't greet them again.`,
+  ];
+  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
+  prompt.push(...selfAndOthersPrompt(agent, others));
+  const llmMessages: LLMMessage[] = [
+    {
+      role: 'system',
+      content: prompt.join('\n'),
+    },
+    ...(await previousMessages(ctx, worldId, conversation.id as GameId<'conversations'>)),
+  ];
+  const lastPrompt = speakerLabel(player.name, others);
+  llmMessages.push({ role: 'user', content: lastPrompt });
+
+  const { content } = await chatCompletion({
+    messages: llmMessages,
+    max_tokens: 200,
     stop: stopWords(player.name, others),
   });
   return trimContentPrefx(content, lastPrompt);
@@ -388,6 +437,17 @@ function selfAndOthersPrompt(
     if (about) {
       prompt.push(`About ${o.name}: ${about}`);
     }
+    // Ground the speaker in how they relate to this person: family ties always,
+    // affinity only when it's notable (family, or clearly warm/cool) so we don't
+    // spam "neutral" into every line.
+    const clauses: string[] = [];
+    if (o.relationship) clauses.push(`they are your ${o.relationship}`);
+    if (o.affinity !== undefined && (o.relationship || o.affinity >= 65 || o.affinity < 45)) {
+      clauses.push(`you feel ${affinityLabel(o.affinity)} toward them`);
+    }
+    if (clauses.length > 0) {
+      prompt.push(`Your relationship with ${o.name}: ${clauses.join(', ')}.`);
+    }
   }
   if (others.length > 1) {
     prompt.push(
@@ -523,6 +583,7 @@ export const queryPromptData = internalQuery({
     const agent = world.agents.find((a) => a.playerId === args.playerId);
     let agentIdentity: string | undefined;
     let agentProfile: Record<string, string> | undefined;
+    let agentFamily: FamilyTie[] | undefined;
     if (agent) {
       const agentDescription = await ctx.db
         .query('agentDescriptions')
@@ -531,7 +592,11 @@ export const queryPromptData = internalQuery({
       agentIdentity = agentDescription?.identity;
       // The character knows its OWN full structured background (self-full).
       agentProfile = agentDescription?.profile;
+      // ...and how it relates to others (immutable family ties).
+      agentFamily = agentDescription?.family;
     }
+    // The speaker's current directional affinity toward others (mutable).
+    const selfAffinities = agent?.affinities;
 
     // Build the list of OTHER participants (everyone in the conversation but us),
     // each with their name, identity (if they're an agent), and human flag.
@@ -563,6 +628,15 @@ export const queryPromptData = internalQuery({
         scenarioProfile: otherAgent?.scenarioProfile,
         human: !!otherPlayer.human,
         position: otherPlayer.position,
+        relationship: agent ? familyRelation(agentFamily, desc?.name) : undefined,
+        affinity: agent
+          ? affinityToward({
+              affinities: selfAffinities,
+              otherPlayerId: pid,
+              family: agentFamily,
+              otherName: desc?.name,
+            })
+          : undefined,
       });
     }
 

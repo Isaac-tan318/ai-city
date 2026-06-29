@@ -160,7 +160,7 @@ export const UNIVERSAL_SCENARIOS: ScenarioDef[] = [
   },
   {
     id: 'cny_eve',
-    name: 'Lunar New Year Eve',
+    name: 'CNY Eve',
     emoji: '🧧',
     scope: 'universal',
     instruction:

@@ -8,6 +8,9 @@ import { point } from '../util/types';
 import { Descriptions } from '../../data/characters';
 import { AgentDescription } from './agentDescription';
 import { Agent, scheduleStep } from './agent';
+import { affinityToward, clampAffinity } from './affinity';
+import { injectCatalogScenario } from './scenarios';
+import { scenarioById } from '../../data/scenarios';
 import { CITY_LOCATIONS, homeFor } from '../../data/cityLocations';
 import { mergeFixedObligations } from '../../data/routines';
 import { CYCLE_MS } from './gameTime';
@@ -193,6 +196,7 @@ export const agentInputs = {
       timestamp: v.number(),
       operationId: v.string(),
       leaveConversation: v.boolean(),
+      isGoalSummary: v.optional(v.boolean()),
       nextSpeaker: v.optional(playerId),
       goalMet: v.optional(v.boolean()),
       coveredTopics: v.optional(v.array(v.number())),
@@ -234,6 +238,10 @@ export const agentInputs = {
       // wrap up (once the per-scenario minimum message count is reached).
       if (args.goalMet) {
         conversation.scenarioGoalMet = true;
+      }
+      // Record that the one-off goal summary has been spoken, so no one repeats it.
+      if (args.isGoalSummary) {
+        conversation.goalSummaryPosted = true;
       }
       // Mirror the goal-judge's progress onto the active-scenario entry so the UI
       // can show which tasks are done and whether the goal is achieved.
@@ -293,6 +301,7 @@ export const agentInputs = {
           agentId: agentId,
           identity: description.identity,
           profile: description.profile,
+          family: description.family,
         }),
       );
       if (game.world.scenarioTarget) {
@@ -304,6 +313,46 @@ export const agentInputs = {
         }
       }
       return { agentId };
+    },
+  }),
+  // Write-back for the conversation-end affinity evaluation (memory op): nudge
+  // this agent's directional affinity toward the other participants. Deltas are
+  // already clamped per-conversation; here we apply them on top of each pair's
+  // current effective affinity (stored value, or the family-aware default).
+  agentApplyAffinity: inputHandler({
+    args: {
+      agentId,
+      deltas: v.array(v.object({ playerId, delta: v.number() })),
+    },
+    handler: (game, now, args) => {
+      const agentId = parseGameId('agents', args.agentId);
+      const agent = game.world.agents.get(agentId);
+      if (!agent) {
+        throw new Error(`Couldn't find agent: ${agentId}`);
+      }
+      const family = game.agentDescriptions.get(agentId)?.family;
+      const affinities: Record<string, number> = { ...(agent.affinities ?? {}) };
+      let net = 0;
+      for (const { playerId: otherId, delta } of args.deltas) {
+        const otherName = game.playerDescriptions.get(parseGameId('players', otherId))?.name;
+        const current = affinityToward({
+          affinities,
+          otherPlayerId: otherId,
+          family,
+          otherName,
+        });
+        const updated = clampAffinity(current + delta);
+        net += updated - current;
+        affinities[otherId] = updated;
+      }
+      agent.affinities = affinities;
+      // Flash a 💗/💔 on the map only when the net feeling actually moved (the
+      // clamp may zero out a delta at the 0/100 boundary, or pluses and minuses
+      // in a group may cancel).
+      if (net !== 0) {
+        agent.lastAffinityChange = { at: now, net };
+      }
+      return null;
     },
   }),
   // Write-back for the agentExtractScenarioProfile op: store the compact,
@@ -332,38 +381,75 @@ export const agentInputs = {
     },
   }),
   startCustomScenario: inputHandler({
-    args: { instruction: v.string() },
+    // Optional name/emoji/background let the generator inject a real catalogue
+    // scenario (data/scenarios.ts) with its own panel title/emoji; omitted for a
+    // free-form custom scenario, which falls back to the generic labels below.
+    args: {
+      instruction: v.string(),
+      name: v.optional(v.string()),
+      emoji: v.optional(v.string()),
+      background: v.optional(v.string()),
+    },
     handler: (game, now, args) => {
       const instruction = args.instruction.trim();
       if (!instruction) return null;
       injectScenario(game, now, {
         instruction,
-        name: 'Custom Scenario',
-        emoji: '🎬',
+        name: args.name ?? 'Custom Scenario',
+        emoji: args.emoji ?? '🎬',
         background:
+          args.background ??
           'A custom scenario you injected. It overrides everyone’s normal routine for the rest of the in-game day.',
       });
+      return null;
+    },
+  }),
+  // Manually start a catalogue scenario (data/scenarios.ts) through the automatic
+  // pipeline rather than the town-wide injector — so a workplace scenario enlists
+  // only that workplace's workers and runs its gathering phase. Used by the
+  // generator for local/workplace scenarios.
+  startCatalogScenario: inputHandler({
+    args: {
+      scenarioId: v.string(),
+      // Optional edited directive from the generator's textarea.
+      instruction: v.optional(v.string()),
+    },
+    handler: (game, now, args) => {
+      const def = scenarioById(args.scenarioId);
+      if (!def) {
+        throw new Error(`Unknown scenario: ${args.scenarioId}`);
+      }
+      const started = injectCatalogScenario(game, now, def, args.instruction);
+      if (!started) {
+        throw new Error(
+          `Couldn't start "${def.name}" — not enough of the right people are around right now.`,
+        );
+      }
       return null;
     },
   }),
   clearScenario: inputHandler({
     args: {},
     handler: (game, _now) => {
+      // Full reset: clear the global manual scenario AND any automatic/catalogue
+      // ones (including scenarioId/topics/goal), so "Clear" reliably stops whatever
+      // is running, however it was started.
       delete game.world.scenarioInstruction;
       delete game.world.scenarioStartTime;
       delete game.world.scenarioTarget;
       delete game.world.scenarioName;
       for (const agent of game.world.agents.values()) {
         delete agent.scenarioInstruction;
-        delete agent.scenarioTarget;
         delete agent.scenarioName;
+        delete agent.scenarioId;
+        delete agent.scenarioTopics;
+        delete agent.scenarioGoal;
+        delete agent.scenarioTarget;
         delete agent.scenarioArrivalTime;
         delete agent.scenarioProfile;
         delete agent.scenarioProfileFor;
       }
-      // Remove the manual scenario's panel entry (leave automatic ones alone).
-      const remaining = (game.world.activeScenarios ?? []).filter((s) => s.defId !== 'manual');
-      game.world.activeScenarios = remaining.length > 0 ? remaining : undefined;
+      game.world.activeScenarios = undefined;
       return null;
     },
   }),

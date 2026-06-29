@@ -8,6 +8,10 @@ import { GameId, agentId, conversationId, playerId } from '../aiTown/ids';
 import { SerializedPlayer } from '../aiTown/player';
 import { memoryFields } from './schema';
 import { formatGameTimestamp } from '../aiTown/gameTime';
+import { MAX_AFFINITY_CHANGE_PER_CONVERSATION } from '../constants';
+
+// One affinity adjustment produced by the end-of-conversation evaluation.
+export type AffinityDelta = { playerId: string; delta: number };
 
 // How long to wait before updating a memory's last access time.
 export const MEMORY_ACCESS_THROTTLE = 300_000; // In ms
@@ -34,21 +38,26 @@ export async function rememberConversation(
     playerId,
     conversationId,
   });
-  const { player, otherPlayer, worldStartTime } = data;
+  const { player, otherPlayer, otherParticipants, worldStartTime } = data;
   const messages = await ctx.runQuery(selfInternal.loadMessages, { worldId, conversationId });
   if (!messages.length) {
-    return;
+    return { affinityDeltas: [] as AffinityDelta[] };
   }
 
+  const rosterNames = otherParticipants.map((p) => p.name).join(', ');
   const llmMessages: LLMMessage[] = [
     {
       role: 'user',
       content: `You are ${player.name}, and you just finished a conversation with ${otherPlayer.name}. I would
       like you to summarize the conversation from ${player.name}'s perspective, using first-person pronouns like
-      "I," and add if you liked or disliked this interaction. Then, on a final line beginning with
+      "I," and add if you liked or disliked this interaction. Then, on a line beginning with
       "Commitments:", state any concrete plans you agreed to (who, what, where, and when) — for example
-      "Commitments: meet ${otherPlayer.name} at the hawker centre at 3pm". If you made no concrete plans, write
-      "Commitments: none".`,
+      "Commitments: meet ${otherPlayer.name} somewhere at 3pm". If you made no concrete plans, write
+      "Commitments: none". Finally, on a separate last line beginning with "Affinity:", output strict JSON
+      mapping each of these people — ${rosterNames} — to an integer from -10 to 10 capturing how your regard
+      for them shifted during THIS conversation: negative if you clashed, disagreed, or were treated badly
+      (e.g. a tense decision where you held conflicting views), positive if it was warm, supportive, or you
+      found common ground, and 0 if neutral try to keep neutral unless the conversation was particularly moving. For example: "Affinity: {"${otherPlayer.name}": 0}".`,
     },
   ];
   const authors = new Set<GameId<'players'>>();
@@ -66,10 +75,12 @@ export async function rememberConversation(
     messages: llmMessages,
     max_tokens: 500,
   });
+  // Split off the affinity judgement so it never gets stored as memory text.
+  const { summary, deltas: affinityDeltas } = parseAffinityLine(content, otherParticipants);
   const description = `Conversation with ${otherPlayer.name} at ${formatGameTimestamp(
     data.conversation._creationTime,
     worldStartTime,
-  )}: ${content}`;
+  )}: ${summary}`;
   const importance = await calculateImportance(description);
   const { embedding } = await fetchEmbedding(description);
   authors.delete(player.id as GameId<'players'>);
@@ -87,7 +98,48 @@ export async function rememberConversation(
     embedding,
   });
   await reflectOnMemories(ctx, worldId, playerId);
-  return description;
+  return { description, affinityDeltas };
+}
+
+// Pull the trailing `Affinity: {...}` line out of the summary completion: it
+// returns the cleaned summary (with that line removed so it isn't stored as a
+// memory) plus the parsed, clamped per-participant affinity deltas. Tolerant of a
+// missing or malformed line — affinity simply doesn't change in that case.
+function parseAffinityLine(
+  content: string,
+  roster: { id: string; name: string }[],
+): { summary: string; deltas: AffinityDelta[] } {
+  const kept: string[] = [];
+  let jsonText: string | undefined;
+  for (const line of content.split('\n')) {
+    const m = line.match(/^\s*Affinity:\s*(.*)$/i);
+    if (m && jsonText === undefined) {
+      jsonText = m[1];
+    } else {
+      kept.push(line);
+    }
+  }
+  const summary = kept.join('\n').trim();
+  const deltas: AffinityDelta[] = [];
+  if (jsonText) {
+    try {
+      const match = jsonText.match(/\{[\s\S]*\}/);
+      const obj = JSON.parse(match ? match[0] : jsonText);
+      for (const person of roster) {
+        const raw = obj[person.name];
+        const n = typeof raw === 'number' ? raw : Number(raw);
+        if (!Number.isFinite(n) || n === 0) continue;
+        const clamped = Math.max(
+          -MAX_AFFINITY_CHANGE_PER_CONVERSATION,
+          Math.min(MAX_AFFINITY_CHANGE_PER_CONVERSATION, Math.round(n)),
+        );
+        if (clamped !== 0) deltas.push({ playerId: person.id, delta: clamped });
+      }
+    } catch {
+      // Unparseable affinity line — leave affinity unchanged for this conversation.
+    }
+  }
+  return { summary, deltas };
 }
 
 export const loadConversation = internalQuery({
@@ -152,10 +204,28 @@ export const loadConversation = internalQuery({
     if (!otherPlayerDescription) {
       throw new Error(`Player description for ${otherPlayerId} not found`);
     }
+    // Full roster of OTHER participants (for group conversations) so affinity
+    // changes can be attributed to each person by name. Falls back to the single
+    // otherPlayer for older archived conversations without a participants list.
+    const rosterIds = (conversation.participants ?? []).filter((pid) => pid !== args.playerId);
+    const otherParticipants: { id: string; name: string }[] = [];
+    for (const pid of rosterIds) {
+      const d = await ctx.db
+        .query('playerDescriptions')
+        .withIndex('worldId', (q) =>
+          q.eq('worldId', args.worldId).eq('playerId', pid as GameId<'players'>),
+        )
+        .first();
+      otherParticipants.push({ id: pid, name: d?.name ?? 'Someone' });
+    }
+    if (otherParticipants.length === 0) {
+      otherParticipants.push({ id: otherPlayerId, name: otherPlayerDescription.name });
+    }
     return {
       player: { ...player, name: playerDescription.name },
       conversation,
       otherPlayer: { ...otherPlayer, name: otherPlayerDescription.name },
+      otherParticipants,
       worldStartTime: world.worldStartTime,
     };
   },

@@ -16,6 +16,11 @@ export type Description = {
   // character's own full self-knowledge; a scenario-relevant subset is what
   // others see, derived at runtime by the extraction LLM.
   profile?: Record<string, string>;
+  // Immutable family ties, authored by character name (stable across world
+  // re-inits). Relations are directional, so each side lists the tie from its
+  // own perspective (James lists Sarah as "younger sister"; Sarah lists James as
+  // "older brother"). Seeds a warmer starting affinity — see convex/aiTown/affinity.ts.
+  family?: Array<{ name: string; relation: string }>;
 };
 
 export const Descriptions: Description[] = [
@@ -74,6 +79,10 @@ export const Descriptions: Description[] = [
       'Conflict style': 'Conflict-avoidant; would rather joke than fight',
       'Payment/gift norm': 'Careful and practical with money',
     },
+    family: [
+      { name: 'Sarah', relation: 'daughter' },
+      { name: 'Xavier', relation: 'son' },
+    ],
   },
   {
     name: 'Sarah',
@@ -92,6 +101,10 @@ export const Descriptions: Description[] = [
       'Payment/gift norm': 'Quietly generous (extra egg, heart in the chili)',
       'Privacy/modesty norm': 'Hides her soft side behind a tough front',
     },
+    family: [
+      { name: 'James', relation: 'father' },
+      { name: 'Xavier', relation: 'younger brother' },
+    ],
   },
   {
     name: 'Rahman',
@@ -148,6 +161,10 @@ export const Descriptions: Description[] = [
       'Payment/gift norm': 'Budget-conscious student',
       'Privacy/modesty norm': 'Low-key; easygoing about most things',
     },
+    family: [
+      { name: 'James', relation: 'father' },
+      { name: 'Sarah', relation: 'older sister' },
+    ],
   },
   {
     name: 'Clara',

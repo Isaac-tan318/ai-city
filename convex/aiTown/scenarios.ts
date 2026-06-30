@@ -296,6 +296,16 @@ export function injectCatalogScenario(
     return false;
   }
   world.activeScenarios = [inst];
+  // We just force-started this scenario by stopping everyone's chats, which put the
+  // participants on a post-conversation cooldown. Clear it for them so they can
+  // gather and strike up the scenario conversation without waiting it out.
+  for (const pid of inst.participantIds) {
+    const a = [...world.agents.values()].find((ag) => ag.playerId === pid);
+    if (a) {
+      delete a.lastConversation;
+      delete a.lastInviteAttempt;
+    }
+  }
   // Hold the random scheduler off briefly so it doesn't stack another scenario on
   // top of the one we just triggered.
   world.nextScenarioTime = now + SCENARIO_INTERVAL_MIN_MS;

@@ -103,7 +103,15 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
           (s) => s.id === selectedScenarioId,
         );
         return selected ? (
-          <ScenarioDetail scenario={selected} onClose={() => setSelectedScenarioId(null)} />
+          <ScenarioDetail
+            scenario={selected}
+            game={game}
+            onClose={() => setSelectedScenarioId(null)}
+            onViewConversation={(playerId) => {
+              setSelectedElement({ kind: 'player', id: playerId });
+              setSelectedScenarioId(null);
+            }}
+          />
         ) : null;
       })()}
       <MiniMap game={game} viewportRef={viewportRef} />

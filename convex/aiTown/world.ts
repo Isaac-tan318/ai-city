@@ -42,6 +42,10 @@ export const serializedActiveScenario = v.object({
   // true once the overall goal is judged achieved.
   topicsDone: v.optional(v.array(v.boolean())),
   goalMet: v.optional(v.boolean()),
+  // Engine-time (≈ epoch ms) each topic was first marked done / the goal was met,
+  // so the chat can drop a completion marker at the right point in the timeline.
+  topicsDoneAt: v.optional(v.array(v.number())),
+  goalMetAt: v.optional(v.number()),
   participantIds: v.array(playerId),
   participantNames: v.array(v.string()),
   startTime: v.number(),

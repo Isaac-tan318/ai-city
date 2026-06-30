@@ -1,7 +1,29 @@
 import { useEffect, useState } from 'react';
 import { SerializedActiveScenario } from '../../convex/aiTown/world';
 import { getLocationById } from '../../data/cityLocations';
+import { ServerGame } from '../hooks/serverGame';
+import { GameId } from '../../convex/aiTown/ids';
 import closeImg from '../../assets/close.svg';
+
+// Find a currently-participating member of the scenario's live conversation, so a
+// "view conversation" link can focus it — selecting that player surfaces the chat
+// in the details pane. Matches on the scenario's own participant list (works for
+// both automatic scenarios and manual town-wide ones). Returns undefined while the
+// scenario has no active conversation (e.g. still gathering).
+function scenarioConversationTarget(
+  game: ServerGame,
+  scenario: SerializedActiveScenario,
+): GameId<'players'> | undefined {
+  const participantIds = new Set<string>(scenario.participantIds);
+  for (const conversation of game.world.conversations.values()) {
+    for (const [playerId, member] of conversation.participants) {
+      if (member.status.kind === 'participating' && participantIds.has(playerId)) {
+        return playerId;
+      }
+    }
+  }
+  return undefined;
+}
 
 function locationName(locationId?: string): string | undefined {
   return locationId ? getLocationById(locationId)?.name : undefined;
@@ -231,12 +253,17 @@ function TasksAndGoalSection({ scenario }: { scenario: SerializedActiveScenario 
 // Full detail modal for one active scenario.
 export function ScenarioDetail({
   scenario,
+  game,
   onClose,
+  onViewConversation,
 }: {
   scenario: SerializedActiveScenario;
+  game: ServerGame;
   onClose: () => void;
+  onViewConversation: (playerId: GameId<'players'>) => void;
 }) {
   const loc = locationName(scenario.locationId);
+  const conversationTarget = scenarioConversationTarget(game, scenario);
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-2 sm:p-6"
@@ -295,6 +322,22 @@ export function ScenarioDetail({
               <p className="text-brown-300 text-sm italic">No participants yet.</p>
             )}
           </div>
+
+          {/* Jump to the scenario's live conversation. */}
+          {conversationTarget ? (
+            <button
+              type="button"
+              onClick={() => onViewConversation(conversationTarget)}
+              className="w-full flex items-center justify-center gap-2 rounded bg-clay-700 hover:bg-clay-600 transition-colors text-white px-3 py-2 text-sm font-bold cursor-pointer pointer-events-auto"
+            >
+              <span aria-hidden>💬</span> View the conversation
+            </button>
+          ) : (
+            <p className="text-brown-300 text-xs italic text-center">
+              No live conversation yet — participants are still{' '}
+              {scenario.phase === 'gathering' ? 'gathering' : 'getting started'}.
+            </p>
+          )}
 
           <TasksAndGoalSection scenario={scenario} />
           <DetailSection title="What's happening" body={scenario.whatHappens} />

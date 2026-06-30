@@ -8,6 +8,7 @@ import { Conversation } from '../../convex/aiTown/conversation';
 import { useEffect, useRef } from 'react';
 import { formatGameTimestamp } from '../../convex/aiTown/gameTime';
 import { CharacterIcon } from './CharacterIcon';
+import { ServerGame } from '../hooks/serverGame';
 
 export function Messages({
   worldId,
@@ -17,6 +18,7 @@ export function Messages({
   humanPlayer,
   scrollViewRef,
   worldStartTime,
+  game,
 }: {
   worldId: Id<'worlds'>;
   engineId: Id<'engines'>;
@@ -27,6 +29,9 @@ export function Messages({
   humanPlayer?: Player;
   scrollViewRef: React.RefObject<HTMLDivElement>;
   worldStartTime?: number;
+  // Used to correlate an active scenario conversation with its scenario so task /
+  // goal completion markers can be dropped into the chat timeline.
+  game?: ServerGame;
 }) {
   const humanPlayerId = humanPlayer?.id;
   const descriptions = useQuery(api.world.gameDescriptions, { worldId });
@@ -138,7 +143,56 @@ export function Messages({
       });
     }
   }
-  const nodes = [...messageNodes, ...membershipNodes];
+  // Scenario progress markers: drop an inline chip into the timeline at the moment
+  // each task was substantively covered and when the overall goal was achieved.
+  const scenarioMarkerNodes: typeof messageNodes = [];
+  if (conversation.kind === 'active' && game) {
+    // This conversation's scenario: its participants share an agent `scenarioId`.
+    let scenarioId: string | undefined;
+    for (const [playerId] of conversation.doc.participants) {
+      const agent = [...game.world.agents.values()].find((a) => a.playerId === playerId);
+      if (agent?.scenarioId) {
+        scenarioId = agent.scenarioId;
+        break;
+      }
+    }
+    const scenario = scenarioId
+      ? (game.world.activeScenarios ?? []).find((s) => s.id === scenarioId)
+      : undefined;
+    if (scenario) {
+      const topics = scenario.topics ?? [];
+      const doneAt = scenario.topicsDoneAt ?? [];
+      topics.forEach((topic, i) => {
+        const at = doneAt[i];
+        if (at && at > 0) {
+          scenarioMarkerNodes.push({
+            time: at,
+            node: (
+              <div key={`task-${i}`} className="mb-6 text-center">
+                <span className="inline-block text-xs sm:text-sm font-semibold text-green-900 bg-green-300/80 rounded-full px-3 py-1">
+                  ✅ Task completed: {topic}
+                </span>
+              </div>
+            ),
+          });
+        }
+      });
+      if (scenario.goalMet && scenario.goalMetAt) {
+        scenarioMarkerNodes.push({
+          time: scenario.goalMetAt,
+          node: (
+            <div key="goal-met" className="mb-6 text-center">
+              <span className="inline-block text-sm sm:text-base font-bold text-amber-950 bg-amber-300 rounded-full px-4 py-1.5 shadow-solid">
+                🎯 Goal achieved!
+              </span>
+            </div>
+          ),
+        });
+      }
+    }
+  }
+
+  const nodes = [...messageNodes, ...membershipNodes, ...scenarioMarkerNodes];
   nodes.sort((a, b) => a.time - b.time);
 
   // Build a roster of participating members so the user can see everyone present

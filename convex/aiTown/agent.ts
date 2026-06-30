@@ -10,7 +10,6 @@ import {
   CONVERSATION_COOLDOWN,
   CONVERSATION_DISTANCE,
   GROUP_JOIN_RADIUS,
-  INVITE_ACCEPT_PROBABILITY,
   INVITE_TIMEOUT,
   MAX_CONVERSATION_DURATION,
   MAX_CONVERSATION_MESSAGES,
@@ -46,7 +45,14 @@ import {
   SCENARIO_CONVO_MIN_MESSAGES,
   SCENARIO_CONVO_MAX_MESSAGES,
   SCENARIO_MAX_CONVO_DURATION,
+  MAX_AFFINITY,
+  DEFAULT_AFFINITY,
+  CANDIDATE_AFFINITY_WEIGHT,
+  INVITE_ACCEPT_MIN_PROBABILITY,
+  INVITE_ACCEPT_MAX_PROBABILITY,
+  GROUP_LEAVE_AFFINITY_WEIGHT,
 } from '../constants';
+import { affinityToward, FamilyTie } from './affinity';
 import { getLocationById, homeFor, workLeashAnchor } from '../../data/cityLocations';
 import { pickContextualEvent, buildSickSchedule } from '../../data/routines';
 
@@ -324,6 +330,15 @@ export class Agent {
           .filter(
             (p) => ![...game.world.conversations.values()].find((c) => c.participants.has(p.id)),
           )
+          // Don't cross scenario boundaries: a non-scenario agent ignores scenario
+          // participants (so it can't pull one out of a gathering), and a scenario
+          // agent only considers fellow participants of its own scenario.
+          .filter((p) => {
+            const other = [...game.world.agents.values()].find((a) => a.playerId === p.id);
+            return this.scenarioId
+              ? other?.scenarioId === this.scenarioId
+              : !other?.scenarioId;
+          })
           .map((p) => p.serialize()),
         agent: this.serialize(),
         map: game.worldMap.serialize(),
@@ -371,10 +386,18 @@ export class Agent {
           !!inviter &&
           !inviter.human &&
           distance(onShiftAnchor, inviter.position) >= WORK_LEASH_RADIUS;
+        // Scale acceptance by how this agent feels about the inviter: family and
+        // close friends almost always say yes; someone they're cool toward usually
+        // gets a polite no. Humans (handled below) are always accepted.
+        const inviterAffinity = inviter ? this.affinityFor(game, inviter.id) : MAX_AFFINITY;
+        const acceptProbability =
+          INVITE_ACCEPT_MIN_PROBABILITY +
+          (INVITE_ACCEPT_MAX_PROBABILITY - INVITE_ACCEPT_MIN_PROBABILITY) *
+            (inviterAffinity / MAX_AFFINITY);
         if (pullsOffPost) {
           console.log(`Agent ${player.id} declining off-post invite to ${conversation.id}`);
           conversation.rejectInvite(game, now, player);
-        } else if (!inviter || inviter.human || Math.random() < INVITE_ACCEPT_PROBABILITY) {
+        } else if (!inviter || inviter.human || Math.random() < acceptProbability) {
           console.log(`Agent ${player.id} accepting invite to ${conversation.id}`);
           conversation.acceptInvite(game, player);
           // Stop moving so we can start walking towards the group.
@@ -519,11 +542,15 @@ export class Agent {
           // enough has been said and this agent has had a turn, they may peel off so
           // the huddle thins out one person at a time instead of all staying glued
           // until the budget runs out. The 2-person path keeps its original feel.
+          // Drift off sooner from a group you dislike; linger with friends/family.
+          const groupLeaveProbability = isGroup
+            ? this.groupLeaveProbability(game, conversation, player.id)
+            : GROUP_LEAVE_PROBABILITY;
           const wantsToDriftOff =
             isGroup &&
             justSpokeNow &&
             conversation.numMessages >= GROUP_LEAVE_MIN_MESSAGES &&
-            Math.random() < GROUP_LEAVE_PROBABILITY;
+            Math.random() < groupLeaveProbability;
           shouldLeave =
             tooLongDeadline < now ||
             conversation.numMessages > maxMessages ||
@@ -611,11 +638,37 @@ export class Agent {
     return false;
   }
 
+  // This agent's current affinity (0–100) toward another player: the stored value
+  // or the family-aware default. The single lookup that lets relationships shape
+  // behaviour (whom to approach, whether to accept an invite, when to drift off).
+  affinityFor(game: Game, otherPlayerId: GameId<'players'>): number {
+    const family: FamilyTie[] | undefined = game.agentDescriptions.get(this.id)?.family;
+    const otherName = game.playerDescriptions.get(otherPlayerId)?.name;
+    return affinityToward({ affinities: this.affinities, otherPlayerId, family, otherName });
+  }
+
+  // Per-turn probability of drifting away from a group conversation, scaled by how
+  // this agent feels about the other currently-participating members: dislike the
+  // room → leave sooner; among friends/family → linger.
+  groupLeaveProbability(game: Game, conversation: Conversation, selfId: GameId<'players'>): number {
+    const others = [...conversation.participants.entries()]
+      .filter(([id, m]) => id !== selfId && m.status.kind === 'participating')
+      .map(([id]) => id);
+    if (others.length === 0) return GROUP_LEAVE_PROBABILITY;
+    const avg = others.reduce((sum, id) => sum + this.affinityFor(game, id), 0) / others.length;
+    // avg == DEFAULT_AFFINITY → unchanged; warmer → ×(1 - weight); colder → ×(1 + weight).
+    const factor = 1 + GROUP_LEAVE_AFFINITY_WEIGHT * ((DEFAULT_AFFINITY - avg) / DEFAULT_AFFINITY);
+    return Math.max(0.05, Math.min(0.9, GROUP_LEAVE_PROBABILITY * factor));
+  }
+
   // If we're free and a multi-party conversation is happening nearby with room
   // under the participant cap, join it (walking over). Returns true if we joined.
   maybeJoinNearbyConversation(game: Game, now: number, player: import('./player').Player): boolean {
     if (this.inProgressOperation) return false;
     if (game.world.playerConversation(player)) return false;
+    // While heading to a scenario gathering, don't get absorbed into some unrelated
+    // conversation on the way — keep walking to the spot.
+    if (this.scenarioTarget) return false;
     // Respect the post-conversation and invite cooldowns so we don't ping-pong.
     if (this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN) return false;
     if (this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN) return false;
@@ -632,6 +685,9 @@ export class Agent {
     let bestDistance = Infinity;
     for (const conversation of game.world.conversations.values()) {
       if (conversation.participants.has(player.id)) continue;
+      // If we're enlisted in a scenario, only ever join that scenario's own
+      // conversation — never wander into an unrelated chat that's nearby.
+      if (this.scenarioId && !this.isInScenarioConversation(game, conversation)) continue;
       if (conversation.participants.size >= MAX_CONVERSATION_PARTICIPANTS) continue;
       const participating = [...conversation.participants.values()].filter(
         (m) => m.status.kind === 'participating',
@@ -819,8 +875,31 @@ export class Agent {
     const step = this.schedule[this.currentStepIndex];
     if (!step) return false;
 
-    // It isn't time for the first step yet — let the rest of the tick run.
-    if (gt.minutesIntoDay < step.startMinute) return false;
+    // Before the day's first scheduled step (early morning, before the ~7am wake):
+    // head to that first location (home) and wait there. Without this we'd return
+    // false and tick() would drop the agent into its free-roam branch — random
+    // destination + activity. An agent freed up in this window (e.g. right after a
+    // scenario ends at 6am) would then walk off to a random tile across the map and
+    // look "stuck" far from anywhere it should be.
+    if (gt.minutesIntoDay < step.startMinute) {
+      if (conversation) return false;
+      const atStart = distance(player.position, step.destination) < ARRIVAL_RADIUS;
+      if (!atStart) {
+        if (
+          !player.pathfinding ||
+          !pointsEqual(player.pathfinding.destination, step.destination)
+        ) {
+          try {
+            movePlayer(game, now, player, step.destination);
+          } catch (err) {
+            console.warn(`Pre-dawn move home failed for ${player.id}: ${(err as Error).message}`);
+          }
+        }
+      } else if (player.pathfinding) {
+        stopPlayer(player);
+      }
+      return true;
+    }
 
     // Don't yank the agent out of an active conversation. The schedule can wait.
     if (conversation) return false;
@@ -1145,8 +1224,23 @@ export const findConversationCandidate = internalQuery({
   },
   handler: async (ctx, { now, worldId, player, otherFreePlayers }) => {
     const { position } = player;
-    const candidates = [];
 
+    // Load our affinities + family so relationships bias who we approach: we'll
+    // happily cross the room for a friend and skip someone nearby we dislike.
+    const world = await ctx.db.get(worldId);
+    const selfAgent = world?.agents.find((a) => a.playerId === player.id);
+    const affinities = selfAgent?.affinities;
+    let family: FamilyTie[] | undefined;
+    if (selfAgent) {
+      const desc = await ctx.db
+        .query('agentDescriptions')
+        .withIndex('worldId', (q) => q.eq('worldId', worldId).eq('agentId', selfAgent.id))
+        .first();
+      family = desc?.family;
+    }
+
+    // Pick the candidate with the best affinity-vs-distance score (off cooldown).
+    let best: { id: GameId<'players'>; score: number } | undefined;
     for (const otherPlayer of otherFreePlayers) {
       // Find the latest conversation we're both members of.
       const lastMember = await ctx.db
@@ -1161,11 +1255,17 @@ export const findConversationCandidate = internalQuery({
           continue;
         }
       }
-      candidates.push({ id: otherPlayer.id, position });
+      const affinity = affinityToward({
+        affinities,
+        otherPlayerId: otherPlayer.id,
+        family,
+        otherName: otherPlayer.name,
+      });
+      const score = affinity - CANDIDATE_AFFINITY_WEIGHT * distance(position, otherPlayer.position);
+      if (!best || score > best.score) {
+        best = { id: otherPlayer.id as GameId<'players'>, score };
+      }
     }
-
-    // Sort by distance and take the nearest candidate.
-    candidates.sort((a, b) => distance(a.position, position) - distance(b.position, position));
-    return candidates[0]?.id;
+    return best?.id;
   },
 });

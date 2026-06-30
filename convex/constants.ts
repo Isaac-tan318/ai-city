@@ -160,6 +160,21 @@ export const FAMILY_BASE_AFFINITY = 75;
 // Clamp on how far affinity can move from a single conversation, so one chat can
 // nudge a relationship without wild swings.
 export const MAX_AFFINITY_CHANGE_PER_CONVERSATION = 10;
+
+// --- Affinity-driven behaviour ---
+// These make affinity mechanical (not just prompt flavour): relationships shape
+// who agents approach, whether they accept invites, and when they drift off.
+// When choosing whom to approach, how many affinity points (0–100) are worth one
+// tile of extra distance. Higher → agents travel further to reach someone they
+// like and skip a nearby someone they dislike.
+export const CANDIDATE_AFFINITY_WEIGHT = 2;
+// Invite-acceptance probability scales with affinity toward the inviter, between
+// these bounds (hostile ≈ MIN, adored ≈ MAX). Humans are accepted unconditionally.
+export const INVITE_ACCEPT_MIN_PROBABILITY = 0.3;
+export const INVITE_ACCEPT_MAX_PROBABILITY = 0.97;
+// How strongly disliking the rest of a group makes an agent drift off sooner. The
+// base GROUP_LEAVE_PROBABILITY is scaled by 1 ± this around neutral affinity.
+export const GROUP_LEAVE_AFFINITY_WEIGHT = 0.6;
 // How long (real ms) the post-conversation 💗/💔 affinity indicator stays up above
 // a character on the map after their affinity shifts.
 export const AFFINITY_INDICATOR_MS = 6000;

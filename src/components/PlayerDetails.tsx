@@ -692,6 +692,7 @@ export default function PlayerDetails({
           humanPlayer={humanPlayer}
           scrollViewRef={scrollViewRef}
           worldStartTime={game.world.worldStartTime}
+          game={game}
         />
       )}
       {!playerConversation && previousConversation && (

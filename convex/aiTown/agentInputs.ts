@@ -33,6 +33,16 @@ function injectScenario(
     conversation.stop(game, now);
   }
   for (const agent of game.world.agents.values()) {
+    // Fully clear any AUTOMATIC scenario this agent was enlisted in before taking
+    // over with the town-wide directive. Without this, an agent mid local scenario
+    // keeps its scenarioId/scenarioTarget, so the gather branch in Agent.tick keeps
+    // walking it back to the old workplace and it never reacts to the new scenario.
+    delete agent.scenarioId;
+    delete agent.scenarioName;
+    delete agent.scenarioTopics;
+    delete agent.scenarioGoal;
+    delete agent.scenarioTarget;
+    delete agent.scenarioArrivalTime;
     agent.scenarioInstruction = opts.instruction;
     // Drop any stale scenario-relevant background; the next tick re-extracts.
     delete agent.scenarioProfile;
@@ -77,8 +87,9 @@ function injectScenario(
     phase: 'active',
     endTime: now + CYCLE_MS,
   };
-  const others = (game.world.activeScenarios ?? []).filter((s) => s.defId !== 'manual');
-  game.world.activeScenarios = [...others, manualEntry];
+  // A town-wide scenario takes over completely: replace any existing entries
+  // (including a half-finished automatic one we just cleared off the agents above).
+  game.world.activeScenarios = [manualEntry];
 }
 
 export const agentInputs = {
@@ -244,17 +255,27 @@ export const agentInputs = {
         conversation.goalSummaryPosted = true;
       }
       // Mirror the goal-judge's progress onto the active-scenario entry so the UI
-      // can show which tasks are done and whether the goal is achieved.
+      // can show which tasks are done and whether the goal is achieved. We also
+      // stamp the time each task/goal first completed so the chat can drop an inline
+      // completion marker at the right point in the timeline.
       if (agent.scenarioId && (args.goalMet || (args.coveredTopics?.length ?? 0) > 0)) {
         const sc = (game.world.activeScenarios ?? []).find((s) => s.id === agent.scenarioId);
         if (sc) {
-          if (args.goalMet) sc.goalMet = true;
+          if (args.goalMet) {
+            sc.goalMet = true;
+            sc.goalMetAt = sc.goalMetAt ?? now;
+          }
           if (args.coveredTopics && args.coveredTopics.length > 0) {
             const done = sc.topicsDone ?? (sc.topics ?? []).map(() => false);
+            const doneAt = sc.topicsDoneAt ?? (sc.topics ?? []).map(() => 0);
             for (const i of args.coveredTopics) {
-              if (i >= 0 && i < done.length) done[i] = true;
+              if (i >= 0 && i < done.length) {
+                if (!done[i]) doneAt[i] = now; // record the first-completion time
+                done[i] = true;
+              }
             }
             sc.topicsDone = done;
+            sc.topicsDoneAt = doneAt;
           }
         }
       }

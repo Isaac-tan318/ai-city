@@ -1,10 +1,21 @@
 // Shared in-game time logic. The GameClock UI imports the same constants so
 // the server-side schedule logic and the on-screen clock never drift.
 
-// Full day+night cycle in real-world ms (10 minutes).
-export const CYCLE_MS = 10 * 60 * 1000;
-// Length of the day half of the cycle in real-world ms (5 minutes).
-export const DAY_MS = 5 * 60 * 1000;
+// The day is split into TWO segments that run at different real-world speeds:
+//   • Awake hours (6 AM→12 AM): one steady pace across the whole 18-hour stretch.
+//   • Deep night (12 AM→6 AM): heavily compressed — flies by (everyone asleep).
+// Each segment maps to its real span of game-hours; only the real-world duration
+// per game-hour differs between the two.
+//
+// Awake: 18 game-hours over 18 real minutes — i.e. 1 game-minute per real
+// second (60s per game-hour).
+export const AWAKE_MS = 18 * 60 * 1000;
+// Deep night: 6 game-hours over 1 real minute (~10s per game-hour — quick).
+export const DEEP_NIGHT_MS = 1 * 60 * 1000;
+// Full day+night cycle in real-world ms (now 19 minutes total: an 18-minute
+// awake stretch plus the 1-minute deep night). Day counting, scenario timers,
+// and schedules all key off this, so they stay aligned automatically.
+export const CYCLE_MS = AWAKE_MS + DEEP_NIGHT_MS;
 
 // In-game game-day length in "game minutes" — we map a full real cycle to 24h.
 export const MINUTES_PER_DAY = 24 * 60;
@@ -27,19 +38,39 @@ export function computeGameTime(now: number, worldStartTime: number | undefined)
   }
   const elapsed = now - worldStartTime;
   const cycleProgress = ((elapsed % CYCLE_MS) + CYCLE_MS) % CYCLE_MS;
-  const isDay = cycleProgress < DAY_MS;
   const dayNumber = Math.floor(elapsed / CYCLE_MS) + 1;
-  // Day half spans 6 AM (06:00) to 6 PM (18:00); night half spans 18:00 back to 06:00.
-  const rawHours = isDay
-    ? 6 + (cycleProgress / DAY_MS) * 12
-    : 18 + ((cycleProgress - DAY_MS) / DAY_MS) * 12;
+  // Two segments, each mapping its real-ms slice to its span of game-hours:
+  //   [0, AWAKE_MS)            → 6 AM..12 AM  (awake hours, one steady pace)
+  //   [AWAKE_MS, CYCLE_MS)     → 12 AM..6 AM  (deep night, quick)
+  let rawHours: number;
+  if (cycleProgress < AWAKE_MS) {
+    rawHours = 6 + (cycleProgress / AWAKE_MS) * 18;
+  } else {
+    rawHours = ((cycleProgress - AWAKE_MS) / DEEP_NIGHT_MS) * 6;
+  }
   const hour = rawHours % 24;
+  const isDay = hour >= 6 && hour < 18;
   const minutesIntoDay = Math.floor(hour * 60);
   const h12 = Math.floor(hour) % 12 || 12;
   const minutes = Math.floor((hour % 1) * 60);
   const ampm = hour < 12 ? 'AM' : 'PM';
   const timeStr = `${h12}:${minutes.toString().padStart(2, '0')} ${ampm}`;
   return { dayNumber, minutesIntoDay, hour, isDay, timeStr };
+}
+
+// Map a game hour (0..24, where 6 = 6 AM) to its real-world ms offset from the
+// start of the cycle (i.e. the `cycleProgress` value computeGameTime works with,
+// measured from 6 AM). Accounts for the non-uniform day/night speeds, so callers
+// that need real-ms thresholds for specific game times (lighting ramps, skip
+// buttons) stay correct without re-deriving the piecewise mapping themselves.
+export function cycleProgressForHour(hour: number): number {
+  const h = ((hour % 24) + 24) % 24;
+  if (h >= 6) {
+    // Awake hours: 6 AM..12 AM across the (steady) awake segment.
+    return ((h - 6) / 18) * AWAKE_MS;
+  }
+  // Deep night: 12 AM..6 AM across the (compressed) deep-night segment.
+  return AWAKE_MS + (h / 6) * DEEP_NIGHT_MS;
 }
 
 // Format a past/absolute engine-ms timestamp as an in-game wall time, e.g.

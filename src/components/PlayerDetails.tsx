@@ -12,50 +12,41 @@ import { useSendInput } from '../hooks/sendInput';
 import { GameId } from '../../convex/aiTown/ids';
 import { ServerGame } from '../hooks/serverGame';
 import { computeGameTime } from '../../convex/aiTown/gameTime';
+import {
+  affinityColor,
+  affinityEmoji,
+  affinityLabel,
+  affinityToward,
+} from '../../convex/aiTown/affinity';
+import { ALL_SCENARIOS } from '../../data/scenarios';
 
+// The scenario generator offers the same catalogue the automatic system draws
+// from (data/scenarios.ts) — universal town-wide events plus the work/local ones —
+// rather than a separate bespoke list. Work scenarios no longer fire randomly (see
+// convex/aiTown/scenarios.ts) but remain available here for manual injection. A
+// free-form "Custom Scenario" stays at the end.
 const scenarioOptions = [
-  {
-    id: 'park',
-    title: 'Park Meetup',
-    text: 'Meet at the park!',
+  ...ALL_SCENARIOS.map((s) => ({
+    id: s.id,
+    emoji: s.emoji,
+    title: s.name,
+    text: s.instruction,
+    name: s.name,
+    background: s.background,
+    // Local/workplace scenarios run through the automatic pipeline (correct
+    // workers + gathering phase); universal ones use the town-wide injector.
+    scope: s.scope as 'universal' | 'local' | undefined,
     requiresTwoAgents: false,
-  },
-  {
-    id: 'hawker-lunch',
-    title: 'Hawker Lunch Rush',
-    text:
-      "It's lunchtime and everyone is hungry. Head to the Hawker Centre now and sort " +
-      "out what to eat together, minding each other's dietary needs, allergies, and budgets.",
-    requiresTwoAgents: false,
-  },
-  {
-    id: 'late-night-ride',
-    title: 'Late-Night Ride Home',
-    text:
-      "It's past midnight and the trains have stopped running. Gather at the Marina Bay " +
-      'Sands taxi stand right now to figure out who shares a ride home and how to split the fare.',
-    requiresTwoAgents: false,
-  },
-  {
-    id: 'hdb-noise',
-    title: 'HDB Noise Complaint',
-    text:
-      "It's late at night and someone in the HDB Estate is blasting loud music. The " +
-      'neighbours are gathering at the HDB Estate now to settle the noise complaint.',
-    requiresTwoAgents: false,
-  },
-  {
-    id: 'medical-emergency',
-    title: 'Medical Emergency',
-    text:
-      'Someone has suddenly collapsed and feels very unwell. Rush to Changi General ' +
-      'Hospital immediately to help and decide what to do.',
-    requiresTwoAgents: false,
-  },
+  })),
   {
     id: 'custom',
+    emoji: '✏️',
     title: 'Custom Scenario',
     text: '',
+    name: 'Custom Scenario',
+    background:
+      'A custom scenario you injected. It overrides everyone’s normal routine for the rest of the in-game day.',
+    scope: undefined as 'universal' | 'local' | undefined,
     requiresTwoAgents: false,
   },
 ];
@@ -135,6 +126,34 @@ export default function PlayerDetails({
   const agentDescription = agentForPlayer
     ? game.agentDescriptions.get(agentForPlayer.id)
     : undefined;
+  // Build the relationship rows for the inspector: authored family ties first
+  // (shown even before any interaction has moved affinity), then anyone else this
+  // agent has formed an opinion about. Affinity is resolved through the same
+  // family-aware default helper used by the engine.
+  const relationships = useMemo(() => {
+    if (!agentForPlayer) return [];
+    const family = agentDescription?.family ?? [];
+    const affinities = agentForPlayer.affinities ?? {};
+    const nameToId = new Map<string, GameId<'players'>>();
+    for (const [pid, desc] of game.playerDescriptions.entries()) {
+      nameToId.set(desc.name, pid);
+    }
+    const rows = new Map<string, { name: string; relation?: string; affinity: number }>();
+    for (const tie of family) {
+      const pid = nameToId.get(tie.name);
+      rows.set(tie.name, {
+        name: tie.name,
+        relation: tie.relation,
+        affinity: affinityToward({ affinities, otherPlayerId: pid ?? '', family, otherName: tie.name }),
+      });
+    }
+    for (const [pid, value] of Object.entries(affinities)) {
+      const name = game.playerDescriptions.get(pid as GameId<'players'>)?.name;
+      if (!name || rows.has(name)) continue;
+      rows.set(name, { name, affinity: value });
+    }
+    return [...rows.values()];
+  }, [agentForPlayer, agentDescription, game]);
   const gameNow = computeGameTime(Date.now(), game.world.worldStartTime);
   const formatScheduleTime = (mins: number) => {
     const h24 = Math.floor(mins / 60) % 24;
@@ -148,8 +167,8 @@ export default function PlayerDetails({
   const acceptInvite = useSendInput(engineId, 'acceptInvite');
   const rejectInvite = useSendInput(engineId, 'rejectInvite');
   const leaveConversation = useSendInput(engineId, 'leaveConversation');
-  const startScenarioMeetAtPark = useSendInput(engineId, 'startScenarioMeetAtPark');
   const startCustomScenario = useSendInput(engineId, 'startCustomScenario');
+  const startCatalogScenario = useSendInput(engineId, 'startCatalogScenario');
   const clearScenario = useSendInput(engineId, 'clearScenario');
 
   const setDefaultSecondTarget = (primaryTarget: GameId<'players'> | '') => {
@@ -189,29 +208,34 @@ export default function PlayerDetails({
     }
   };
 
-  const scenarioPreview = scenarioText.trim()
-    ? scenarioText.trim()
-    : 'Select a scenario or write a custom one below.';
-
   const onStartScenario = async () => {
     if (!selectedScenarioId) {
       toast.error('Select a scenario to start.');
       return;
     }
-    if (selectedScenarioId === 'park') {
-      await toastOnError(startScenarioMeetAtPark({}));
-      setInjectorOpen(false);
-      return;
-    }
-    // Both the free-form "custom" option and the preset scenarios (Hawker Lunch,
-    // Late-Night Ride, etc.) feed their instruction text to the same injector.
-    // The text is editable in the textarea, so presets act as starting points the
-    // user can tweak before launching.
     if (!scenarioText.trim()) {
       toast.error('Write your scenario instructions before starting.');
       return;
     }
-    await toastOnError(startCustomScenario({ instruction: scenarioText.trim() }));
+    const scenario = scenarioOptions.find((entry) => entry.id === selectedScenarioId);
+    if (scenario?.scope === 'local') {
+      // Workplace scenarios run the real pipeline: only the workplace's workers
+      // take part and they gather there first, just like a randomly-fired one.
+      await toastOnError(
+        startCatalogScenario({ scenarioId: scenario.id, instruction: scenarioText.trim() }),
+      );
+    } else {
+      // Universal and free-form custom scenarios use the town-wide injector,
+      // carrying the scenario's name/emoji/background so the panel reflects it.
+      await toastOnError(
+        startCustomScenario({
+          instruction: scenarioText.trim(),
+          name: scenario?.name,
+          emoji: scenario?.emoji,
+          background: scenario?.background,
+        }),
+      );
+    }
     setInjectorOpen(false);
   };
 
@@ -256,8 +280,10 @@ export default function PlayerDetails({
       </div>
       <div className="p-4 flex flex-col gap-4 text-sm sm:text-base">
         <div className="grid gap-2">
-          <div className="text-xs uppercase tracking-widest text-amber-200/80">Defaults</div>
-          <div className="scenario-scroll grid gap-2 sm:grid-cols-2 max-h-56 overflow-y-auto pr-1">
+          <div className="text-xs uppercase tracking-widest text-amber-200/80">
+            Choose a scenario
+          </div>
+          <div className="scenario-scroll grid grid-cols-2 auto-rows-auto gap-2 max-h-72 overflow-y-auto pr-1">
             {scenarioOptions.map((scenario) => {
               const isActive = scenario.id === selectedScenarioId;
               const isCustom = scenario.id === 'custom';
@@ -265,21 +291,34 @@ export default function PlayerDetails({
                 <button
                   key={scenario.id}
                   className={
-                    'rounded border px-3 py-2 text-left transition ' +
+                    'scenario-card group relative flex h-full flex-col gap-1 rounded-lg border p-3 text-left transition ' +
                     (isActive
-                      ? 'border-amber-300 bg-amber-200/10 text-amber-100'
+                      ? 'border-amber-300 bg-amber-300/15 ring-1 ring-amber-300/60 shadow-[0_0_12px_-2px_rgba(252,211,77,0.5)]'
                       : isCustom
-                        ? 'border-dashed border-white/30 bg-white/5 hover:border-amber-300/60'
-                        : 'border-white/10 bg-white/5 hover:border-white/30')
+                        ? 'border-dashed border-amber-200/40 bg-white/5 hover:border-amber-300/70 hover:bg-amber-300/5'
+                        : 'border-white/10 bg-white/5 hover:border-white/40 hover:bg-white/10')
                   }
                   type="button"
                   onClick={() => onSelectScenario(scenario.id)}
+                  aria-pressed={isActive}
                 >
-                  <div className="font-display text-sm sm:text-base leading-tight tracking-wider">
-                    {isCustom ? '✏️ ' : ''}{scenario.title}
-                  </div>
-                  <div className="text-xs leading-snug text-white/70">
-                    {isCustom ? 'Write your own instructions below' : scenario.text}
+                  {isActive && (
+                    <span className="absolute right-2 top-2 text-amber-300" aria-hidden>
+                      ✓
+                    </span>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg leading-none" aria-hidden>
+                      {scenario.emoji}
+                    </span>
+                    <span
+                      className={
+                        'font-display text-sm leading-tight tracking-wide ' +
+                        (isActive ? 'text-amber-100' : 'text-white/90')
+                      }
+                    >
+                      {scenario.title}
+                    </span>
                   </div>
                 </button>
               );
@@ -330,58 +369,59 @@ export default function PlayerDetails({
           </div>
         )}
 
-        <div className="rounded border border-amber-200/20 bg-black/30 p-3">
-          <div className="text-xs uppercase tracking-widest text-amber-200/80">Preview</div>
-          <p className="text-sm sm:text-base leading-relaxed text-white/90">{scenarioPreview}</p>
-        </div>
-
-        <div
-          className={
-            'rounded border p-3 transition ' +
-            (selectedScenarioId === 'custom'
-              ? 'border-amber-300/60 bg-black/50'
-              : 'border-white/15 bg-black/50')
-          }
-        >
-          <div className="text-xs uppercase tracking-widest text-amber-200/80">
-            {selectedScenarioId === 'custom'
-              ? 'Your custom instructions'
-              : 'Scenario chatbox'}
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between">
+            <label
+              htmlFor="scenario-instructions"
+              className="text-xs uppercase tracking-widest text-amber-200/80"
+            >
+              {selectedScenarioId === 'custom' ? 'Your instructions' : 'What gets injected'}
+            </label>
+            <span className="text-[10px] uppercase tracking-widest text-white/35">
+              {scenarioText.trim().length} chars
+            </span>
           </div>
           <textarea
+            id="scenario-instructions"
             className={
-              'mt-2 w-full resize-none rounded border px-3 py-2 text-sm sm:text-base bg-black/30 ' +
-              (selectedScenarioId === 'custom'
-                ? 'border-amber-300/40 focus:border-amber-300 outline-none'
-                : 'border-white/10')
+              'w-full resize-none rounded-lg border px-3 py-2 text-sm sm:text-base bg-black/40 text-white/90 placeholder:text-white/30 transition outline-none ' +
+              'border-amber-200/25 focus:border-amber-300 focus:ring-1 focus:ring-amber-300/50'
             }
             placeholder={
               selectedScenarioId === 'custom'
                 ? 'e.g. "Everyone is secretly a spy who must not reveal their identity"'
                 : 'Describe the scenario you want to inject...'
             }
-            rows={selectedScenarioId === 'custom' ? 4 : 3}
+            rows={4}
             autoFocus={selectedScenarioId === 'custom'}
             value={scenarioText}
             onChange={(event) => setScenarioText(event.target.value)}
           />
+          <p className="text-[11px] leading-snug text-white/40">
+            Every agent reacts to this in character, then reshapes their day around it.
+          </p>
         </div>
 
-        <div className="flex justify-between gap-3">
+        <div className="flex items-stretch gap-3 pt-1">
           <button
-            className="button text-white shadow-solid text-sm cursor-pointer pointer-events-auto opacity-70 hover:opacity-100"
+            className="button text-white shadow-solid text-sm cursor-pointer pointer-events-auto opacity-80 hover:opacity-100"
             type="button"
             onClick={onClearScenario}
             title="Remove any active scenario from all agents"
           >
-            <div className="h-full bg-clay-700 px-3 py-2 text-center">Clear scenario</div>
+            <div className="h-full flex items-center justify-center whitespace-nowrap bg-clay-700 px-4 py-2">
+              Clear
+            </div>
           </button>
           <button
-            className="button text-white shadow-solid text-base sm:text-lg cursor-pointer pointer-events-auto"
+            className="button flex-1 min-w-0 text-white shadow-solid text-sm sm:text-base cursor-pointer pointer-events-auto disabled:opacity-40 disabled:cursor-not-allowed"
             type="button"
             onClick={onStartScenario}
+            disabled={!scenarioText.trim()}
           >
-            <div className="h-full bg-clay-700 px-4 py-2 text-center">Start scenario</div>
+            <div className="h-full flex items-center justify-center gap-2 whitespace-nowrap truncate bg-clay-700 px-3 py-2">
+              <span aria-hidden>▶</span> Start scenario
+            </div>
           </button>
         </div>
       </div>
@@ -574,6 +614,40 @@ export default function PlayerDetails({
           )}
         </p>
       </div>
+      {!isMe && relationships.length > 0 && (
+        <div className="box flex-grow mb-4">
+          <h2 className="bg-brown-700 text-base sm:text-lg text-center px-2 py-1">Relationships</h2>
+          <ul className="bg-brown-700 text-sm leading-snug px-3 pb-3 pt-2 flex flex-col gap-2">
+            {relationships.map((r) => (
+              <li key={r.name} className="flex flex-col gap-1">
+                <div className="flex items-center gap-2">
+                  <span className="shrink-0">{affinityEmoji(r.affinity)}</span>
+                  <span className="flex-1">
+                    {r.name}
+                    {r.relation && <span className="text-white/60"> · {r.relation}</span>}
+                  </span>
+                  <span className="text-white/70 shrink-0">
+                    {affinityLabel(r.affinity)} ({r.affinity})
+                  </span>
+                </div>
+                <div
+                  className="h-2 w-full rounded overflow-hidden bg-black/30"
+                  role="meter"
+                  aria-valuenow={r.affinity}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  title={`Affinity ${r.affinity}/100`}
+                >
+                  <div
+                    className="h-full rounded transition-all"
+                    style={{ width: `${r.affinity}%`, backgroundColor: affinityColor(r.affinity) }}
+                  />
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {!isMe && agentForPlayer?.schedule && agentForPlayer.schedule.length > 0 && (
         <div className="box flex-grow mb-4">
           <h2 className="bg-brown-700 text-base sm:text-lg text-center px-2 py-1">
@@ -618,6 +692,7 @@ export default function PlayerDetails({
           humanPlayer={humanPlayer}
           scrollViewRef={scrollViewRef}
           worldStartTime={game.world.worldStartTime}
+          game={game}
         />
       )}
       {!playerConversation && previousConversation && (

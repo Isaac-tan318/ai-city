@@ -13,8 +13,8 @@ import { GameId } from '../../convex/aiTown/ids.ts';
 import { useServerGame } from '../hooks/serverGame.ts';
 import { GameClock } from './GameClock.tsx';
 import { TimeControls } from './TimeControls.tsx';
-import { ChatHistoryViewer } from './ChatHistoryViewer.tsx';
 import { MiniMap } from './MiniMap.tsx';
+import { ScenariosPanel, ScenarioDetail } from './Scenarios.tsx';
 import type { Viewport } from 'pixi-viewport';
 
 export const SHOW_DEBUG_UI = !!import.meta.env.VITE_SHOW_DEBUG_UI;
@@ -25,7 +25,7 @@ export default function Game() {
     kind: 'player';
     id: GameId<'players'>;
   }>();
-  const [showChatHistory, setShowChatHistory] = useState(false);
+  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
   const [gameWrapperRef, { width, height }] = useElementSize();
 
   const worldStatus = useQuery(api.world.defaultWorldStatus);
@@ -66,6 +66,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
                     height={height}
                     historicalTime={historicalTime}
                     setSelectedElement={setSelectedElement}
+                    onSelectScenario={setSelectedScenarioId}
                     viewportRef={viewportRef}
                   />
                 </ConvexProvider>
@@ -74,23 +75,17 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
           </div>
           <GameClock historicalTime={historicalTime} worldStartTime={game.world.worldStartTime} />
           <TimeControls historicalTime={historicalTime} worldStartTime={game.world.worldStartTime} />
+          <ScenariosPanel
+            scenarios={game.world.activeScenarios ?? []}
+            nextScenarioTime={game.world.nextScenarioTime}
+            onSelect={setSelectedScenarioId}
+          />
         </div>
         {/* Right column area */}
         <div
           className="flex flex-col overflow-y-auto shrink-0 px-4 py-6 sm:px-6 lg:w-96 xl:pr-6 border-t-8 sm:border-t-0 sm:border-l-8 border-brown-900  bg-brown-800 text-brown-100"
           ref={scrollViewRef}
         >
-          <div className="flex justify-end mb-3">
-            <button
-              className="button text-white shadow-solid text-sm cursor-pointer pointer-events-auto"
-              onClick={() => setShowChatHistory(true)}
-              type="button"
-            >
-              <div className="h-full bg-clay-700 flex items-center gap-1 px-3">
-                <span>Chat History</span>
-              </div>
-            </button>
-          </div>
           <PlayerDetails
             worldId={worldId}
             engineId={engineId}
@@ -101,9 +96,24 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
           />
         </div>
       </div>
-      {showChatHistory && (
-        <ChatHistoryViewer worldId={worldId} onClose={() => setShowChatHistory(false)} />
-      )}
+      {(() => {
+        // Render the detail modal for the selected scenario; if it has since
+        // expired (no longer in activeScenarios), the modal simply closes.
+        const selected = (game.world.activeScenarios ?? []).find(
+          (s) => s.id === selectedScenarioId,
+        );
+        return selected ? (
+          <ScenarioDetail
+            scenario={selected}
+            game={game}
+            onClose={() => setSelectedScenarioId(null)}
+            onViewConversation={(playerId) => {
+              setSelectedElement({ kind: 'player', id: playerId });
+              setSelectedScenarioId(null);
+            }}
+          />
+        ) : null;
+      })()}
       <MiniMap game={game} viewportRef={viewportRef} />
     </>
   );

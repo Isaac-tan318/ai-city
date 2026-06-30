@@ -4,6 +4,12 @@ export type CityLocation = {
   x: number;
   y: number;
   description: string;
+  // Optional cosmetic override for where a scenario marker is drawn. The x/y
+  // above are passable tiles agents stand on (often just outside the building);
+  // markerX/markerY let the on-map scenario beacon sit inside the building roof
+  // instead, without affecting pathfinding or work gathering.
+  markerX?: number;
+  markerY?: number;
 };
 
 // Singapore-themed points of interest. Coordinates were picked as passable tiles
@@ -16,6 +22,9 @@ export const CITY_LOCATIONS: CityLocation[] = [
     name: 'Marina Bay Sands',
     x: 36,
     y: 22,
+    // Beacon sits up in the building, not on the taxi-stand tile below it.
+    markerX: 36,
+    markerY: 20,
     description:
       'Iconic three-tower hotel with the rooftop skypark and reflecting pool. Tourists, business meetings, expensive drinks.',
   },
@@ -32,6 +41,9 @@ export const CITY_LOCATIONS: CityLocation[] = [
     name: 'A*STAR',
     x: 13,
     y: 8,
+    // Beacon sits up in the building, not on the standing tile below it.
+    markerX: 13,
+    markerY: 6,
     description:
       "Singapore's national research agency campus. Scientists, postdocs, gleaming labs.",
   },
@@ -90,9 +102,12 @@ export const CITY_LOCATIONS: CityLocation[] = [
 export const CHARACTER_HOMES: Record<string, { locationId: string; x?: number; y?: number }> = {
   Cedric: { locationId: 'shophouses', x: 60, y: 42 }, // back room above his cafe
   Xavier: { locationId: 'shophouses', x: 64, y: 37 }, // upstairs unit two doors down
+  Clara: { locationId: 'shophouses', x: 56, y: 40 }, // rents a restored shophouse unit
   James: { locationId: 'hdb', x: 56, y: 9 }, // HDB block, ground floor
   Sarah: { locationId: 'hdb', x: 65, y: 9 }, // HDB block, middle unit
   Isabel: { locationId: 'hdb', x: 61, y: 17 }, // HDB block, far unit
+  Rahman: { locationId: 'hdb', x: 54, y: 9 }, // HDB block, corner unit
+  Lukas: { locationId: 'hdb', x: 53, y: 16 }, // HDB block, rented unit
 };
 
 // Per-character workplace. On weekdays agents spend their working hours here.
@@ -101,7 +116,10 @@ export const CHARACTER_WORKPLACES: Record<string, { locationId: string; activity
   Cedric: { locationId: 'shophouses', activity: 'working the espresso bar at his cafe' },
   James: { locationId: 'mbs', activity: 'waiting at the taxi stand for fares' },
   Sarah: { locationId: 'restaurant', activity: 'cooking and serving at her hawker stall' },
+  Rahman: { locationId: 'restaurant', activity: 'pulling teh tarik and serving kopi at his drinks stall' },
   Isabel: { locationId: 'astar', activity: 'running experiments in the lab' },
+  Lukas: { locationId: 'astar', activity: 'running materials experiments in the lab' },
+  Clara: { locationId: 'astar', activity: 'leading her genomics lab and reviewing data' },
   Xavier: { locationId: 'university', activity: 'cramming on coding projects on campus' },
 };
 
@@ -117,6 +135,21 @@ export function workplaceFor(
   const location = getLocationById(entry.locationId);
   if (!location) return undefined;
   return { location, activity: entry.activity };
+}
+
+// If the character is currently scheduled AT their own workplace (the work shift
+// or the lunch break, both of which sit at the workplace location), return the
+// workplace tile so callers can "leash" the agent nearby and stop them wandering
+// across the map mid-shift. Otherwise undefined (off shift — free to roam).
+export function workLeashAnchor(
+  characterName: string | undefined,
+  step: { locationId: string } | undefined,
+): { x: number; y: number } | undefined {
+  if (!characterName || !step) return undefined;
+  const entry = CHARACTER_WORKPLACES[characterName];
+  if (!entry || step.locationId !== entry.locationId) return undefined;
+  const loc = getLocationById(entry.locationId);
+  return loc ? { x: loc.x, y: loc.y } : undefined;
 }
 
 // Accepts the canonical id or a fuzzy match on name (case-insensitive substring).

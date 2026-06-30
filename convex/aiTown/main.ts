@@ -125,6 +125,12 @@ export const runStep = internalAction({
           console.debug(`Generation number mismatch: ${e.message}`);
           return;
         }
+        if (e.data.kind === 'worldDeleted') {
+          // The world was wiped/deleted; this is an orphaned loop. Let it die
+          // quietly instead of rescheduling forever against a missing world.
+          console.debug(`World deleted; stopping stale engine loop: ${e.message}`);
+          return;
+        }
       }
       // Any OTHER error (e.g. a transient "no available workers" capacity blip
       // from the Convex backend, or a flaky LLM/query failure) would otherwise

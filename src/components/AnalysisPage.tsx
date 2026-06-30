@@ -3,9 +3,25 @@ import { Link } from 'react-router-dom';
 import { useQuery } from 'convex/react';
 import { api } from '../../convex/_generated/api';
 import { CharacterIcon } from './CharacterIcon';
+import { affinityColor, affinityEmoji, affinityLabel } from '../../convex/aiTown/affinity';
 
-type GraphNode = { id: string; name: string; character: string | null; conversations: number };
-type GraphLink = { source: string; target: string; count: number; lastEnded: number };
+type GraphNode = {
+  id: string;
+  name: string;
+  character: string | null;
+  conversations: number;
+  avgAffinity?: number;
+};
+type GraphLink = {
+  source: string;
+  target: string;
+  count: number;
+  lastEnded: number;
+  affinityAB: number;
+  affinityBA: number;
+  affinity: number;
+  family: boolean;
+};
 
 const GRAPH_SIZE = 640;
 const CENTER = GRAPH_SIZE / 2;
@@ -104,6 +120,7 @@ function RelationshipGraph({
             const a = positions.get(l.source)!;
             const b = positions.get(l.target)!;
             const active = hovered === null || hovered === l.source || hovered === l.target;
+            // Thickness encodes how often they talk; colour encodes how they feel.
             return (
               <line
                 key={`${l.source}-${l.target}`}
@@ -111,9 +128,11 @@ function RelationshipGraph({
                 y1={a.y}
                 x2={b.x}
                 y2={b.y}
-                stroke={active ? '#d97757' : '#5a4a42'}
+                stroke={active ? affinityColor(l.affinity) : '#5a4a42'}
                 strokeWidth={1 + (l.count / maxLink) * 7}
-                strokeOpacity={active ? 0.85 : 0.2}
+                strokeOpacity={active ? 0.9 : 0.18}
+                strokeDasharray={l.family ? '2 6' : undefined}
+                strokeLinecap="round"
               />
             );
           })}
@@ -144,8 +163,15 @@ function RelationshipGraph({
               <div
                 className="rounded-full transition-all"
                 style={{
-                  outline: hovered === n.id ? '3px solid #d97757' : '3px solid transparent',
+                  // Ring colour reflects the agent's average warmth toward the
+                  // people they talk to; thickens on hover.
+                  outline:
+                    n.avgAffinity !== undefined
+                      ? `3px solid ${affinityColor(n.avgAffinity)}`
+                      : '3px solid transparent',
                   outlineOffset: '2px',
+                  boxShadow: hovered === n.id ? '0 0 0 3px #d97757' : undefined,
+                  borderRadius: '9999px',
                 }}
               >
                 <CharacterIcon character={n.character} name={n.name} size={iconSize} />
@@ -167,6 +193,19 @@ function RelationshipGraph({
   );
 }
 
+// Small coloured affinity pill: emoji + numeric score, tinted to the score.
+function AffinityBadge({ value, title }: { value: number; title?: string }) {
+  return (
+    <span
+      className="shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-bold tabular-nums"
+      style={{ color: affinityColor(value), backgroundColor: '#0003' }}
+      title={title ?? `${affinityLabel(value)} (${value}/100)`}
+    >
+      {affinityEmoji(value)} {value}
+    </span>
+  );
+}
+
 function SidePanel({
   nodes,
   links,
@@ -178,9 +217,84 @@ function SidePanel({
 }) {
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
   const topPairs = [...links].sort((a, b) => b.count - a.count).slice(0, 8);
+  // Strongest mutual bonds and sourest pairs, by average affinity.
+  const closest = [...links].sort((a, b) => b.affinity - a.affinity).slice(0, 6);
+  const tensions = [...links]
+    .filter((l) => l.affinity < 45)
+    .sort((a, b) => a.affinity - b.affinity)
+    .slice(0, 6);
+
+  // When an agent is hovered, focus the panel on their directional relationships.
+  const hoveredNode = hovered ? nodeMap.get(hovered) : undefined;
+  const hoveredRels = hovered
+    ? links
+        .filter((l) => l.source === hovered || l.target === hovered)
+        .map((l) => {
+          const otherId = l.source === hovered ? l.target : l.source;
+          // `outward` = how the hovered agent feels; `inward` = how the other does.
+          const outward = l.source === hovered ? l.affinityAB : l.affinityBA;
+          const inward = l.source === hovered ? l.affinityBA : l.affinityAB;
+          return { other: nodeMap.get(otherId), outward, inward, count: l.count, family: l.family };
+        })
+        .sort((a, b) => b.outward - a.outward)
+    : [];
+
+  const PairRow = ({ l }: { l: GraphLink }) => {
+    const a = nodeMap.get(l.source);
+    const b = nodeMap.get(l.target);
+    return (
+      <li className="flex items-center gap-2">
+        <div className="flex -space-x-2 shrink-0">
+          <CharacterIcon character={a?.character} name={a?.name} size={28} />
+          <CharacterIcon character={b?.character} name={b?.name} size={28} />
+        </div>
+        <span className="flex-1 truncate text-sm text-brown-100">
+          {a?.name} &amp; {b?.name}
+          {l.family && <span className="text-brown-400"> · family</span>}
+        </span>
+        <AffinityBadge value={l.affinity} />
+      </li>
+    );
+  };
 
   return (
     <div className="space-y-6">
+      {hoveredNode && (
+        <div className="bg-brown-800 box p-4">
+          <h2 className="font-display uppercase tracking-widest text-sm text-clay-500 mb-3 flex items-center gap-2">
+            <CharacterIcon
+              character={hoveredNode.character}
+              name={hoveredNode.name}
+              size={26}
+            />
+            {hoveredNode.name}
+          </h2>
+          <ul className="space-y-2">
+            {hoveredRels.map((r) => (
+              <li key={r.other?.id} className="flex items-center gap-2">
+                <CharacterIcon character={r.other?.character} name={r.other?.name} size={26} />
+                <span className="flex-1 truncate text-sm text-brown-100">
+                  {r.other?.name}
+                  {r.family && <span className="text-brown-400"> · family</span>}
+                </span>
+                <AffinityBadge
+                  value={r.outward}
+                  title={`${hoveredNode.name} → ${r.other?.name}: ${affinityLabel(r.outward)} (${r.outward}/100)`}
+                />
+                <span className="text-brown-500 text-xs shrink-0">↔</span>
+                <AffinityBadge
+                  value={r.inward}
+                  title={`${r.other?.name} → ${hoveredNode.name}: ${affinityLabel(r.inward)} (${r.inward}/100)`}
+                />
+              </li>
+            ))}
+          </ul>
+          <p className="text-xs text-brown-400 mt-2">
+            Left badge: how {hoveredNode.name} feels · right badge: how they feel back.
+          </p>
+        </div>
+      )}
+
       <div className="bg-brown-800 box p-4">
         <h2 className="font-display uppercase tracking-widest text-sm text-brown-200 mb-3">
           Most active agents
@@ -197,11 +311,41 @@ function SidePanel({
               >
                 {n.name}
               </span>
-              <span className="text-brown-300 shrink-0 text-sm">{n.conversations}</span>
+              {n.avgAffinity !== undefined && (
+                <AffinityBadge
+                  value={n.avgAffinity}
+                  title={`Average warmth toward connections: ${affinityLabel(n.avgAffinity)} (${n.avgAffinity}/100)`}
+                />
+              )}
+              <span className="text-brown-300 shrink-0 text-sm tabular-nums">{n.conversations}</span>
             </li>
           ))}
         </ul>
       </div>
+
+      <div className="bg-brown-800 box p-4">
+        <h2 className="font-display uppercase tracking-widest text-sm text-brown-200 mb-3">
+          Closest bonds
+        </h2>
+        <ul className="space-y-2">
+          {closest.map((l) => (
+            <PairRow key={`${l.source}-${l.target}`} l={l} />
+          ))}
+        </ul>
+      </div>
+
+      {tensions.length > 0 && (
+        <div className="bg-brown-800 box p-4">
+          <h2 className="font-display uppercase tracking-widest text-sm text-brown-200 mb-3">
+            Tensions
+          </h2>
+          <ul className="space-y-2">
+            {tensions.map((l) => (
+              <PairRow key={`${l.source}-${l.target}`} l={l} />
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="bg-brown-800 box p-4">
         <h2 className="font-display uppercase tracking-widest text-sm text-brown-200 mb-3">
@@ -220,17 +364,24 @@ function SidePanel({
                 <span className="flex-1 truncate text-sm text-brown-100">
                   {a?.name} &amp; {b?.name}
                 </span>
-                <span className="text-brown-300 shrink-0 text-sm">{l.count}</span>
+                <AffinityBadge value={l.affinity} />
+                <span className="text-brown-300 shrink-0 text-sm tabular-nums">{l.count}</span>
               </li>
             );
           })}
         </ul>
       </div>
 
-      <p className="text-xs text-brown-400 px-1">
-        Icon size and line thickness scale with conversation count. Hover an agent to highlight
-        their connections.
-      </p>
+      <div className="text-xs text-brown-400 px-1 space-y-1">
+        <p>
+          Line <span className="text-brown-200">thickness</span> = conversation count;{' '}
+          <span className="text-brown-200">colour</span> = affinity (
+          <span style={{ color: affinityColor(85) }}>warm</span> →{' '}
+          <span style={{ color: affinityColor(50) }}>neutral</span> →{' '}
+          <span style={{ color: affinityColor(15) }}>hostile</span>); dashed lines are family ties.
+        </p>
+        <p>Node ring colour shows each agent's average warmth. Hover an agent for details.</p>
+      </div>
     </div>
   );
 }

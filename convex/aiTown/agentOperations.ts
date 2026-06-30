@@ -6,8 +6,10 @@ import { rememberConversation } from '../agent/memory';
 import { GameId, agentId, conversationId, playerId } from './ids';
 import {
   continueConversationMessage,
+  decideNextSpeaker,
   leaveConversationMessage,
   startConversationMessage,
+  summarizeGoalMessage,
 } from '../agent/conversation';
 import { assertNever } from '../util/assertNever';
 import { serializedAgent, ScheduleStep, scheduleStep } from './agent';
@@ -16,7 +18,14 @@ import { api, internal } from '../_generated/api';
 import { sleep } from '../util/sleep';
 import { serializedPlayer } from './player';
 import { chatCompletion } from '../util/llm';
-import { CITY_LOCATIONS, CityLocation, getLocationById, workplaceFor } from '../../data/cityLocations';
+import {
+  CITY_LOCATIONS,
+  CityLocation,
+  getLocationById,
+  workplaceFor,
+  workLeashAnchor,
+} from '../../data/cityLocations';
+import { WORK_LEASH_RADIUS } from '../constants';
 import { point } from '../util/types';
 
 export const agentRememberConversation = internalAction({
@@ -28,14 +37,16 @@ export const agentRememberConversation = internalAction({
     operationId: v.string(),
   },
   handler: async (ctx, args) => {
+    let affinityDeltas: { playerId: string; delta: number }[] = [];
     try {
-      await rememberConversation(
+      const result = await rememberConversation(
         ctx,
         args.worldId,
         args.agentId as GameId<'agents'>,
         args.playerId as GameId<'players'>,
         args.conversationId as GameId<'conversations'>,
       );
+      affinityDeltas = result?.affinityDeltas ?? [];
     } catch (err) {
       // CRITICAL: never let a failed remember leave the agent stuck. If the
       // conversation can't be loaded (e.g. an abandoned invite that was never
@@ -50,6 +61,17 @@ export const agentRememberConversation = internalAction({
       );
     }
     await sleep(Math.random() * 1000);
+    // Apply any affinity shifts the summary judged, then free the agent.
+    if (affinityDeltas.length > 0) {
+      await ctx.runMutation(api.aiTown.main.sendInput, {
+        worldId: args.worldId,
+        name: 'agentApplyAffinity',
+        args: {
+          agentId: args.agentId,
+          deltas: affinityDeltas,
+        },
+      });
+    }
     await ctx.runMutation(api.aiTown.main.sendInput, {
       worldId: args.worldId,
       name: 'finishRememberConversation',
@@ -61,15 +83,112 @@ export const agentRememberConversation = internalAction({
   },
 });
 
+// Loads the static background + name needed to extract a scenario-relevant
+// profile. Kept tiny so the extraction action's only heavy step is the LLM call.
+export const loadScenarioProfileContext = internalQuery({
+  args: { worldId: v.id('worlds'), agentId, playerId },
+  handler: async (ctx, args) => {
+    const agentDescription = await ctx.db
+      .query('agentDescriptions')
+      .withIndex('worldId', (q) =>
+        q.eq('worldId', args.worldId).eq('agentId', args.agentId as GameId<'agents'>),
+      )
+      .unique();
+    const playerDescription = await ctx.db
+      .query('playerDescriptions')
+      .withIndex('worldId', (q) =>
+        q.eq('worldId', args.worldId).eq('playerId', args.playerId as GameId<'players'>),
+      )
+      .unique();
+    const world = await ctx.db.get(args.worldId);
+    return {
+      name: playerDescription?.name ?? 'the character',
+      profile: agentDescription?.profile,
+      scenarioName: world?.scenarioName,
+    };
+  },
+});
+
+// Distil a character's full structured background down to just the traits that
+// matter for the current scenario — the compact view *other* participants see in
+// their prompts (the character itself always sees its full background). Runs once
+// per scenario per character (scheduled lock-free from Agent.tick), never per
+// message, so the extra LLM call doesn't bottleneck the conversation loop.
+export const agentExtractScenarioProfile = internalAction({
+  args: {
+    worldId: v.id('worlds'),
+    agentId,
+    playerId,
+    scenarioInstruction: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { name, profile, scenarioName } = await ctx.runQuery(
+      internal.aiTown.agentOperations.loadScenarioProfileContext,
+      { worldId: args.worldId, agentId: args.agentId, playerId: args.playerId },
+    );
+    // No structured background → nothing to distil; others fall back to identity.
+    if (!profile || Object.keys(profile).length === 0) {
+      return;
+    }
+    const profileLines = Object.entries(profile)
+      .map(([k, val]) => `- ${k}: ${val}`)
+      .join('\n');
+    const scenarioLabel = scenarioName
+      ? `${scenarioName}: ${args.scenarioInstruction}`
+      : args.scenarioInstruction;
+    const prompt = [
+      `Here is ${name}'s full background as key-value pairs:`,
+      profileLines,
+      ``,
+      `The current scenario / activity is:`,
+      `"${scenarioLabel}"`,
+      ``,
+      `In 1-2 sentences, summarise ONLY the traits, constraints, and preferences from ${name}'s background that are most relevant to how others should perceive and interact with ${name} in THIS scenario. Write it as a compact third-person note about ${name} (e.g. "${name} is a strict vegetarian and prefers clear bill-splitting"). Mention nothing irrelevant to this scenario, and do not invent anything not present in the background.`,
+    ].join('\n');
+
+    let scenarioProfile = '';
+    try {
+      const { content } = await chatCompletion({
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 160,
+      });
+      scenarioProfile = content.trim();
+    } catch (err) {
+      // Leave scenarioProfile unset on failure. The trigger guard in Agent.tick
+      // already set scenarioProfileFor optimistically, so this won't retry-storm;
+      // others simply fall back to the default identity for this scenario.
+      console.error(
+        `agentExtractScenarioProfile failed for ${args.agentId}: ${(err as Error).message}`,
+      );
+      return;
+    }
+    if (!scenarioProfile) return;
+
+    await ctx.runMutation(api.aiTown.main.sendInput, {
+      worldId: args.worldId,
+      name: 'agentSetScenarioProfile',
+      args: {
+        agentId: args.agentId,
+        scenarioProfile,
+        scenarioInstruction: args.scenarioInstruction,
+      },
+    });
+  },
+});
+
 export const agentGenerateMessage = internalAction({
   args: {
     worldId: v.id('worlds'),
     playerId,
     agentId,
     conversationId,
-    otherPlayerId: playerId,
     operationId: v.string(),
-    type: v.union(v.literal('start'), v.literal('continue'), v.literal('leave')),
+    type: v.union(
+      v.literal('start'),
+      v.literal('continue'),
+      v.literal('leave'),
+      v.literal('summary'),
+    ),
     messageUuid: v.string(),
     // Engine wall-clock timestamp from the tick that triggered this operation.
     // Passed to the prompt builder so the time the LLM is told matches the game
@@ -88,6 +207,9 @@ export const agentGenerateMessage = internalAction({
       case 'leave':
         completionFn = leaveConversationMessage;
         break;
+      case 'summary':
+        completionFn = summarizeGoalMessage;
+        break;
       default:
         assertNever(args.type);
     }
@@ -96,9 +218,29 @@ export const agentGenerateMessage = internalAction({
       args.worldId,
       args.conversationId as GameId<'conversations'>,
       args.playerId as GameId<'players'>,
-      args.otherPlayerId as GameId<'players'>,
       args.gameTimeMs,
     );
+
+    // After speaking (but not when leaving), the dialogue orchestrator picks who
+    // should hold the floor next so a group chat flows instead of everyone (or
+    // no one) talking. undefined = open floor (e.g. only humans remain). For a
+    // scenario conversation it also reports whether the scenario's goal is met.
+    // No next-speaker / goal re-judging for the terminal turns (leaving, or the
+    // one-off goal summary that comes after the goal is already met).
+    let nextSpeaker: GameId<'players'> | undefined;
+    let goalMet = false;
+    let coveredTopics: number[] = [];
+    if (args.type !== 'leave' && args.type !== 'summary') {
+      const decision = await decideNextSpeaker(
+        ctx,
+        args.worldId,
+        args.conversationId as GameId<'conversations'>,
+        args.playerId as GameId<'players'>,
+      );
+      nextSpeaker = decision.nextSpeaker;
+      goalMet = decision.goalMet;
+      coveredTopics = decision.coveredTopics;
+    }
 
     await ctx.runMutation(internal.aiTown.agent.agentSendMessage, {
       worldId: args.worldId,
@@ -108,7 +250,11 @@ export const agentGenerateMessage = internalAction({
       text,
       messageUuid: args.messageUuid,
       leaveConversation: args.type === 'leave',
+      isGoalSummary: args.type === 'summary',
       operationId: args.operationId,
+      nextSpeaker,
+      goalMet,
+      coveredTopics,
     });
   },
 });
@@ -130,6 +276,12 @@ export const agentDoSomething = internalAction({
     const { player, agent } = args;
     const map = new WorldMap(args.map);
     const now = Date.now();
+    // If we're on shift, keep any wandering close to the workplace.
+    const currentStep =
+      agent.schedule && agent.currentStepIndex !== undefined
+        ? agent.schedule[agent.currentStepIndex]
+        : undefined;
+    const leashAnchor = workLeashAnchor(player.name, currentStep);
     // Don't try to start a new conversation if we were just in one.
     const justLeftConversation =
       agent.lastConversation && now < agent.lastConversation + CONVERSATION_COOLDOWN;
@@ -147,7 +299,7 @@ export const agentDoSomething = internalAction({
           args: {
             operationId: args.operationId,
             agentId: agent.id,
-            destination: wanderDestination(map),
+            destination: wanderDestination(map, leashAnchor),
           },
         });
         return;
@@ -196,8 +348,17 @@ export const agentDoSomething = internalAction({
   },
 });
 
-function wanderDestination(worldMap: WorldMap) {
-  // Wander someonewhere at least one tile away from the edge.
+function wanderDestination(worldMap: WorldMap, anchor?: { x: number; y: number }) {
+  // On shift: pick a tile within the leash radius of the workplace so the agent
+  // stays put. Otherwise wander anywhere at least one tile away from the edge.
+  if (anchor) {
+    const r = WORK_LEASH_RADIUS;
+    const clamp = (v: number, max: number) => Math.min(Math.max(1, v), max - 2);
+    return {
+      x: clamp(anchor.x + Math.floor(Math.random() * (2 * r + 1)) - r, worldMap.width),
+      y: clamp(anchor.y + Math.floor(Math.random() * (2 * r + 1)) - r, worldMap.height),
+    };
+  }
   return {
     x: 1 + Math.floor(Math.random() * (worldMap.width - 2)),
     y: 1 + Math.floor(Math.random() * (worldMap.height - 2)),

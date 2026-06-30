@@ -209,6 +209,11 @@ p[contenteditable='true']:empty::before {
   height: 0;
 }
 
+.scenario-card {
+  min-height: 48px;
+  justify-content: center;
+}
+
 .scenario-select {
   background-color: #2b2418;
   color: #f8e7c0;

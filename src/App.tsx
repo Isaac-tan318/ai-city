@@ -13,6 +13,7 @@ import ReactModal from 'react-modal';
 import MusicButton from './components/buttons/MusicButton.tsx';
 import Button from './components/buttons/Button.tsx';
 import InteractButton from './components/buttons/InteractButton.tsx';
+import ChatHistoryButton from './components/buttons/ChatHistoryButton.tsx';
 import FreezeButton from './components/FreezeButton.tsx';
 import { MAX_HUMAN_PLAYERS } from '../convex/constants.ts';
 
@@ -87,6 +88,7 @@ export default function Home() {
             <Button imgUrl={helpImg} onClick={() => setHelpModalOpen(true)}>
               Help
             </Button>
+            <ChatHistoryButton />
             <Link
               to="/analysis"
               className="button text-white shadow-solid text-xl pointer-events-auto"

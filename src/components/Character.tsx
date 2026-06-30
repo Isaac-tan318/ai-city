@@ -12,6 +12,7 @@ export const Character = ({
   isMoving = false,
   isThinking = false,
   isSpeaking = false,
+  affinityChange,
   emoji = '',
   isViewer = false,
   speed = 0.1,
@@ -30,6 +31,8 @@ export const Character = ({
   isThinking?: boolean;
   // Shows a speech bubble if true.
   isSpeaking?: boolean;
+  // Briefly flashes a 💗 (affinity rose) or 💔 (affinity fell) after a conversation.
+  affinityChange?: 'up' | 'down';
   emoji?: string;
   // Highlights the player.
   isViewer?: boolean;
@@ -103,6 +106,15 @@ export const Character = ({
       />
       {emoji && (
         <Text x={0} y={-24} scale={{ x: -0.8, y: 0.8 }} text={emoji} anchor={{ x: 0.5, y: 0.5 }} />
+      )}
+      {affinityChange && (
+        <Text
+          x={0}
+          y={-40}
+          scale={0.9}
+          text={affinityChange === 'up' ? '💗' : '💔'}
+          anchor={{ x: 0.5, y: 0.5 }}
+        />
       )}
     </Container>
   );

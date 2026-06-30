@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { insertInput } from './aiTown/insertInput';
 import { conversationId, playerId } from './aiTown/ids';
+import { affinityToward, isFamilyMember, type FamilyTie } from './aiTown/affinity';
 
 export const listMessages = query({
   args: {
@@ -112,6 +113,40 @@ export const conversationGraph = query({
     const nameMap = new Map(playerDescs.map((p) => [p.playerId, p.name]));
     const charMap = new Map(playerDescs.map((p) => [p.playerId, p.character]));
 
+    // Pull live affinity (mutable, directional 0–100) off the serialized agents,
+    // and the immutable family ties off the agent descriptions, so the graph can
+    // reflect how each pair actually feels — not just how often they talk.
+    const world = await ctx.db.get(args.worldId);
+    const agentDescs = await ctx.db
+      .query('agentDescriptions')
+      .withIndex('worldId', (q) => q.eq('worldId', args.worldId))
+      .collect();
+    const familyByAgent = new Map<string, FamilyTie[]>(
+      agentDescs.map((d) => [d.agentId, d.family ?? []]),
+    );
+    // playerId -> { affinities they hold toward others, their authored family }.
+    const affinityByPlayer = new Map<
+      string,
+      { affinities: Record<string, number>; family: FamilyTie[] }
+    >();
+    for (const agent of world?.agents ?? []) {
+      affinityByPlayer.set(agent.playerId, {
+        affinities: agent.affinities ?? {},
+        family: familyByAgent.get(agent.id) ?? [],
+      });
+    }
+    // Directional affinity `from` feels toward `to`, resolved through the same
+    // family-aware default used by the engine and the inspector.
+    const affinityFor = (from: string, to: string) => {
+      const entry = affinityByPlayer.get(from);
+      return affinityToward({
+        affinities: entry?.affinities,
+        otherPlayerId: to,
+        family: entry?.family,
+        otherName: nameMap.get(to),
+      });
+    };
+
     // `participatedTogether` stores a directed edge for each ordered pair, so we
     // canonicalize to an unordered pair and count distinct conversations.
     const pairs = new Map<
@@ -134,21 +169,42 @@ export const conversationGraph = query({
       entry.lastEnded = Math.max(entry.lastEnded, edge.ended);
     }
 
-    const links = [...pairs.values()].map((p) => ({
-      source: p.a,
-      target: p.b,
-      count: p.conversations.size,
-      lastEnded: p.lastEnded,
-    }));
+    const links = [...pairs.values()].map((p) => {
+      const affinityAB = affinityFor(p.a, p.b);
+      const affinityBA = affinityFor(p.b, p.a);
+      return {
+        source: p.a,
+        target: p.b,
+        count: p.conversations.size,
+        lastEnded: p.lastEnded,
+        // a -> b and b -> a can diverge (affinity is one-sided); `affinity` is the
+        // mutual average the graph paints edges with.
+        affinityAB,
+        affinityBA,
+        affinity: Math.round((affinityAB + affinityBA) / 2),
+        family:
+          isFamilyMember(affinityByPlayer.get(p.a)?.family, nameMap.get(p.b)) ||
+          isFamilyMember(affinityByPlayer.get(p.b)?.family, nameMap.get(p.a)),
+      };
+    });
 
-    const nodes = [...nodeIds].map((id) => ({
-      id,
-      name: nameMap.get(id) ?? id,
-      character: charMap.get(id) ?? null,
-      conversations: links
-        .filter((l) => l.source === id || l.target === id)
-        .reduce((sum, l) => sum + l.count, 0),
-    }));
+    const nodes = [...nodeIds].map((id) => {
+      const myLinks = links.filter((l) => l.source === id || l.target === id);
+      // Average affinity this agent *holds* toward the people they talk to — a
+      // rough "warmth" read on the agent themselves.
+      const outgoing = myLinks.map((l) => (l.source === id ? l.affinityAB : l.affinityBA));
+      const avgAffinity =
+        outgoing.length > 0
+          ? Math.round(outgoing.reduce((sum, v) => sum + v, 0) / outgoing.length)
+          : undefined;
+      return {
+        id,
+        name: nameMap.get(id) ?? id,
+        character: charMap.get(id) ?? null,
+        conversations: myLinks.reduce((sum, l) => sum + l.count, 0),
+        avgAffinity,
+      };
+    });
     nodes.sort((a, b) => b.conversations - a.conversations);
 
     return { nodes, links };

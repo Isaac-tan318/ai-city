@@ -2,16 +2,21 @@ import { ObjectType, v } from 'convex/values';
 import { GameId, parseGameId } from './ids';
 import { agentId, conversationId, playerId } from './ids';
 import { serializedPlayer } from './player';
+import { Conversation } from './conversation';
 import { Game } from './game';
 import {
   ACTION_TIMEOUT,
   AWKWARD_CONVERSATION_TIMEOUT,
   CONVERSATION_COOLDOWN,
   CONVERSATION_DISTANCE,
-  INVITE_ACCEPT_PROBABILITY,
+  GROUP_JOIN_RADIUS,
   INVITE_TIMEOUT,
   MAX_CONVERSATION_DURATION,
   MAX_CONVERSATION_MESSAGES,
+  MAX_CONVERSATION_PARTICIPANTS,
+  MAX_GROUP_CONVERSATION_MESSAGES,
+  GROUP_LEAVE_MIN_MESSAGES,
+  GROUP_LEAVE_PROBABILITY,
   MESSAGE_COOLDOWN,
   MIDPOINT_THRESHOLD,
   PLAYER_CONVERSATION_COOLDOWN,
@@ -20,12 +25,36 @@ import { FunctionArgs } from 'convex/server';
 import { MutationCtx, internalMutation, internalQuery } from '../_generated/server';
 import { distance, pointsEqual } from '../util/geometry';
 import { internal } from '../_generated/api';
-import { movePlayer, stopPlayer, pickParkWaypoint } from './movement';
+import { movePlayer, stopPlayer } from './movement';
 import { insertInput } from './insertInput';
 import { point, Point } from '../util/types';
-import { computeGameTime } from './gameTime';
-import { ARRIVAL_RADIUS, SCHEDULE_DISRUPTION_MINUTES, SCHEDULE_CHAT_RADIUS } from '../constants';
-import { getLocationById, homeFor } from '../../data/cityLocations';
+import { computeGameTime, CYCLE_MS, isWeekday } from './gameTime';
+import {
+  ARRIVAL_RADIUS,
+  SCENARIO_ARRIVAL_RADIUS,
+  SCHEDULE_DISRUPTION_MINUTES,
+  SCHEDULE_CHAT_RADIUS,
+  WORK_LEASH_RADIUS,
+  CONTEXTUAL_EVENT_PROBABILITY,
+  CONTEXTUAL_EVENT_MINUTES,
+  SICK_BASE_PROBABILITY,
+  SICK_PER_WORKDAY_PROBABILITY,
+  SICK_MAX_PROBABILITY,
+  SICK_DURATION_DAYS,
+  CONTAGION_PROBABILITY,
+  SCENARIO_CONVO_MIN_MESSAGES,
+  SCENARIO_CONVO_MAX_MESSAGES,
+  SCENARIO_MAX_CONVO_DURATION,
+  MAX_AFFINITY,
+  DEFAULT_AFFINITY,
+  CANDIDATE_AFFINITY_WEIGHT,
+  INVITE_ACCEPT_MIN_PROBABILITY,
+  INVITE_ACCEPT_MAX_PROBABILITY,
+  GROUP_LEAVE_AFFINITY_WEIGHT,
+} from '../constants';
+import { affinityToward, FamilyTie } from './affinity';
+import { getLocationById, homeFor, workLeashAnchor } from '../../data/cityLocations';
+import { pickContextualEvent, buildSickSchedule } from '../../data/routines';
 
 export type ScheduleStep = {
   startMinute: number;
@@ -64,6 +93,47 @@ export class Agent {
   // bypasses the normal plan cooldown/stagger throttle. Consumed (deleted) the
   // moment the replan fires.
   forcePlan?: boolean;
+  // --- Stage 3: probabilistic health ---
+  // Current health. Undefined is treated as 'well'.
+  health?: 'well' | 'sick';
+  // In-game days of illness remaining; decremented at each day rollover.
+  sickDaysLeft?: number;
+  // Number of consecutive work days accrued while well; raises the sick chance.
+  consecutiveWorkDays?: number;
+  // The game-day the once-per-day health roll last ran for (so it runs once).
+  healthCheckedForDay?: number;
+  // The conversation we last rolled contagion for (so we roll once per convo).
+  lastContagionConversation?: GameId<'conversations'>;
+  // --- Scenario-relevant background ---
+  // Compact, scenario-relevant summary of THIS character that *others* see during
+  // the active scenario. Produced once per scenario by the agentExtractScenarioProfile
+  // LLM op (not per message/tick) and cleared when the scenario ends.
+  scenarioProfile?: string;
+  // The scenario instruction `scenarioProfile` was computed for — used as a cache
+  // key so we only re-extract when the scenario actually changes. Also set
+  // optimistically the moment extraction is scheduled, so the op isn't re-fired
+  // every tick while the LLM call is in flight.
+  scenarioProfileFor?: string;
+  // The automatic-scenario instance this agent is a participant in (if any),
+  // matching SerializedActiveScenario.id. Set/cleared by the scenario manager
+  // (convex/aiTown/scenarios.ts); distinguishes automatic participants from the
+  // manual global scenario so the two systems don't clobber each other.
+  scenarioId?: string;
+  // Concrete discussion beats and the completion goal for the current scenario's
+  // conversations (copied from the ScenarioDef). Injected into the conversation
+  // prompt and used by the dialogue goal-judge; cleared when the scenario ends.
+  scenarioTopics?: string[];
+  scenarioGoal?: string;
+  // --- Relationships ---
+  // Mutable, directional affinity this agent feels toward other players, keyed by
+  // the other player's id (0–100; see convex/aiTown/affinity.ts). Lazily created:
+  // an entry only exists once an interaction has moved it off the default.
+  affinities?: Record<string, number>;
+  // Transient marker of the most recent affinity shift, so the map can flash a
+  // 💗/💔 above this character right after a conversation. `at` is the engine time
+  // it happened; `net` is the summed delta (>0 warmed, <0 cooled). The frontend
+  // only shows it for AFFINITY_INDICATOR_MS, so it doesn't need clearing.
+  lastAffinityChange?: { at: number; net: number };
 
   constructor(serialized: SerializedAgent) {
     const {
@@ -82,6 +152,18 @@ export class Agent {
       lastPlanAttempt,
       scheduleNeedsRefresh,
       forcePlan,
+      health,
+      sickDaysLeft,
+      consecutiveWorkDays,
+      healthCheckedForDay,
+      lastContagionConversation,
+      scenarioProfile,
+      scenarioProfileFor,
+      scenarioId,
+      scenarioTopics,
+      scenarioGoal,
+      affinities,
+      lastAffinityChange,
     } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
@@ -104,6 +186,21 @@ export class Agent {
     this.lastPlanAttempt = lastPlanAttempt;
     this.scheduleNeedsRefresh = scheduleNeedsRefresh;
     this.forcePlan = forcePlan;
+    this.health = health;
+    this.sickDaysLeft = sickDaysLeft;
+    this.consecutiveWorkDays = consecutiveWorkDays;
+    this.healthCheckedForDay = healthCheckedForDay;
+    this.lastContagionConversation =
+      lastContagionConversation !== undefined
+        ? parseGameId('conversations', lastContagionConversation)
+        : undefined;
+    this.scenarioProfile = scenarioProfile;
+    this.scenarioProfileFor = scenarioProfileFor;
+    this.scenarioId = scenarioId;
+    this.scenarioTopics = scenarioTopics;
+    this.scenarioGoal = scenarioGoal;
+    this.affinities = affinities;
+    this.lastAffinityChange = lastAffinityChange;
   }
 
   tick(game: Game, now: number) {
@@ -111,58 +208,58 @@ export class Agent {
     if (!player) {
       throw new Error(`Invalid player ID ${this.playerId}`);
     }
-    if (!this.scenarioTarget && !this.scenarioArrivalTime && game.world.scenarioTarget) {
-      this.scenarioTarget = game.world.scenarioTarget;
-      this.scenarioName = game.world.scenarioName;
+    // Auto-expire a custom scenario one in-game day after it was injected so
+    // agents stop re-enacting it in every conversation/plan. The episodic
+    // memories they formed during the scenario are kept (stored separately in
+    // the `memories` table) — we only drop the live directive.
+    if (game.world.scenarioInstruction) {
+      if (game.world.scenarioStartTime === undefined) {
+        // Scenario injected before start-time tracking existed (or otherwise
+        // missing its timestamp): start the one-day countdown from now so it
+        // still expires instead of lingering forever.
+        game.world.scenarioStartTime = now;
+      } else if (now - game.world.scenarioStartTime >= CYCLE_MS) {
+        delete game.world.scenarioInstruction;
+        delete game.world.scenarioStartTime;
+        for (const agent of game.world.agents.values()) {
+          // Skip agents enlisted in an automatic scenario — those are owned by
+          // the scenario manager (convex/aiTown/scenarios.ts), not the manual
+          // global scenario being expired here.
+          if (agent.scenarioId) continue;
+          delete agent.scenarioInstruction;
+          // Drop the cached scenario-relevant background so others revert to the
+          // default identity blurb once the scenario is over.
+          delete agent.scenarioProfile;
+          delete agent.scenarioProfileFor;
+        }
+        // Drop the manual scenario's panel entry too, now that it has expired.
+        const remaining = (game.world.activeScenarios ?? []).filter((s) => s.defId !== 'manual');
+        game.world.activeScenarios = remaining.length > 0 ? remaining : undefined;
+      }
     }
     if (this.scenarioInstruction === undefined && game.world.scenarioInstruction) {
       this.scenarioInstruction = game.world.scenarioInstruction;
     }
-    const PARK_RADIUS = 5;
-    if (this.scenarioTarget) {
-      const center = this.scenarioTarget;
-      // Preempt any active conversation so the agent can head to the park.
-      const activeConversation = game.world.playerConversation(player);
-      if (activeConversation) {
-        activeConversation.leave(game, now, player);
-        delete this.toRemember;
-      }
-      delete player.activity;
-
-      const distToCenter = distance(player.position, center);
-
-      if (distToCenter > PARK_RADIUS) {
-        // Approaching the park — ignore player collisions so agents don't jam.
-        if (!player.pathfinding || !pointsEqual(player.pathfinding.destination, center)) {
-          movePlayer(game, now, player, center, false, false);
-        }
-        return;
-      }
-
-      // Inside the meeting zone.
-      if (!this.scenarioArrivalTime) {
-        this.scenarioArrivalTime = now;
-        // Cancel the approach pathfinding so the wander logic takes over.
-        if (player.pathfinding) stopPlayer(player);
-      }
-
-      if (now - this.scenarioArrivalTime >= 30_000) {
-        // 30 s is up — free the agent. Keep scenarioArrivalTime as a done-marker
-        // so the propagation check above won't re-enlist them this session.
-        delete this.scenarioTarget;
-        delete this.scenarioName;
-        if (player.pathfinding) stopPlayer(player);
-        // Fall through to normal agent behaviour.
-      } else {
-        // Wander within the zone. ignorePlayers=true so agents aren't deadlocked
-        // by the pile-up from the approach phase; they spread out naturally as
-        // each picks a different random waypoint each stop.
-        if (!player.pathfinding) {
-          const waypoint = pickParkWaypoint(center, PARK_RADIUS, game.worldMap);
-          if (waypoint) movePlayer(game, now, player, waypoint, false, true);
-        }
-        return;
-      }
+    // When a scenario is active, extract this character's scenario-relevant
+    // background once (the compact view others see). We schedule the extraction
+    // op directly rather than through startOperation: a scenario also forces an
+    // agentPlanDay, and startOperation only allows one in-flight op per agent, so
+    // routing extraction through it would throw. Extraction only writes a
+    // descriptive string and never moves the agent, so it is safe to run
+    // lock-free. Setting scenarioProfileFor optimistically here doubles as the
+    // "already scheduled" guard so we don't re-fire it every tick.
+    if (
+      this.scenarioInstruction &&
+      this.scenarioProfileFor !== this.scenarioInstruction &&
+      game.agentDescriptions.get(this.id)?.profile
+    ) {
+      this.scenarioProfileFor = this.scenarioInstruction;
+      game.scheduleOperation('agentExtractScenarioProfile', {
+        worldId: game.worldId,
+        agentId: this.id,
+        playerId: this.playerId,
+        scenarioInstruction: this.scenarioInstruction,
+      });
     }
     if (this.inProgressOperation) {
       if (now < this.inProgressOperation.started + ACTION_TIMEOUT) {
@@ -171,6 +268,40 @@ export class Agent {
       }
       console.log(`Timing out ${JSON.stringify(this.inProgressOperation)}`);
       delete this.inProgressOperation;
+    }
+    // Opportunistic group conversations: if we're free and a multi-party
+    // conversation is already happening nearby with room to spare, walk over and
+    // join it rather than starting our own. This is what turns a cluster of
+    // agents (e.g. gathered at the park or hawker centre) into one 3–5 person
+    // chat instead of several disconnected pairs.
+    if (this.maybeJoinNearbyConversation(game, now, player)) {
+      return;
+    }
+    // Scenario gathering: while a local scenario is in its gathering phase the
+    // manager sets `scenarioTarget` to the spot. Walk there deterministically so
+    // we're guaranteed to arrive before the scenario's content begins, then HOLD
+    // at the spot. We don't fall through to the schedule here — otherwise a
+    // schedule step pointing elsewhere (e.g. a lunch block) would tug us away and
+    // we'd oscillate around the gather point. The manager clears `scenarioTarget`
+    // and starts the content window once everyone has gathered, after which the
+    // normal opportunistic-conversation logic forms the group.
+    if (this.scenarioTarget && !game.world.playerConversation(player)) {
+      const arrived = distance(player.position, this.scenarioTarget) < SCENARIO_ARRIVAL_RADIUS;
+      if (!arrived) {
+        if (
+          !player.pathfinding ||
+          !pointsEqual(player.pathfinding.destination, this.scenarioTarget)
+        ) {
+          try {
+            movePlayer(game, now, player, this.scenarioTarget);
+          } catch (err) {
+            console.warn(`Scenario gather move failed for ${player.id}: ${(err as Error).message}`);
+          }
+        }
+      } else if (player.pathfinding) {
+        stopPlayer(player);
+      }
+      return;
     }
     // Schedule + plan execution: give the agent a real daily plan and walk them
     // through it. Conversation logic still runs below and can interrupt.
@@ -199,6 +330,15 @@ export class Agent {
           .filter(
             (p) => ![...game.world.conversations.values()].find((c) => c.participants.has(p.id)),
           )
+          // Don't cross scenario boundaries: a non-scenario agent ignores scenario
+          // participants (so it can't pull one out of a gathering), and a scenario
+          // agent only considers fellow participants of its own scenario.
+          .filter((p) => {
+            const other = [...game.world.agents.values()].find((a) => a.playerId === p.id);
+            return this.scenarioId
+              ? other?.scenarioId === this.scenarioId
+              : !other?.scenarioId;
+          })
           .map((p) => p.serialize()),
         agent: this.serialize(),
         map: game.worldMap.serialize(),
@@ -219,22 +359,53 @@ export class Agent {
       return;
     }
     if (conversation && member) {
-      const [otherPlayerId, otherMember] = [...conversation.participants.entries()].find(
-        ([id]) => id !== player.id,
-      )!;
-      const otherPlayer = game.world.players.get(otherPlayerId)!;
+      // The "inviter" we walk toward / accept from. For an emergent group join
+      // there may be no single inviter, so fall back to the conversation creator
+      // or any already-participating member.
+      const participatingMembers = [...conversation.participants.entries()].filter(
+        ([id, m]) => id !== player.id && m.status.kind === 'participating',
+      );
+      const anchorId =
+        (participatingMembers[0] && participatingMembers[0][0]) ??
+        (conversation.creator !== player.id ? conversation.creator : undefined) ??
+        [...conversation.participants.keys()].find((id) => id !== player.id);
+      const anchorPlayer = anchorId ? game.world.players.get(anchorId) : undefined;
       if (member.status.kind === 'invited') {
         // Accept a conversation with another agent with some probability and with
         // a human unconditionally.
-        if (otherPlayer.human || Math.random() < INVITE_ACCEPT_PROBABILITY) {
-          console.log(`Agent ${player.id} accepting invite from ${otherPlayer.id}`);
+        const inviter = anchorPlayer;
+        // On shift, decline a (non-human) invite that would pull us away from our
+        // workplace; a human can always reach us.
+        const shiftStep =
+          this.schedule && this.currentStepIndex !== undefined
+            ? this.schedule[this.currentStepIndex]
+            : undefined;
+        const onShiftAnchor = workLeashAnchor(player.name, shiftStep);
+        const pullsOffPost =
+          !!onShiftAnchor &&
+          !!inviter &&
+          !inviter.human &&
+          distance(onShiftAnchor, inviter.position) >= WORK_LEASH_RADIUS;
+        // Scale acceptance by how this agent feels about the inviter: family and
+        // close friends almost always say yes; someone they're cool toward usually
+        // gets a polite no. Humans (handled below) are always accepted.
+        const inviterAffinity = inviter ? this.affinityFor(game, inviter.id) : MAX_AFFINITY;
+        const acceptProbability =
+          INVITE_ACCEPT_MIN_PROBABILITY +
+          (INVITE_ACCEPT_MAX_PROBABILITY - INVITE_ACCEPT_MIN_PROBABILITY) *
+            (inviterAffinity / MAX_AFFINITY);
+        if (pullsOffPost) {
+          console.log(`Agent ${player.id} declining off-post invite to ${conversation.id}`);
+          conversation.rejectInvite(game, now, player);
+        } else if (!inviter || inviter.human || Math.random() < acceptProbability) {
+          console.log(`Agent ${player.id} accepting invite to ${conversation.id}`);
           conversation.acceptInvite(game, player);
-          // Stop moving so we can start walking towards the other player.
+          // Stop moving so we can start walking towards the group.
           if (player.pathfinding) {
             delete player.pathfinding;
           }
         } else {
-          console.log(`Agent ${player.id} rejecting invite from ${otherPlayer.id}`);
+          console.log(`Agent ${player.id} rejecting invite to ${conversation.id}`);
           conversation.rejectInvite(game, now, player);
         }
         return;
@@ -242,33 +413,34 @@ export class Agent {
       if (member.status.kind === 'walkingOver') {
         // Leave a conversation if we've been waiting for too long.
         if (member.invited + INVITE_TIMEOUT < now) {
-          console.log(`Giving up on invite to ${otherPlayer.id}`);
+          console.log(`Giving up on invite to ${conversation.id}`);
           conversation.leave(game, now, player);
           return;
         }
-
-        // Don't keep moving around if we're near enough.
-        const playerDistance = distance(player.position, otherPlayer.position);
+        if (!anchorPlayer) {
+          // Nobody to walk toward yet (everyone still walking over). Hold.
+          return;
+        }
+        // Don't keep moving around if we're near enough to the group.
+        const playerDistance = distance(player.position, anchorPlayer.position);
         if (playerDistance < CONVERSATION_DISTANCE) {
           return;
         }
-
-        // Keep moving towards the other player.
-        // If we're close enough to the player, just walk to them directly.
+        // Keep moving towards the anchor. If we're close enough, walk directly.
         if (!player.pathfinding) {
           let destination;
           if (playerDistance < MIDPOINT_THRESHOLD) {
             destination = {
-              x: Math.floor(otherPlayer.position.x),
-              y: Math.floor(otherPlayer.position.y),
+              x: Math.floor(anchorPlayer.position.x),
+              y: Math.floor(anchorPlayer.position.y),
             };
           } else {
             destination = {
-              x: Math.floor((player.position.x + otherPlayer.position.x) / 2),
-              y: Math.floor((player.position.y + otherPlayer.position.y) / 2),
+              x: Math.floor((player.position.x + anchorPlayer.position.x) / 2),
+              y: Math.floor((player.position.y + anchorPlayer.position.y) / 2),
             };
           }
-          console.log(`Agent ${player.id} walking towards ${otherPlayer.id}...`, destination);
+          console.log(`Agent ${player.id} walking towards ${anchorPlayer.id}...`, destination);
           movePlayer(game, now, player, destination);
         }
         return;
@@ -276,7 +448,7 @@ export class Agent {
       if (member.status.kind === 'participating') {
         const started = member.status.started;
         if (conversation.isTyping && conversation.isTyping.playerId !== player.id) {
-          // Wait for the other player to finish typing.
+          // Someone else holds the floor right now — wait for them to finish.
           return;
         }
         if (!conversation.lastMessage) {
@@ -284,8 +456,7 @@ export class Agent {
           const awkwardDeadline = started + AWKWARD_CONVERSATION_TIMEOUT;
           // Send the first message if we're the initiator or if we've been waiting for too long.
           if (isInitiator || awkwardDeadline < now) {
-            // Grab the lock on the conversation and send a "start" message.
-            console.log(`${player.id} initiating conversation with ${otherPlayer.id}.`);
+            console.log(`${player.id} initiating conversation ${conversation.id}.`);
             const messageUuid = crypto.randomUUID();
             conversation.setIsTyping(now, player, messageUuid);
             this.startOperation(game, now, 'agentGenerateMessage', {
@@ -293,21 +464,100 @@ export class Agent {
               playerId: player.id,
               agentId: this.id,
               conversationId: conversation.id,
-              otherPlayerId: otherPlayer.id,
               messageUuid,
               type: 'start',
               gameTimeMs: now,
             });
             return;
           } else {
-            // Wait on the other player to say something up to the awkward deadline.
+            // Wait on someone else to break the ice up to the awkward deadline.
             return;
           }
         }
+        // Scenario goal just achieved: before anyone wraps up, the designated
+        // speaker posts a single message summarising HOW the group achieved it.
+        // Skipped once the hard caps are hit so a failed summary can't deadlock the
+        // wrap-up — the leave logic below still fires.
+        const overScenarioCap =
+          started + SCENARIO_MAX_CONVO_DURATION < now ||
+          conversation.numMessages > SCENARIO_CONVO_MAX_MESSAGES;
+        if (
+          conversation.scenarioGoalMet &&
+          !conversation.goalSummaryPosted &&
+          !overScenarioCap &&
+          this.isInScenarioConversation(game, conversation)
+        ) {
+          const justSpoke = conversation.lastMessage.author === player.id;
+          const stalled = now > conversation.lastMessage.timestamp + AWKWARD_CONVERSATION_TIMEOUT;
+          const myTurn = conversation.nextSpeaker
+            ? conversation.nextSpeaker === player.id || (stalled && !justSpoke)
+            : !justSpoke;
+          if (!myTurn || (justSpoke && !stalled)) {
+            // Not our turn (or cooling down) — wait for the designated speaker to
+            // post the summary before anyone leaves.
+            return;
+          }
+          if (now >= conversation.lastMessage.timestamp + MESSAGE_COOLDOWN) {
+            console.log(`${player.id} summarising the goal for ${conversation.id}.`);
+            const messageUuid = crypto.randomUUID();
+            conversation.setIsTyping(now, player, messageUuid);
+            this.startOperation(game, now, 'agentGenerateMessage', {
+              worldId: game.worldId,
+              playerId: player.id,
+              agentId: this.id,
+              conversationId: conversation.id,
+              messageUuid,
+              type: 'summary',
+              gameTimeMs: now,
+            });
+          }
+          return;
+        }
         // See if the conversation has been going on too long and decide to leave.
-        const tooLongDeadline = started + MAX_CONVERSATION_DURATION;
-        if (tooLongDeadline < now || conversation.numMessages > MAX_CONVERSATION_MESSAGES) {
-          console.log(`${player.id} leaving conversation with ${otherPlayer.id}.`);
+        const participantCount = conversation.participants.size;
+        const isGroup = participantCount > 2;
+        const justSpokeNow = conversation.lastMessage.author === player.id;
+        let shouldLeave: boolean;
+        if (this.isInScenarioConversation(game, conversation)) {
+          // Scenario conversation: ignore the random drift-off and keep going until
+          // the goal-judge marks the goal met (after a per-scenario minimum) or a
+          // hard message/time cap is hit, so the scenario's core content gets covered.
+          const minMsgs = SCENARIO_CONVO_MIN_MESSAGES + (isGroup ? 2 * (participantCount - 2) : 0);
+          const goalDone = !!conversation.scenarioGoalMet && conversation.numMessages >= minMsgs;
+          shouldLeave =
+            started + SCENARIO_MAX_CONVO_DURATION < now ||
+            conversation.numMessages > SCENARIO_CONVO_MAX_MESSAGES ||
+            goalDone;
+        } else {
+          // Ordinary chat. Groups get a slightly higher message budget so everyone
+          // gets a few turns, but it's hard-capped so a big huddle can't run forever.
+          const maxMessages = isGroup
+            ? Math.min(
+                MAX_CONVERSATION_MESSAGES + 2 * (participantCount - 2),
+                MAX_GROUP_CONVERSATION_MESSAGES,
+              )
+            : MAX_CONVERSATION_MESSAGES;
+          const tooLongDeadline = started + MAX_CONVERSATION_DURATION;
+          // In a group, let people drift away naturally before the hard caps: once
+          // enough has been said and this agent has had a turn, they may peel off so
+          // the huddle thins out one person at a time instead of all staying glued
+          // until the budget runs out. The 2-person path keeps its original feel.
+          // Drift off sooner from a group you dislike; linger with friends/family.
+          const groupLeaveProbability = isGroup
+            ? this.groupLeaveProbability(game, conversation, player.id)
+            : GROUP_LEAVE_PROBABILITY;
+          const wantsToDriftOff =
+            isGroup &&
+            justSpokeNow &&
+            conversation.numMessages >= GROUP_LEAVE_MIN_MESSAGES &&
+            Math.random() < groupLeaveProbability;
+          shouldLeave =
+            tooLongDeadline < now ||
+            conversation.numMessages > maxMessages ||
+            wantsToDriftOff;
+        }
+        if (shouldLeave) {
+          console.log(`${player.id} leaving conversation ${conversation.id}.`);
           const messageUuid = crypto.randomUUID();
           conversation.setIsTyping(now, player, messageUuid);
           this.startOperation(game, now, 'agentGenerateMessage', {
@@ -315,27 +565,45 @@ export class Agent {
             playerId: player.id,
             agentId: this.id,
             conversationId: conversation.id,
-            otherPlayerId: otherPlayer.id,
             messageUuid,
             type: 'leave',
             gameTimeMs: now,
           });
           return;
         }
-        // Wait for the awkward deadline if we sent the last message.
-        if (conversation.lastMessage.author === player.id) {
-          const awkwardDeadline = conversation.lastMessage.timestamp + AWKWARD_CONVERSATION_TIMEOUT;
-          if (now < awkwardDeadline) {
-            return;
-          }
+        // --- Multi-party turn-taking, governed by the dialogue orchestrator. ---
+        // After each agent message, the orchestrator sets `nextSpeaker`. We only
+        // speak when it's our turn, with two safety valves so the conversation
+        // never deadlocks:
+        //   1. "Open floor" (nextSpeaker unset, e.g. right after a human spoke):
+        //      any agent who didn't just speak may jump in. The isTyping lock
+        //      guarantees only one actually grabs the turn.
+        //   2. "Stalled" (the designated speaker hasn't said anything within the
+        //      awkward timeout — maybe they wandered off or are a quiet human):
+        //      anyone else may step in.
+        const justSpoke = conversation.lastMessage.author === player.id;
+        const stalled =
+          now > conversation.lastMessage.timestamp + AWKWARD_CONVERSATION_TIMEOUT;
+        let myTurn: boolean;
+        if (conversation.nextSpeaker) {
+          myTurn = conversation.nextSpeaker === player.id || (stalled && !justSpoke);
+        } else {
+          // Open floor.
+          myTurn = !justSpoke;
         }
-        // Wait for a cooldown after the last message to simulate "reading" the message.
+        if (!myTurn) {
+          return;
+        }
+        // Even when it's our turn, never reply to ourselves before the awkward
+        // deadline, and always wait out the read cooldown.
+        if (justSpoke && !stalled) {
+          return;
+        }
         const messageCooldown = conversation.lastMessage.timestamp + MESSAGE_COOLDOWN;
         if (now < messageCooldown) {
           return;
         }
-        // Grab the lock and send a message!
-        console.log(`${player.id} continuing conversation with ${otherPlayer.id}.`);
+        console.log(`${player.id} continuing conversation ${conversation.id}.`);
         const messageUuid = crypto.randomUUID();
         conversation.setIsTyping(now, player, messageUuid);
         this.startOperation(game, now, 'agentGenerateMessage', {
@@ -343,7 +611,6 @@ export class Agent {
           playerId: player.id,
           agentId: this.id,
           conversationId: conversation.id,
-          otherPlayerId: otherPlayer.id,
           messageUuid,
           type: 'continue',
           gameTimeMs: now,
@@ -353,11 +620,168 @@ export class Agent {
     }
   }
 
+  // True if this agent is enlisted in an automatic scenario and at least one OTHER
+  // currently-participating member of `conversation` shares the same scenario
+  // instance — i.e. this conversation is the scenario's gathering, which gets the
+  // goal-driven termination rules instead of the ordinary drift-off/caps.
+  isInScenarioConversation(game: Game, conversation: Conversation): boolean {
+    if (!this.scenarioId) return false;
+    for (const [pid, member] of conversation.participants.entries()) {
+      if (pid === this.playerId) continue;
+      if (member.status.kind !== 'participating') continue;
+      for (const other of game.world.agents.values()) {
+        if (other.playerId === pid && other.scenarioId === this.scenarioId) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // This agent's current affinity (0–100) toward another player: the stored value
+  // or the family-aware default. The single lookup that lets relationships shape
+  // behaviour (whom to approach, whether to accept an invite, when to drift off).
+  affinityFor(game: Game, otherPlayerId: GameId<'players'>): number {
+    const family: FamilyTie[] | undefined = game.agentDescriptions.get(this.id)?.family;
+    const otherName = game.playerDescriptions.get(otherPlayerId)?.name;
+    return affinityToward({ affinities: this.affinities, otherPlayerId, family, otherName });
+  }
+
+  // Per-turn probability of drifting away from a group conversation, scaled by how
+  // this agent feels about the other currently-participating members: dislike the
+  // room → leave sooner; among friends/family → linger.
+  groupLeaveProbability(game: Game, conversation: Conversation, selfId: GameId<'players'>): number {
+    const others = [...conversation.participants.entries()]
+      .filter(([id, m]) => id !== selfId && m.status.kind === 'participating')
+      .map(([id]) => id);
+    if (others.length === 0) return GROUP_LEAVE_PROBABILITY;
+    const avg = others.reduce((sum, id) => sum + this.affinityFor(game, id), 0) / others.length;
+    // avg == DEFAULT_AFFINITY → unchanged; warmer → ×(1 - weight); colder → ×(1 + weight).
+    const factor = 1 + GROUP_LEAVE_AFFINITY_WEIGHT * ((DEFAULT_AFFINITY - avg) / DEFAULT_AFFINITY);
+    return Math.max(0.05, Math.min(0.9, GROUP_LEAVE_PROBABILITY * factor));
+  }
+
+  // If we're free and a multi-party conversation is happening nearby with room
+  // under the participant cap, join it (walking over). Returns true if we joined.
+  maybeJoinNearbyConversation(game: Game, now: number, player: import('./player').Player): boolean {
+    if (this.inProgressOperation) return false;
+    if (game.world.playerConversation(player)) return false;
+    // While heading to a scenario gathering, don't get absorbed into some unrelated
+    // conversation on the way — keep walking to the spot.
+    if (this.scenarioTarget) return false;
+    // Respect the post-conversation and invite cooldowns so we don't ping-pong.
+    if (this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN) return false;
+    if (this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN) return false;
+
+    // On shift: only join conversations near our own workplace, so we don't trek
+    // off to a chat and abandon our post.
+    const step =
+      this.schedule && this.currentStepIndex !== undefined
+        ? this.schedule[this.currentStepIndex]
+        : undefined;
+    const leashAnchor = workLeashAnchor(player.name, step);
+
+    let best: Conversation | undefined;
+    let bestDistance = Infinity;
+    for (const conversation of game.world.conversations.values()) {
+      if (conversation.participants.has(player.id)) continue;
+      // If we're enlisted in a scenario, only ever join that scenario's own
+      // conversation — never wander into an unrelated chat that's nearby.
+      if (this.scenarioId && !this.isInScenarioConversation(game, conversation)) continue;
+      if (conversation.participants.size >= MAX_CONVERSATION_PARTICIPANTS) continue;
+      const participating = [...conversation.participants.values()].filter(
+        (m) => m.status.kind === 'participating',
+      );
+      // Only join a conversation that's genuinely underway and not already
+      // winding down. Scenario gatherings run longer, so allow joining one up to
+      // its higher cap (a late participant should still be able to slot in).
+      if (participating.length < 2) continue;
+      const joinMsgCap = this.isInScenarioConversation(game, conversation)
+        ? SCENARIO_CONVO_MAX_MESSAGES
+        : MAX_CONVERSATION_MESSAGES;
+      if (conversation.numMessages > joinMsgCap) continue;
+      let nearest = Infinity;
+      let nearestToWork = Infinity;
+      for (const m of participating) {
+        const other = game.world.players.get(m.playerId);
+        if (other) {
+          nearest = Math.min(nearest, distance(player.position, other.position));
+          if (leashAnchor) {
+            nearestToWork = Math.min(nearestToWork, distance(leashAnchor, other.position));
+          }
+        }
+      }
+      // While on shift, skip conversations happening away from the workplace.
+      if (leashAnchor && nearestToWork >= WORK_LEASH_RADIUS) continue;
+      if (nearest < GROUP_JOIN_RADIUS && nearest < bestDistance) {
+        best = conversation;
+        bestDistance = nearest;
+      }
+    }
+    if (!best) return false;
+    console.log(`Agent ${player.id} joining nearby conversation ${best.id}`);
+    best.join(game, now, player);
+    this.lastInviteAttempt = now;
+    if (player.pathfinding) stopPlayer(player);
+    return true;
+  }
+
   // Returns true if the schedule handled this tick (caller should return).
   tickSchedule(game: Game, now: number, player: import('./player').Player): boolean {
     const gt = computeGameTime(now, game.world.worldStartTime);
     const conversation = game.world.playerConversation(player);
     const doingActivity = player.activity && player.activity.until > now;
+
+    // --- Stage 3: probabilistic health ---
+    // Catch the illness from a sick conversation partner (rolled once per convo).
+    if (
+      conversation &&
+      this.health !== 'sick' &&
+      this.lastContagionConversation !== conversation.id
+    ) {
+      this.lastContagionConversation = conversation.id;
+      let exposed = false;
+      for (const pid of conversation.participants.keys()) {
+        if (pid === player.id) continue;
+        for (const other of game.world.agents.values()) {
+          if (other.playerId === pid && other.health === 'sick') {
+            exposed = true;
+            break;
+          }
+        }
+        if (exposed) break;
+      }
+      if (exposed && Math.random() < CONTAGION_PROBABILITY) {
+        this.health = 'sick';
+        this.sickDaysLeft = SICK_DURATION_DAYS;
+        this.consecutiveWorkDays = 0;
+      }
+    }
+
+    // Once-per-day health roll: recover when the illness runs its course, or
+    // fall sick on a work day with a burnout-scaled probability.
+    if (this.healthCheckedForDay !== gt.dayNumber) {
+      this.healthCheckedForDay = gt.dayNumber;
+      this.updateHealthForNewDay(gt.dayNumber);
+    }
+
+    // If sick and today's rest schedule isn't set up yet, stay home and rest —
+    // skip the LLM planner entirely. Don't interrupt an active conversation.
+    if (
+      this.health === 'sick' &&
+      this.scheduleGeneratedForDay !== gt.dayNumber &&
+      !conversation
+    ) {
+      const playerName = player.name ?? 'someone';
+      const homeLoc = this.home ?? (homeFor(playerName) ?? getLocationById('hdb'))!;
+      const homePoint = this.home ?? { x: homeLoc.x, y: homeLoc.y };
+      this.schedule = buildSickSchedule(homePoint);
+      this.scheduleGeneratedForDay = gt.dayNumber;
+      this.currentStepIndex = 0;
+      delete this.scheduleNeedsRefresh;
+      if (player.pathfinding) stopPlayer(player);
+      return true;
+    }
 
     // Decide if we need a new plan.
     const noSchedule = !this.schedule || this.schedule.length === 0;
@@ -451,8 +875,31 @@ export class Agent {
     const step = this.schedule[this.currentStepIndex];
     if (!step) return false;
 
-    // It isn't time for the first step yet — let the rest of the tick run.
-    if (gt.minutesIntoDay < step.startMinute) return false;
+    // Before the day's first scheduled step (early morning, before the ~7am wake):
+    // head to that first location (home) and wait there. Without this we'd return
+    // false and tick() would drop the agent into its free-roam branch — random
+    // destination + activity. An agent freed up in this window (e.g. right after a
+    // scenario ends at 6am) would then walk off to a random tile across the map and
+    // look "stuck" far from anywhere it should be.
+    if (gt.minutesIntoDay < step.startMinute) {
+      if (conversation) return false;
+      const atStart = distance(player.position, step.destination) < ARRIVAL_RADIUS;
+      if (!atStart) {
+        if (
+          !player.pathfinding ||
+          !pointsEqual(player.pathfinding.destination, step.destination)
+        ) {
+          try {
+            movePlayer(game, now, player, step.destination);
+          } catch (err) {
+            console.warn(`Pre-dawn move home failed for ${player.id}: ${(err as Error).message}`);
+          }
+        }
+      } else if (player.pathfinding) {
+        stopPlayer(player);
+      }
+      return true;
+    }
 
     // Don't yank the agent out of an active conversation. The schedule can wait.
     if (conversation) return false;
@@ -474,17 +921,29 @@ export class Agent {
       this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN;
     const justChatted =
       this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN;
-    if (!onInviteCooldown && !justChatted && !this.inProgressOperation) {
+    // A sick agent keeps to themselves — don't initiate new conversations.
+    if (!onInviteCooldown && !justChatted && !this.inProgressOperation && this.health !== 'sick') {
       const freePlayers = [...game.world.players.values()].filter(
         (p) =>
           p.id !== player.id &&
           ![...game.world.conversations.values()].some((c) => c.participants.has(p.id)),
       );
-      const pool = atDest
-        ? freePlayers
-        : freePlayers.filter(
-            (p) => distance(p.position, player.position) < SCHEDULE_CHAT_RADIUS,
-          );
+      // On shift we keep social reach close to the workplace so a worker doesn't
+      // trek across the map to chat and abandon their post.
+      const leashAnchor = workLeashAnchor(player.name, step);
+      let pool: typeof freePlayers;
+      if (!atDest) {
+        // In transit: only greet someone we physically pass.
+        pool = freePlayers.filter(
+          (p) => distance(p.position, player.position) < SCHEDULE_CHAT_RADIUS,
+        );
+      } else if (leashAnchor) {
+        // Settled on shift: only reach coworkers/customers near the workplace.
+        pool = freePlayers.filter((p) => distance(p.position, leashAnchor) < WORK_LEASH_RADIUS);
+      } else {
+        // Settled off-shift: reach map-wide so emergent conversations still form.
+        pool = freePlayers;
+      }
       if (pool.length > 0) {
         // Optimistically record the attempt so we don't re-fire every tick when
         // no candidate can actually be invited (e.g. all on the pair cooldown).
@@ -524,11 +983,27 @@ export class Agent {
       const minutesLeft = Math.max(1, stepEndMinutes - gt.minutesIntoDay);
       // Game-minute → real-ms: each in-game minute lasts CYCLE_MS / (24*60).
       const realMsPerGameMinute = (10 * 60 * 1000) / (24 * 60);
-      player.activity = {
-        description: step.activity,
-        emoji: step.emoji ?? '💭',
-        until: now + minutesLeft * realMsPerGameMinute,
-      };
+      // Stage 2: sometimes swap in a short contextual micro-event tied to the
+      // current block (office events during work hours, flexible ones
+      // otherwise), then fall back to the block's base activity afterwards.
+      const event =
+        Math.random() < CONTEXTUAL_EVENT_PROBABILITY
+          ? pickContextualEvent(step.locationId, gt.minutesIntoDay)
+          : null;
+      if (event) {
+        const eventMinutes = Math.min(minutesLeft, CONTEXTUAL_EVENT_MINUTES);
+        player.activity = {
+          description: event.description,
+          emoji: event.emoji,
+          until: now + eventMinutes * realMsPerGameMinute,
+        };
+      } else {
+        player.activity = {
+          description: step.activity,
+          emoji: step.emoji ?? '💭',
+          until: now + minutesLeft * realMsPerGameMinute,
+        };
+      }
     }
     return true;
   }
@@ -573,7 +1048,52 @@ export class Agent {
       lastPlanAttempt: this.lastPlanAttempt,
       scheduleNeedsRefresh: this.scheduleNeedsRefresh,
       forcePlan: this.forcePlan,
+      health: this.health,
+      sickDaysLeft: this.sickDaysLeft,
+      consecutiveWorkDays: this.consecutiveWorkDays,
+      healthCheckedForDay: this.healthCheckedForDay,
+      lastContagionConversation: this.lastContagionConversation,
+      scenarioProfile: this.scenarioProfile,
+      scenarioProfileFor: this.scenarioProfileFor,
+      scenarioId: this.scenarioId,
+      scenarioTopics: this.scenarioTopics,
+      scenarioGoal: this.scenarioGoal,
+      affinities: this.affinities,
+      lastAffinityChange: this.lastAffinityChange,
     };
+  }
+
+  // --- Stage 3: once-per-day health bookkeeping ---
+  // Advances illness state at a day rollover: recover after the illness runs its
+  // course, otherwise (on a work day) roll a burnout-scaled chance of falling
+  // sick. Weekends rest and reset the consecutive-work-day streak.
+  updateHealthForNewDay(dayNumber: number) {
+    if (this.health === 'sick') {
+      const left = (this.sickDaysLeft ?? 1) - 1;
+      if (left <= 0) {
+        this.health = 'well';
+        this.sickDaysLeft = 0;
+      } else {
+        this.sickDaysLeft = left;
+      }
+      return;
+    }
+    if (isWeekday(dayNumber)) {
+      const streak = this.consecutiveWorkDays ?? 0;
+      const p = Math.min(
+        SICK_MAX_PROBABILITY,
+        SICK_BASE_PROBABILITY + SICK_PER_WORKDAY_PROBABILITY * streak,
+      );
+      if (Math.random() < p) {
+        this.health = 'sick';
+        this.sickDaysLeft = SICK_DURATION_DAYS;
+        this.consecutiveWorkDays = 0;
+        return;
+      }
+      this.consecutiveWorkDays = streak + 1;
+    } else {
+      this.consecutiveWorkDays = 0;
+    }
   }
 }
 
@@ -610,6 +1130,20 @@ export const serializedAgent = {
   lastPlanAttempt: v.optional(v.number()),
   scheduleNeedsRefresh: v.optional(v.boolean()),
   forcePlan: v.optional(v.boolean()),
+  health: v.optional(v.union(v.literal('well'), v.literal('sick'))),
+  sickDaysLeft: v.optional(v.number()),
+  consecutiveWorkDays: v.optional(v.number()),
+  healthCheckedForDay: v.optional(v.number()),
+  lastContagionConversation: v.optional(conversationId),
+  scenarioProfile: v.optional(v.string()),
+  scenarioProfileFor: v.optional(v.string()),
+  scenarioId: v.optional(v.string()),
+  scenarioTopics: v.optional(v.array(v.string())),
+  scenarioGoal: v.optional(v.string()),
+  // Directional affinity toward other players, keyed by player id (0–100).
+  affinities: v.optional(v.record(v.string(), v.number())),
+  // Most recent affinity shift, for the transient map indicator.
+  lastAffinityChange: v.optional(v.object({ at: v.number(), net: v.number() })),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 
@@ -630,6 +1164,9 @@ export async function runAgentOperation(ctx: MutationCtx, operation: string, arg
     case 'agentPlanDay':
       reference = internal.aiTown.agentOperations.agentPlanDay;
       break;
+    case 'agentExtractScenarioProfile':
+      reference = internal.aiTown.agentOperations.agentExtractScenarioProfile;
+      break;
     default:
       throw new Error(`Unknown operation: ${operation}`);
   }
@@ -645,7 +1182,16 @@ export const agentSendMessage = internalMutation({
     text: v.string(),
     messageUuid: v.string(),
     leaveConversation: v.boolean(),
+    // True for the one-off "how we achieved the goal" wrap-up message.
+    isGoalSummary: v.optional(v.boolean()),
     operationId: v.string(),
+    // The participant the dialogue orchestrator wants to speak next (omitted when
+    // leaving or when the floor should be open, e.g. only humans remain).
+    nextSpeaker: v.optional(playerId),
+    // For scenario conversations: whether the goal-judge deemed the goal met, and
+    // the 0-based indices of scenario topics it judged substantively covered.
+    goalMet: v.optional(v.boolean()),
+    coveredTopics: v.optional(v.array(v.number())),
   },
   handler: async (ctx, args) => {
     await ctx.db.insert('messages', {
@@ -660,7 +1206,11 @@ export const agentSendMessage = internalMutation({
       agentId: args.agentId,
       timestamp: Date.now(),
       leaveConversation: args.leaveConversation,
+      isGoalSummary: args.isGoalSummary,
       operationId: args.operationId,
+      nextSpeaker: args.nextSpeaker,
+      goalMet: args.goalMet,
+      coveredTopics: args.coveredTopics,
     });
   },
 });
@@ -674,8 +1224,23 @@ export const findConversationCandidate = internalQuery({
   },
   handler: async (ctx, { now, worldId, player, otherFreePlayers }) => {
     const { position } = player;
-    const candidates = [];
 
+    // Load our affinities + family so relationships bias who we approach: we'll
+    // happily cross the room for a friend and skip someone nearby we dislike.
+    const world = await ctx.db.get(worldId);
+    const selfAgent = world?.agents.find((a) => a.playerId === player.id);
+    const affinities = selfAgent?.affinities;
+    let family: FamilyTie[] | undefined;
+    if (selfAgent) {
+      const desc = await ctx.db
+        .query('agentDescriptions')
+        .withIndex('worldId', (q) => q.eq('worldId', worldId).eq('agentId', selfAgent.id))
+        .first();
+      family = desc?.family;
+    }
+
+    // Pick the candidate with the best affinity-vs-distance score (off cooldown).
+    let best: { id: GameId<'players'>; score: number } | undefined;
     for (const otherPlayer of otherFreePlayers) {
       // Find the latest conversation we're both members of.
       const lastMember = await ctx.db
@@ -690,11 +1255,17 @@ export const findConversationCandidate = internalQuery({
           continue;
         }
       }
-      candidates.push({ id: otherPlayer.id, position });
+      const affinity = affinityToward({
+        affinities,
+        otherPlayerId: otherPlayer.id,
+        family,
+        otherName: otherPlayer.name,
+      });
+      const score = affinity - CANDIDATE_AFFINITY_WEIGHT * distance(position, otherPlayer.position);
+      if (!best || score > best.score) {
+        best = { id: otherPlayer.id as GameId<'players'>, score };
+      }
     }
-
-    // Sort by distance and take the nearest candidate.
-    candidates.sort((a, b) => distance(a.position, position) - distance(b.position, position));
-    return candidates[0]?.id;
+    return best?.id;
   },
 });

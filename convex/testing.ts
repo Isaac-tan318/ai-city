@@ -197,6 +197,70 @@ export const movePlayerTo = mutation({
   },
 });
 
+// Instantly snap a character (by display name) to a tile. Unlike movePlayerTo,
+// which walks there via pathfinding, this teleports immediately. The destination
+// must be a passable tile (the engine rejects blocked ones).
+//   npx convex run testing:teleport '{"name":"Cedric","x":36,"y":20}'
+export const teleport = mutation({
+  args: { name: v.string(), x: v.number(), y: v.number() },
+  handler: async (ctx, args) => {
+    const { worldStatus, engine } = await getDefaultWorld(ctx.db);
+
+    // Inputs are only drained while the engine is running. If it's paused, the
+    // teleport would queue with no visible effect ("runs but does nothing").
+    if (!engine.running || worldStatus.status !== 'running') {
+      throw new Error(
+        `World is not running (status: ${worldStatus.status}). Open the app at http://localhost:5173 ` +
+          `or run "npx convex run testing:resume", then retry.`,
+      );
+    }
+
+    // Resolve the character name -> internal player id.
+    const descriptions = await ctx.db
+      .query('playerDescriptions')
+      .withIndex('worldId', (q) => q.eq('worldId', worldStatus.worldId))
+      .collect();
+    const match = descriptions.find(
+      (d) => d.name.toLowerCase() === args.name.trim().toLowerCase(),
+    );
+    if (!match) {
+      const names = descriptions.map((d) => d.name).join(', ');
+      throw new Error(`No character named "${args.name}". Known: ${names}`);
+    }
+
+    // Pre-validate the destination against the map so a blocked or out-of-bounds
+    // tile fails loudly HERE rather than erroring silently inside the engine
+    // input (whose error is recorded as the input's return value, not surfaced
+    // to the CLI). A tile is blocked if any object layer is non-(-1) there.
+    const map = await ctx.db
+      .query('maps')
+      .withIndex('worldId', (q) => q.eq('worldId', worldStatus.worldId))
+      .unique();
+    if (!map) throw new Error(`No map for world ${worldStatus.worldId}`);
+    const x = Math.floor(args.x);
+    const y = Math.floor(args.y);
+    if (x < 0 || y < 0 || x >= map.width || y >= map.height) {
+      throw new Error(`Tile (${x}, ${y}) is out of bounds (map is ${map.width}x${map.height}).`);
+    }
+    for (const layer of map.objectTiles) {
+      if (layer[x][y] !== -1) {
+        throw new Error(
+          `Tile (${x}, ${y}) is blocked — it's inside a building/object. Pick a passable tile, ` +
+            `e.g. a workplace standing tile like A*STAR 13,8, MBS 36,22, or the hawker centre 63,27.`,
+        );
+      }
+    }
+
+    await insertInput(ctx, worldStatus.worldId, 'teleportPlayer', {
+      playerId: match.playerId,
+      destination: { x, y },
+    });
+    // Nudge the engine so the queued teleport is processed promptly even if the
+    // sim was idling (also revives a stalled loop after a wipe).
+    await kickEngine(ctx, worldStatus.worldId);
+  },
+});
+
 export const reinitMap = mutation({
   handler: async (ctx) => {
     const { worldStatus } = await getDefaultWorld(ctx.db);
@@ -264,7 +328,6 @@ export const testConvo = internalAction({
       'm1707m46wmefpejw1k50rqz7856qw3ew' as Id<'worlds'>,
       'c:115' as GameId<'conversations'>,
       'p:0' as GameId<'players'>,
-      'p:6' as GameId<'players'>,
       Date.now(),
     )) as any;
     return await a.readAll();

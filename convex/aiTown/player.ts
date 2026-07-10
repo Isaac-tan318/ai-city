@@ -40,6 +40,9 @@ export const activity = v.object({
   description: v.string(),
   emoji: v.optional(v.string()),
   until: v.number(),
+  // When set, the activity is a timed task and the UI renders a progress bar that
+  // fills from `startedAt` to `until` (used by local-scenario "working" tasks).
+  startedAt: v.optional(v.number()),
 });
 export type Activity = Infer<typeof activity>;
 

@@ -51,6 +51,37 @@ const scenarioOptions = [
   },
 ];
 
+// Compact "how long ago" label for relationship-event sub-lines.
+function relativeTime(at: number, now: number): string {
+  const s = Math.max(0, Math.floor((now - at) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+// Fallback description when an event has no LLM reason snippet.
+function eventFallbackText(kind: string): string {
+  switch (kind) {
+    case 'inviteDeclined':
+      return 'brushed off an invite';
+    case 'groupExit':
+      return 'left their group early';
+    default:
+      return 'after a conversation';
+  }
+}
+
+// Percent-complete of a timed task activity (0–100), from `startedAt`..`until`.
+function taskProgressPct(activity: { startedAt?: number; until: number }, now: number): number {
+  if (activity.startedAt === undefined) return 0;
+  const total = activity.until - activity.startedAt;
+  if (total <= 0) return 100;
+  return Math.max(0, Math.min(100, Math.round(((now - activity.startedAt) / total) * 100)));
+}
+
 export default function PlayerDetails({
   worldId,
   engineId,
@@ -67,6 +98,13 @@ export default function PlayerDetails({
   scrollViewRef: React.RefObject<HTMLDivElement>;
 }) {
   const humanTokenIdentifier = useQuery(api.world.userStatus, { worldId });
+
+  // Ticks once a second so timed-task progress bars animate between server updates.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   const players = useMemo(() => [...game.world.players.values()], [game]);
   const humanPlayer = players.find((p) => p.human === humanTokenIdentifier);
@@ -126,6 +164,25 @@ export default function PlayerDetails({
   const agentDescription = agentForPlayer
     ? game.agentDescriptions.get(agentForPlayer.id)
     : undefined;
+  // Recent relationship events for this agent (newest first), so each
+  // relationship row can show how it got where it is.
+  const relationshipEvents = useQuery(
+    api.world.relationshipEventsForPlayer,
+    playerId && agentForPlayer ? { worldId, playerId } : 'skip',
+  );
+  const eventsByTarget = useMemo(() => {
+    const byTarget = new Map<string, NonNullable<typeof relationshipEvents>>();
+    for (const event of relationshipEvents ?? []) {
+      if (!event.target) continue;
+      let list = byTarget.get(event.target);
+      if (!list) {
+        list = [];
+        byTarget.set(event.target, list);
+      }
+      list.push(event);
+    }
+    return byTarget;
+  }, [relationshipEvents]);
   // Build the relationship rows for the inspector: authored family ties first
   // (shown even before any interaction has moved affinity), then anyone else this
   // agent has formed an opinion about. Affinity is resolved through the same
@@ -138,19 +195,23 @@ export default function PlayerDetails({
     for (const [pid, desc] of game.playerDescriptions.entries()) {
       nameToId.set(desc.name, pid);
     }
-    const rows = new Map<string, { name: string; relation?: string; affinity: number }>();
+    const rows = new Map<
+      string,
+      { name: string; relation?: string; affinity: number; pid?: string }
+    >();
     for (const tie of family) {
       const pid = nameToId.get(tie.name);
       rows.set(tie.name, {
         name: tie.name,
         relation: tie.relation,
         affinity: affinityToward({ affinities, otherPlayerId: pid ?? '', family, otherName: tie.name }),
+        pid,
       });
     }
     for (const [pid, value] of Object.entries(affinities)) {
       const name = game.playerDescriptions.get(pid as GameId<'players'>)?.name;
       if (!name || rows.has(name)) continue;
-      rows.set(name, { name, affinity: value });
+      rows.set(name, { name, affinity: value, pid });
     }
     return [...rows.values()];
   }, [agentForPlayer, agentDescription, game]);
@@ -595,11 +656,29 @@ export default function PlayerDetails({
           </a>
         </>
       )}
-      {!playerConversation && player.activity && player.activity.until > Date.now() && (
+      {!playerConversation && player.activity && player.activity.until > nowMs && (
         <div className="box flex-grow mt-6">
           <h2 className="bg-brown-700 text-base sm:text-lg text-center">
+            {player.activity.emoji ? `${player.activity.emoji} ` : ''}
             {player.activity.description}
           </h2>
+          {player.activity.startedAt !== undefined && (
+            <div className="bg-brown-700 px-3 pb-3 pt-1">
+              <div
+                className="h-2 w-full rounded overflow-hidden bg-black/30"
+                role="meter"
+                aria-valuenow={taskProgressPct(player.activity, nowMs)}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                title="Task progress"
+              >
+                <div
+                  className="h-full rounded bg-amber-400 transition-all"
+                  style={{ width: `${taskProgressPct(player.activity, nowMs)}%` }}
+                />
+              </div>
+            </div>
+          )}
         </div>
       )}
       <div className="desc my-6">
@@ -618,33 +697,71 @@ export default function PlayerDetails({
         <div className="box flex-grow mb-4">
           <h2 className="bg-brown-700 text-base sm:text-lg text-center px-2 py-1">Relationships</h2>
           <ul className="bg-brown-700 text-sm leading-snug px-3 pb-3 pt-2 flex flex-col gap-2">
-            {relationships.map((r) => (
-              <li key={r.name} className="flex flex-col gap-1">
-                <div className="flex items-center gap-2">
-                  <span className="shrink-0">{affinityEmoji(r.affinity)}</span>
-                  <span className="flex-1">
-                    {r.name}
-                    {r.relation && <span className="text-white/60"> · {r.relation}</span>}
-                  </span>
-                  <span className="text-white/70 shrink-0">
-                    {affinityLabel(r.affinity)} ({r.affinity})
-                  </span>
-                </div>
-                <div
-                  className="h-2 w-full rounded overflow-hidden bg-black/30"
-                  role="meter"
-                  aria-valuenow={r.affinity}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  title={`Affinity ${r.affinity}/100`}
-                >
+            {relationships.map((r) => {
+              const events = (r.pid && eventsByTarget.get(r.pid)) || [];
+              // Net direction of the last few shifts: is this relationship
+              // currently warming or souring?
+              const recentNet = events
+                .slice(0, 3)
+                .reduce((sum, e) => sum + (e.delta ?? 0), 0);
+              const trend = recentNet > 0 ? '↗' : recentNet < 0 ? '↘' : undefined;
+              return (
+                <li key={r.name} className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <span className="shrink-0">{affinityEmoji(r.affinity)}</span>
+                    <span className="flex-1">
+                      {r.name}
+                      {r.relation && <span className="text-white/60"> · {r.relation}</span>}
+                    </span>
+                    {trend && (
+                      <span
+                        className={`shrink-0 font-bold ${
+                          recentNet > 0 ? 'text-green-300' : 'text-red-300'
+                        }`}
+                        title={`Recently ${recentNet > 0 ? 'warming' : 'souring'} (${
+                          recentNet > 0 ? '+' : ''
+                        }${recentNet} over the last few events)`}
+                      >
+                        {trend}
+                      </span>
+                    )}
+                    <span className="text-white/70 shrink-0">
+                      {affinityLabel(r.affinity)} ({r.affinity})
+                    </span>
+                  </div>
                   <div
-                    className="h-full rounded transition-all"
-                    style={{ width: `${r.affinity}%`, backgroundColor: affinityColor(r.affinity) }}
-                  />
-                </div>
-              </li>
-            ))}
+                    className="h-2 w-full rounded overflow-hidden bg-black/30"
+                    role="meter"
+                    aria-valuenow={r.affinity}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    title={`Affinity ${r.affinity}/100`}
+                  >
+                    <div
+                      className="h-full rounded transition-all"
+                      style={{ width: `${r.affinity}%`, backgroundColor: affinityColor(r.affinity) }}
+                    />
+                  </div>
+                  {events.slice(0, 2).map((e) => (
+                    <div
+                      key={e._id}
+                      className="text-xs text-white/60 leading-snug pl-6"
+                      title={e.reason ?? eventFallbackText(e.kind)}
+                    >
+                      <span className="line-clamp-2">
+                        “{e.reason ?? eventFallbackText(e.kind)}”{' '}
+                        {e.delta !== undefined && (
+                          <span className={e.delta < 0 ? 'text-red-300' : 'text-green-300'}>
+                            ({e.delta > 0 ? `+${e.delta}` : e.delta})
+                          </span>
+                        )}{' '}
+                        · {relativeTime(e.at, nowMs)}
+                      </span>
+                    </div>
+                  ))}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}

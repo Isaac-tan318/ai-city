@@ -126,6 +126,37 @@ export const SCENARIO_GOAL_CHECK_MIN_MESSAGES = 6;
 // the goal was never judged met.
 export const SCENARIO_MAX_CONVO_DURATION = 15 * 60_000;
 
+// --- Scenario shared memory (cross-conversation + past scenarios) ---
+// How many recent messages from the REST of the current scenario (its OTHER
+// conversations) to surface to a participant as shared context, so a plan/task
+// claimed in one chat carries into another. Sized to cover a whole scenario's
+// cross-conversation transcript in practice (each conversation is itself capped at
+// SCENARIO_CONVO_MAX_MESSAGES), so participants effectively see ALL of the scenario's
+// past chats rather than a short recent window.
+export const SCENARIO_HISTORY_MESSAGE_COUNT = 60;
+// How many memories of PAST scenarios to recall when an agent is enlisted in one, via
+// a memory search seeded with the current scenario's theme. Grounds a new situation in
+// how earlier similar ones went (each scenario conversation is already remembered).
+export const SCENARIO_RECALL_MEMORY_COUNT = 3;
+
+// --- Local-scenario "working" phase (delegated tasks) ---
+// After a local scenario's planning conversation reaches its goal, an LLM op
+// generates concrete tasks and assigns each to a participant; the scenario then
+// enters a "working" phase where each assignee performs their task, shown as an
+// activity with a time-based progress bar.
+// Clamp the LLM-suggested per-task duration to this range (real ms).
+export const SCENARIO_TASK_MIN_DURATION_MS = 20_000;
+export const SCENARIO_TASK_MAX_DURATION_MS = 90_000;
+// Fallback duration when the LLM omits / gives an unusable duration.
+export const SCENARIO_TASK_DEFAULT_DURATION_MS = 45_000;
+// Overall safety cap on the working phase — the scenario expires by this long
+// after tasks are assigned even if some task never completes.
+export const SCENARIO_WORK_MAX_MS = 6 * 60_000;
+// If the task-planning op is requested but no tasks come back within this window,
+// abandon the working phase and let the scenario wrap up normally (so a slow or
+// failed LLM call can't freeze participants on an orphaned op).
+export const SCENARIO_TASK_PLAN_TIMEOUT_MS = ACTION_TIMEOUT + 15_000;
+
 // Wait for 1s after sending an input to the engine. We can remove this
 // once we can await on an input being processed.
 export const INPUT_DELAY = 1000;
@@ -178,6 +209,28 @@ export const GROUP_LEAVE_AFFINITY_WEIGHT = 0.6;
 // How long (real ms) the post-conversation 💗/💔 affinity indicator stays up above
 // a character on the map after their affinity shifts.
 export const AFFINITY_INDICATOR_MS = 6000;
+// Below this, a relationship reads as hostile (the bottom band of
+// affinityLabel/affinityEmoji/affinityColor); also drives the 💢 badge when a
+// hostile pair ends up in the same conversation.
+export const HOSTILE_AFFINITY_THRESHOLD = 25;
+
+// --- Conflict visibility & grudges ---
+// How much the inviter's affinity toward the decliner drops when an agent turns
+// down their invite (only when the low-affinity acceptance roll failed — not
+// work-leash declines). Small, so grudges build from repeated snubs.
+export const REJECTED_INVITE_AFFINITY_PENALTY = 2;
+// A group exit is considered "low-affinity driven" (and logged as a
+// relationship event) when the leaver's average affinity toward the remaining
+// members is below this.
+export const GROUP_EXIT_LOW_AFFINITY_THRESHOLD = 40;
+// Cap on the human-readable reason snippet stored per relationship event.
+export const RELATIONSHIP_EVENT_REASON_MAX_CHARS = 120;
+// Tensions feed: how many chips to show at once and how far back to look.
+export const TENSIONS_FEED_MAX_CHIPS = 6;
+export const TENSIONS_FEED_WINDOW_MS = 5 * 60_000;
+// Server-side caps on the relationship-event queries.
+export const RECENT_RELATIONSHIP_EVENTS_LIMIT = 30;
+export const PLAYER_RELATIONSHIP_EVENTS_LIMIT = 50;
 
 export type Activity = { description: string; emoji: string; duration: number };
 

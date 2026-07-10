@@ -8,6 +8,7 @@ import { serializedWorld } from './world';
 import { serializedWorldMap } from './worldMap';
 import { serializedConversation } from './conversation';
 import { conversationId, playerId } from './ids';
+import { serializedRelationshipEvent } from './relationshipEvents';
 
 export const aiTownTables = {
   // This table has a single document that stores all players, conversations, and agents. This
@@ -76,4 +77,15 @@ export const aiTownTables = {
     .index('edge', ['worldId', 'player1', 'player2', 'ended'])
     .index('conversation', ['worldId', 'player1', 'conversationId'])
     .index('playerHistory', ['worldId', 'player1', 'ended']),
+
+  // Durable log of conflicts and their consequences (affinity shifts, snubbed
+  // invites, early group exits), buffered on the Game during a step and
+  // inserted in saveDiff. Read by the Tensions feed and the inspector's
+  // relationship history.
+  relationshipEvents: defineTable({
+    worldId: v.id('worlds'),
+    ...serializedRelationshipEvent,
+  })
+    .index('world', ['worldId', 'at'])
+    .index('actor', ['worldId', 'actor', 'at']),
 };

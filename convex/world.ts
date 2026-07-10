@@ -6,6 +6,8 @@ import {
   DEFAULT_NAME,
   ENGINE_ACTION_DURATION,
   IDLE_WORLD_TIMEOUT,
+  PLAYER_RELATIONSHIP_EVENTS_LIMIT,
+  RECENT_RELATIONSHIP_EVENTS_LIMIT,
   WORLD_HEARTBEAT_INTERVAL,
 } from './constants';
 import { playerId } from './aiTown/ids';
@@ -253,5 +255,36 @@ export const previousConversation = query({
       }
     }
     return null;
+  },
+});
+
+// The newest relationship events (conflicts + consequences) for the Tensions
+// feed; the client filters to a recency window and caps how many chips it shows.
+export const recentRelationshipEvents = query({
+  args: {
+    worldId: v.id('worlds'),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query('relationshipEvents')
+      .withIndex('world', (q) => q.eq('worldId', args.worldId))
+      .order('desc')
+      .take(RECENT_RELATIONSHIP_EVENTS_LIMIT);
+  },
+});
+
+// A single agent's recent relationship events (newest first), for the
+// inspector's per-relationship history in PlayerDetails.
+export const relationshipEventsForPlayer = query({
+  args: {
+    worldId: v.id('worlds'),
+    playerId,
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query('relationshipEvents')
+      .withIndex('actor', (q) => q.eq('worldId', args.worldId).eq('actor', args.playerId))
+      .order('desc')
+      .take(PLAYER_RELATIONSHIP_EVENTS_LIMIT);
   },
 });

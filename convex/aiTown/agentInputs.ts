@@ -14,6 +14,7 @@ import { scenarioById } from '../../data/scenarios';
 import { CITY_LOCATIONS, homeFor } from '../../data/cityLocations';
 import { mergeFixedObligations } from '../../data/routines';
 import { CYCLE_MS } from './gameTime';
+import { SCENARIO_WORK_MAX_MS } from '../constants';
 import type { SerializedActiveScenario } from './world';
 import type { Game } from './game';
 
@@ -41,6 +42,7 @@ function injectScenario(
     delete agent.scenarioName;
     delete agent.scenarioTopics;
     delete agent.scenarioGoal;
+    delete agent.scenarioConflict;
     delete agent.scenarioTarget;
     delete agent.scenarioArrivalTime;
     agent.scenarioInstruction = opts.instruction;
@@ -285,6 +287,78 @@ export const agentInputs = {
       return null;
     },
   }),
+  // Result of the local-scenario task-planning op: concrete, delegated tasks. Flips
+  // the scenario into its "working" phase and disperses participants to their tasks.
+  finishPlanScenarioTasks: inputHandler({
+    args: {
+      operationId: v.string(),
+      agentId,
+      scenarioId: v.string(),
+      tasks: v.array(
+        v.object({
+          label: v.string(),
+          emoji: v.string(),
+          assigneeId: v.string(),
+          durationMs: v.number(),
+        }),
+      ),
+    },
+    handler: (game, now, args) => {
+      const agentGameId = parseGameId('agents', args.agentId);
+      const agent = game.world.agents.get(agentGameId);
+      if (!agent) {
+        throw new Error(`Couldn't find agent: ${agentGameId}`);
+      }
+      // Release the planner's operation lock (mirrors finishDoSomething).
+      if (
+        agent.inProgressOperation &&
+        agent.inProgressOperation.operationId === args.operationId
+      ) {
+        delete agent.inProgressOperation;
+      }
+      const sc = (game.world.activeScenarios ?? []).find((s) => s.id === args.scenarioId);
+      // Ignore if the scenario is gone or its tasks were already delegated.
+      if (!sc || sc.tasks) {
+        return null;
+      }
+      if (args.tasks.length === 0) {
+        // Planning produced nothing usable — abandon the working phase and let the
+        // scenario wrap up normally. Clearing the guard also releases the hold.
+        delete sc.taskPlanRequested;
+        return null;
+      }
+      sc.tasks = args.tasks.map((t) => {
+        const assigneeId = parseGameId('players', t.assigneeId);
+        return {
+          label: t.label,
+          emoji: t.emoji,
+          assigneeId,
+          assigneeName: game.playerDescriptions.get(assigneeId)?.name,
+          durationMs: t.durationMs,
+        };
+      });
+      sc.phase = 'working';
+      // The planning conversation's goal (agree who does what) is met, but the
+      // scenario itself isn't complete until the tasks are done — reset the goal
+      // flag so the panel tracks task completion, not the delegation.
+      sc.goalMet = false;
+      delete sc.goalMetAt;
+      sc.endTime = now + SCENARIO_WORK_MAX_MS;
+      // Stop any lingering scenario conversation so participants disperse to work.
+      const participantSet = new Set<string>(sc.participantIds);
+      for (const conversation of [...game.world.conversations.values()]) {
+        let touches = false;
+        for (const pid of conversation.participants.keys()) {
+          if (participantSet.has(pid)) {
+            touches = true;
+            break;
+          }
+        }
+        if (touches) conversation.stop(game, now);
+      }
+      return null;
+    },
+  }),
   createAgent: inputHandler({
     args: {
       descriptionIndex: v.number(),
@@ -344,6 +418,8 @@ export const agentInputs = {
     args: {
       agentId,
       deltas: v.array(v.object({ playerId, delta: v.number() })),
+      conversationId: v.optional(conversationId),
+      reason: v.optional(v.string()),
     },
     handler: (game, now, args) => {
       const agentId = parseGameId('agents', args.agentId);
@@ -365,6 +441,22 @@ export const agentInputs = {
         const updated = clampAffinity(current + delta);
         net += updated - current;
         affinities[otherId] = updated;
+        // Log the applied shift so the Tensions feed and inspector history can
+        // show what happened and why (skip no-ops, e.g. clamped at 0/100).
+        if (updated !== current) {
+          game.emitRelationshipEvent({
+            at: now,
+            kind: 'affinityShift',
+            actor: agent.playerId,
+            target: parseGameId('players', otherId),
+            delta: updated - current,
+            affinityAfter: updated,
+            reason: args.reason,
+            conversationId: args.conversationId,
+            scenarioId: agent.scenarioId,
+            scenarioName: agent.scenarioName,
+          });
+        }
       }
       agent.affinities = affinities;
       // Flash a 💗/💔 on the map only when the net feeling actually moved (the
@@ -465,6 +557,7 @@ export const agentInputs = {
         delete agent.scenarioId;
         delete agent.scenarioTopics;
         delete agent.scenarioGoal;
+        delete agent.scenarioConflict;
         delete agent.scenarioTarget;
         delete agent.scenarioArrivalTime;
         delete agent.scenarioProfile;

@@ -37,6 +37,7 @@ import {
   SCENARIO_INTERVAL_MAX_MS,
   SCENARIO_INTERVAL_MIN_MS,
   SCENARIO_RETRY_MS,
+  SCENARIO_TASK_PLAN_TIMEOUT_MS,
 } from '../constants';
 
 // locationId -> the character names that work there (drives local participants).
@@ -82,7 +83,29 @@ export function tickScenarios(game: Game, now: number): void {
       // (or the gather deadline passes), so the content window runs from the real
       // start rather than being eaten by travel time.
       maybePromoteScenario(game, now, sc);
-      stillActive.push(sc);
+      // Plan-timeout fallback: if the task-planning op was requested but never came
+      // back, release the guard so participants aren't held forever on a stuck op —
+      // the scenario then wraps up normally.
+      if (
+        sc.phase === 'active' &&
+        sc.taskPlanRequested &&
+        !sc.tasks &&
+        now > (sc.goalMetAt ?? sc.startTime) + SCENARIO_TASK_PLAN_TIMEOUT_MS
+      ) {
+        delete sc.taskPlanRequested;
+      }
+      // Working phase: drive each assignee through their delegated tasks and their
+      // on-screen progress bars; may set endTime = now once all tasks are done.
+      if (sc.phase === 'working') {
+        tickWorkingScenario(game, now, sc);
+      }
+      // Re-check expiry — working completion above can retire the scenario early.
+      if (sc.endTime <= now) {
+        clearScenarioParticipants(game, sc.id);
+        cooldowns[scopeKeyFor(sc.scope, sc.locationId)] = now + SCENARIO_COOLDOWN_MS;
+      } else {
+        stillActive.push(sc);
+      }
     }
   }
 
@@ -177,6 +200,8 @@ export function startScenario(
   const loc = def.locationId ? getLocationById(def.locationId) : undefined;
   const participantNames = participants.map((a) => nameOf(game, a) ?? 'Someone');
   const duration = def.durationMs ?? SCENARIO_DEFAULT_DURATION_MS;
+  // Local scenarios delegate tasks by default; universal ones just reach a decision.
+  const outcome = def.outcome ?? (def.scope === 'local' ? 'tasks' : 'decision');
 
   // Local scenarios have a fixed spot (the workplace standing tile). Compute how
   // long the slowest participant needs to walk there and run a "gathering" phase
@@ -204,6 +229,7 @@ export function startScenario(
     a.scenarioId = id;
     a.scenarioTopics = def.topics;
     a.scenarioGoal = def.completionGoal;
+    a.scenarioConflict = def.conflict;
     // Dispatch local-scenario participants to the gathering spot. Agent.tick walks
     // them there deterministically until they arrive (see the gather branch).
     if (gatherPoint) {
@@ -231,6 +257,8 @@ export function startScenario(
     relationships: def.relationships,
     context: `${def.context} Present: ${participantNames.join(', ')}.`,
     goals: def.goals,
+    conflict: def.conflict,
+    outcome,
     topics: def.topics,
     completionGoal: def.completionGoal,
     topicsDone: def.topics.map(() => false),
@@ -273,6 +301,7 @@ export function injectCatalogScenario(
     delete agent.scenarioId;
     delete agent.scenarioTopics;
     delete agent.scenarioGoal;
+    delete agent.scenarioConflict;
     delete agent.scenarioTarget;
     delete agent.scenarioArrivalTime;
     delete agent.scenarioProfile;
@@ -310,6 +339,64 @@ export function injectCatalogScenario(
   // top of the one we just triggered.
   world.nextScenarioTime = now + SCENARIO_INTERVAL_MIN_MS;
   return true;
+}
+
+type ScenarioTask = NonNullable<SerializedActiveScenario['tasks']>[number];
+
+// Drive a local scenario's "working" phase: each participant performs their
+// delegated tasks one at a time. Setting a task's `startedAt` (and the assignee's
+// timed `activity`) starts its progress bar; once its `durationMs` elapses the task
+// is marked done and the next one begins. When every task is done, the scenario's
+// goal is met and it retires immediately so participants free up.
+function tickWorkingScenario(game: Game, now: number, sc: SerializedActiveScenario): void {
+  const tasks = sc.tasks;
+  if (!tasks || tasks.length === 0) return;
+
+  const byAssignee = new Map<string, ScenarioTask[]>();
+  for (const t of tasks) {
+    if (!t.assigneeId) continue;
+    let list = byAssignee.get(t.assigneeId);
+    if (!list) {
+      list = [];
+      byAssignee.set(t.assigneeId, list);
+    }
+    list.push(t);
+  }
+
+  for (const [assigneeId, list] of byAssignee) {
+    const player = game.world.players.get(parseGameId('players', assigneeId));
+    const current = list.find((t) => !t.doneAt);
+    if (!current) {
+      // All of this assignee's tasks are finished — drop the (now-elapsed) activity.
+      if (player?.activity && player.activity.startedAt !== undefined) {
+        delete player.activity;
+      }
+      continue;
+    }
+    if (current.startedAt === undefined) {
+      current.startedAt = now;
+    } else if (now >= current.startedAt + current.durationMs) {
+      current.doneAt = now;
+      if (player?.activity) delete player.activity;
+      continue;
+    }
+    // Reflect the current task as the assignee's timed activity (also re-establishes
+    // it after a reload where the activity was cleared but the task is mid-flight).
+    if (player && (!player.activity || player.activity.startedAt !== current.startedAt)) {
+      player.activity = {
+        description: current.label,
+        emoji: current.emoji,
+        startedAt: current.startedAt,
+        until: current.startedAt + current.durationMs,
+      };
+    }
+  }
+
+  if (tasks.every((t) => t.doneAt)) {
+    sc.goalMet = true;
+    sc.goalMetAt = sc.goalMetAt ?? now;
+    sc.endTime = now;
+  }
 }
 
 // Promote a gathering local scenario to active once every participant has reached
@@ -351,9 +438,16 @@ function clearScenarioParticipants(game: Game, scenarioId: string): void {
     delete agent.scenarioId;
     delete agent.scenarioTopics;
     delete agent.scenarioGoal;
+    delete agent.scenarioConflict;
     delete agent.scenarioTarget;
     delete agent.scenarioArrivalTime;
     delete agent.scenarioProfile;
     delete agent.scenarioProfileFor;
+    // Drop any lingering timed task activity so a freed participant doesn't keep
+    // "working" on-screen (e.g. if the scenario hit its safety cap mid-task).
+    const player = game.world.players.get(agent.playerId);
+    if (player?.activity && player.activity.startedAt !== undefined) {
+      delete player.activity;
+    }
   }
 }

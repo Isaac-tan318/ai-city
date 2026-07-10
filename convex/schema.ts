@@ -17,9 +17,14 @@ export default defineSchema({
     author: playerId,
     text: v.string(),
     worldId: v.optional(v.id('worlds')),
+    // The active-scenario instance id this message was spoken under (if the author
+    // was enlisted in a scenario when they spoke). Lets participants read the chat
+    // history of their scenario across its separate conversations.
+    scenarioId: v.optional(v.string()),
   })
     .index('conversationId', ['worldId', 'conversationId'])
-    .index('messageUuid', ['conversationId', 'messageUuid']),
+    .index('messageUuid', ['conversationId', 'messageUuid'])
+    .index('by_scenario', ['worldId', 'scenarioId']),
 
   ...agentTables,
   ...aiTownTables,

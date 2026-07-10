@@ -8,12 +8,18 @@ import {
   continueConversationMessage,
   decideNextSpeaker,
   leaveConversationMessage,
+  planScenarioTasks,
   startConversationMessage,
   summarizeGoalMessage,
 } from '../agent/conversation';
 import { assertNever } from '../util/assertNever';
 import { serializedAgent, ScheduleStep, scheduleStep } from './agent';
-import { activitiesForName, ACTIVITY_COOLDOWN, CONVERSATION_COOLDOWN } from '../constants';
+import {
+  activitiesForName,
+  ACTIVITY_COOLDOWN,
+  CONVERSATION_COOLDOWN,
+  RELATIONSHIP_EVENT_REASON_MAX_CHARS,
+} from '../constants';
 import { api, internal } from '../_generated/api';
 import { sleep } from '../util/sleep';
 import { serializedPlayer } from './player';
@@ -38,6 +44,7 @@ export const agentRememberConversation = internalAction({
   },
   handler: async (ctx, args) => {
     let affinityDeltas: { playerId: string; delta: number }[] = [];
+    let affinityReason: string | undefined;
     try {
       const result = await rememberConversation(
         ctx,
@@ -47,6 +54,15 @@ export const agentRememberConversation = internalAction({
         args.conversationId as GameId<'conversations'>,
       );
       affinityDeltas = result?.affinityDeltas ?? [];
+      // Distill the memory summary into a short "why" snippet for the
+      // relationship-event log: drop the boilerplate prefix, keep the first
+      // sentence, cap the length.
+      const description = (result as { description?: string })?.description;
+      if (description) {
+        const stripped = description.replace(/^Conversation with .*? at .*?: /, '');
+        const firstSentence = stripped.split(/(?<=[.!?])\s/)[0] ?? stripped;
+        affinityReason = firstSentence.slice(0, RELATIONSHIP_EVENT_REASON_MAX_CHARS).trim();
+      }
     } catch (err) {
       // CRITICAL: never let a failed remember leave the agent stuck. If the
       // conversation can't be loaded (e.g. an abandoned invite that was never
@@ -69,6 +85,8 @@ export const agentRememberConversation = internalAction({
         args: {
           agentId: args.agentId,
           deltas: affinityDeltas,
+          conversationId: args.conversationId,
+          reason: affinityReason,
         },
       });
     }
@@ -194,6 +212,9 @@ export const agentGenerateMessage = internalAction({
     // Passed to the prompt builder so the time the LLM is told matches the game
     // clock, rather than whatever real time the action happens to execute at.
     gameTimeMs: v.number(),
+    // The active-scenario instance id the speaker is enlisted in (if any), stamped
+    // onto the outgoing message for cross-conversation scenario history.
+    scenarioId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     let completionFn;
@@ -251,10 +272,43 @@ export const agentGenerateMessage = internalAction({
       messageUuid: args.messageUuid,
       leaveConversation: args.type === 'leave',
       isGoalSummary: args.type === 'summary',
+      scenarioId: args.scenarioId,
       operationId: args.operationId,
       nextSpeaker,
       goalMet,
       coveredTopics,
+    });
+  },
+});
+
+// Once a local scenario's planning conversation has agreed a plan, this op turns
+// that plan into concrete, delegated tasks and feeds them back as an input, which
+// flips the scenario into its "working" phase. Always sends the input (even with an
+// empty task list) so the requesting agent's operation lock is released.
+export const agentPlanScenarioTasks = internalAction({
+  args: {
+    worldId: v.id('worlds'),
+    agentId,
+    playerId,
+    scenarioId: v.string(),
+    operationId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    let tasks: { label: string; emoji: string; assigneeId: string; durationMs: number }[] = [];
+    try {
+      tasks = await planScenarioTasks(ctx, args.worldId, args.scenarioId);
+    } catch (err) {
+      console.error(`agentPlanScenarioTasks failed: ${(err as Error).message}`);
+    }
+    await ctx.runMutation(api.aiTown.main.sendInput, {
+      worldId: args.worldId,
+      name: 'finishPlanScenarioTasks',
+      args: {
+        operationId: args.operationId,
+        agentId: args.agentId,
+        scenarioId: args.scenarioId,
+        tasks,
+      },
     });
   },
 });

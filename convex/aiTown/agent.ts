@@ -4,6 +4,9 @@ import { agentId, conversationId, playerId } from './ids';
 import { serializedPlayer } from './player';
 import { Conversation } from './conversation';
 import { Game } from './game';
+// Type-only (erased at runtime) — world.ts imports agent.ts, so a value import
+// here would be a circular dependency.
+import type { SerializedActiveScenario } from './world';
 import {
   ACTION_TIMEOUT,
   AWKWARD_CONVERSATION_TIMEOUT,
@@ -51,8 +54,10 @@ import {
   INVITE_ACCEPT_MIN_PROBABILITY,
   INVITE_ACCEPT_MAX_PROBABILITY,
   GROUP_LEAVE_AFFINITY_WEIGHT,
+  REJECTED_INVITE_AFFINITY_PENALTY,
+  GROUP_EXIT_LOW_AFFINITY_THRESHOLD,
 } from '../constants';
-import { affinityToward, FamilyTie } from './affinity';
+import { affinityToward, clampAffinity, FamilyTie } from './affinity';
 import { getLocationById, homeFor, workLeashAnchor } from '../../data/cityLocations';
 import { pickContextualEvent, buildSickSchedule } from '../../data/routines';
 
@@ -124,6 +129,9 @@ export class Agent {
   // prompt and used by the dialogue goal-judge; cleared when the scenario ends.
   scenarioTopics?: string[];
   scenarioGoal?: string;
+  // Authored point of disagreement for the current scenario (copied from the
+  // ScenarioDef). Injected into the prompt so the agent takes a side and argues.
+  scenarioConflict?: string;
   // --- Relationships ---
   // Mutable, directional affinity this agent feels toward other players, keyed by
   // the other player's id (0–100; see convex/aiTown/affinity.ts). Lazily created:
@@ -162,6 +170,7 @@ export class Agent {
       scenarioId,
       scenarioTopics,
       scenarioGoal,
+      scenarioConflict,
       affinities,
       lastAffinityChange,
     } = serialized;
@@ -199,6 +208,7 @@ export class Agent {
     this.scenarioId = scenarioId;
     this.scenarioTopics = scenarioTopics;
     this.scenarioGoal = scenarioGoal;
+    this.scenarioConflict = scenarioConflict;
     this.affinities = affinities;
     this.lastAffinityChange = lastAffinityChange;
   }
@@ -261,6 +271,10 @@ export class Agent {
         scenarioInstruction: this.scenarioInstruction,
       });
     }
+    // Local-scenario delegation: once the planning conversation's goal is met, the
+    // designated planner fires ONE op to turn the agreed plan into concrete,
+    // delegated tasks (which flips the scenario into its "working" phase).
+    this.maybeRequestScenarioTasks(game, now);
     if (this.inProgressOperation) {
       if (now < this.inProgressOperation.started + ACTION_TIMEOUT) {
         // Wait on the operation to finish.
@@ -268,6 +282,15 @@ export class Agent {
       }
       console.log(`Timing out ${JSON.stringify(this.inProgressOperation)}`);
       delete this.inProgressOperation;
+    }
+    // Local-scenario "working" phase (and the short planning-op window before it):
+    // hold at the workplace and let the scenario manager drive our assigned-task
+    // activity + progress bar — don't wander or start/join new conversations. We
+    // only hold once we're OUT of the planning conversation, so its wrap-up (goal
+    // summary / goodbyes) still runs first.
+    if (this.isHeldByScenario(game) && !game.world.playerConversation(player)) {
+      if (player.pathfinding) stopPlayer(player);
+      return;
     }
     // Opportunistic group conversations: if we're free and a multi-party
     // conversation is already happening nearby with room to spare, walk over and
@@ -406,6 +429,35 @@ export class Agent {
           }
         } else {
           console.log(`Agent ${player.id} rejecting invite to ${conversation.id}`);
+          // The inviter takes the snub personally: their affinity toward the
+          // decliner drops a little, so repeated brush-offs build into a grudge.
+          // Only for affinity-driven declines — the work-leash decline above
+          // isn't personal. (This branch implies a non-human inviter.)
+          const inviterAgent = [...game.world.agents.values()].find(
+            (a) => a.playerId === inviter.id,
+          );
+          if (inviterAgent) {
+            const current = inviterAgent.affinityFor(game, player.id);
+            const updated = clampAffinity(current - REJECTED_INVITE_AFFINITY_PENALTY);
+            if (updated !== current) {
+              inviterAgent.affinities = {
+                ...(inviterAgent.affinities ?? {}),
+                [player.id]: updated,
+              };
+              inviterAgent.lastAffinityChange = { at: now, net: updated - current };
+              const declinerName = game.playerDescriptions.get(player.id)?.name ?? 'Someone';
+              game.emitRelationshipEvent({
+                at: now,
+                kind: 'inviteDeclined',
+                actor: inviter.id,
+                target: player.id,
+                delta: updated - current,
+                affinityAfter: updated,
+                reason: `${declinerName} turned down their invite`,
+                conversationId: conversation.id,
+              });
+            }
+          }
           conversation.rejectInvite(game, now, player);
         }
         return;
@@ -467,6 +519,7 @@ export class Agent {
               messageUuid,
               type: 'start',
               gameTimeMs: now,
+              scenarioId: this.scenarioId,
             });
             return;
           } else {
@@ -509,6 +562,7 @@ export class Agent {
               messageUuid,
               type: 'summary',
               gameTimeMs: now,
+              scenarioId: this.scenarioId,
             });
           }
           return;
@@ -543,14 +597,31 @@ export class Agent {
           // the huddle thins out one person at a time instead of all staying glued
           // until the budget runs out. The 2-person path keeps its original feel.
           // Drift off sooner from a group you dislike; linger with friends/family.
+          const groupStats = isGroup
+            ? this.groupAffinityStats(game, conversation, player.id)
+            : undefined;
           const groupLeaveProbability = isGroup
-            ? this.groupLeaveProbability(game, conversation, player.id)
+            ? this.groupLeaveProbability(groupStats)
             : GROUP_LEAVE_PROBABILITY;
           const wantsToDriftOff =
             isGroup &&
             justSpokeNow &&
             conversation.numMessages >= GROUP_LEAVE_MIN_MESSAGES &&
             Math.random() < groupLeaveProbability;
+          // A drift-off from company this agent dislikes is a visible consequence
+          // of the bad blood — record it for the Tensions feed.
+          if (wantsToDriftOff && groupStats && groupStats.avg < GROUP_EXIT_LOW_AFFINITY_THRESHOLD) {
+            game.emitRelationshipEvent({
+              at: now,
+              kind: 'groupExit',
+              actor: player.id,
+              target: groupStats.lowestId,
+              reason: 'slipped away from the group early',
+              conversationId: conversation.id,
+              scenarioId: this.scenarioId,
+              scenarioName: this.scenarioName,
+            });
+          }
           shouldLeave =
             tooLongDeadline < now ||
             conversation.numMessages > maxMessages ||
@@ -568,6 +639,7 @@ export class Agent {
             messageUuid,
             type: 'leave',
             gameTimeMs: now,
+            scenarioId: this.scenarioId,
           });
           return;
         }
@@ -614,6 +686,7 @@ export class Agent {
           messageUuid,
           type: 'continue',
           gameTimeMs: now,
+          scenarioId: this.scenarioId,
         });
         return;
       }
@@ -638,6 +711,44 @@ export class Agent {
     return false;
   }
 
+  // The active-scenario entry this agent is enlisted in, if any.
+  activeScenario(game: Game): SerializedActiveScenario | undefined {
+    if (!this.scenarioId) return undefined;
+    return (game.world.activeScenarios ?? []).find((s) => s.id === this.scenarioId);
+  }
+
+  // True while a local scenario is delegating or performing its tasks: either the
+  // planning op is in flight (tasks requested, not yet back) or the scenario is in
+  // its 'working' phase. During this the agent holds at the workplace.
+  isHeldByScenario(game: Game): boolean {
+    const sc = this.activeScenario(game);
+    if (!sc || sc.scope !== 'local') return false;
+    if (sc.phase === 'working') return true;
+    return !!sc.taskPlanRequested && !sc.tasks;
+  }
+
+  // Once a local scenario's planning conversation has met its goal, the single
+  // designated planner (participant whose id sorts first) fires one op to turn the
+  // agreed plan into concrete, delegated tasks. Guarded so it fires exactly once.
+  maybeRequestScenarioTasks(game: Game, now: number): void {
+    if (this.inProgressOperation) return;
+    const sc = this.activeScenario(game);
+    if (!sc || sc.scope !== 'local') return;
+    // Decision scenarios (no tasks) never enter the working phase — the goal-met
+    // wrap-up ends them. Only 'tasks' scenarios delegate concrete work.
+    if ((sc.outcome ?? 'tasks') !== 'tasks') return;
+    if (sc.phase !== 'active' || !sc.goalMet || sc.tasks || sc.taskPlanRequested) return;
+    const planner = [...sc.participantIds].sort()[0];
+    if (this.playerId !== planner) return;
+    sc.taskPlanRequested = true;
+    this.startOperation(game, now, 'agentPlanScenarioTasks', {
+      worldId: game.worldId,
+      agentId: this.id,
+      playerId: this.playerId,
+      scenarioId: sc.id,
+    });
+  }
+
   // This agent's current affinity (0–100) toward another player: the stored value
   // or the family-aware default. The single lookup that lets relationships shape
   // behaviour (whom to approach, whether to accept an invite, when to drift off).
@@ -647,17 +758,40 @@ export class Agent {
     return affinityToward({ affinities: this.affinities, otherPlayerId, family, otherName });
   }
 
-  // Per-turn probability of drifting away from a group conversation, scaled by how
-  // this agent feels about the other currently-participating members: dislike the
-  // room → leave sooner; among friends/family → linger.
-  groupLeaveProbability(game: Game, conversation: Conversation, selfId: GameId<'players'>): number {
+  // How this agent feels about the rest of a group conversation: average affinity
+  // toward the other currently-participating members, plus the member they like
+  // least (used to attribute a low-affinity exit). Undefined when alone.
+  groupAffinityStats(
+    game: Game,
+    conversation: Conversation,
+    selfId: GameId<'players'>,
+  ): { avg: number; lowestId: GameId<'players'> } | undefined {
     const others = [...conversation.participants.entries()]
       .filter(([id, m]) => id !== selfId && m.status.kind === 'participating')
       .map(([id]) => id);
-    if (others.length === 0) return GROUP_LEAVE_PROBABILITY;
-    const avg = others.reduce((sum, id) => sum + this.affinityFor(game, id), 0) / others.length;
+    if (others.length === 0) return undefined;
+    let sum = 0;
+    let lowestId = others[0];
+    let lowest = Infinity;
+    for (const id of others) {
+      const affinity = this.affinityFor(game, id);
+      sum += affinity;
+      if (affinity < lowest) {
+        lowest = affinity;
+        lowestId = id;
+      }
+    }
+    return { avg: sum / others.length, lowestId };
+  }
+
+  // Per-turn probability of drifting away from a group conversation, scaled by how
+  // this agent feels about the other currently-participating members: dislike the
+  // room → leave sooner; among friends/family → linger.
+  groupLeaveProbability(stats: { avg: number } | undefined): number {
+    if (!stats) return GROUP_LEAVE_PROBABILITY;
     // avg == DEFAULT_AFFINITY → unchanged; warmer → ×(1 - weight); colder → ×(1 + weight).
-    const factor = 1 + GROUP_LEAVE_AFFINITY_WEIGHT * ((DEFAULT_AFFINITY - avg) / DEFAULT_AFFINITY);
+    const factor =
+      1 + GROUP_LEAVE_AFFINITY_WEIGHT * ((DEFAULT_AFFINITY - stats.avg) / DEFAULT_AFFINITY);
     return Math.max(0.05, Math.min(0.9, GROUP_LEAVE_PROBABILITY * factor));
   }
 
@@ -1058,6 +1192,7 @@ export class Agent {
       scenarioId: this.scenarioId,
       scenarioTopics: this.scenarioTopics,
       scenarioGoal: this.scenarioGoal,
+      scenarioConflict: this.scenarioConflict,
       affinities: this.affinities,
       lastAffinityChange: this.lastAffinityChange,
     };
@@ -1140,6 +1275,7 @@ export const serializedAgent = {
   scenarioId: v.optional(v.string()),
   scenarioTopics: v.optional(v.array(v.string())),
   scenarioGoal: v.optional(v.string()),
+  scenarioConflict: v.optional(v.string()),
   // Directional affinity toward other players, keyed by player id (0–100).
   affinities: v.optional(v.record(v.string(), v.number())),
   // Most recent affinity shift, for the transient map indicator.
@@ -1167,6 +1303,9 @@ export async function runAgentOperation(ctx: MutationCtx, operation: string, arg
     case 'agentExtractScenarioProfile':
       reference = internal.aiTown.agentOperations.agentExtractScenarioProfile;
       break;
+    case 'agentPlanScenarioTasks':
+      reference = internal.aiTown.agentOperations.agentPlanScenarioTasks;
+      break;
     default:
       throw new Error(`Unknown operation: ${operation}`);
   }
@@ -1184,6 +1323,9 @@ export const agentSendMessage = internalMutation({
     leaveConversation: v.boolean(),
     // True for the one-off "how we achieved the goal" wrap-up message.
     isGoalSummary: v.optional(v.boolean()),
+    // The active-scenario instance id the speaker was enlisted in (if any), stamped
+    // onto the message so scenario participants can read its cross-conversation history.
+    scenarioId: v.optional(v.string()),
     operationId: v.string(),
     // The participant the dialogue orchestrator wants to speak next (omitted when
     // leaving or when the floor should be open, e.g. only humans remain).
@@ -1200,6 +1342,7 @@ export const agentSendMessage = internalMutation({
       text: args.text,
       messageUuid: args.messageUuid,
       worldId: args.worldId,
+      scenarioId: args.scenarioId,
     });
     await insertInput(ctx, args.worldId, 'agentFinishSendingMessage', {
       conversationId: args.conversationId,

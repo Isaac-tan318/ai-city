@@ -32,6 +32,13 @@ export const serializedActiveScenario = v.object({
   relationships: v.string(),
   context: v.string(),
   goals: v.string(),
+  // Authored point of disagreement (copied from the ScenarioDef), shown in the
+  // detail panel. Optional — omitted for friction-free scenarios.
+  conflict: v.optional(v.string()),
+  // What the scenario drives toward: 'tasks' (planning chat -> delegated work /
+  // "working" phase) or 'decision' (chat until the group reaches a joint decision;
+  // no tasks). Resolved in startScenario; optional for backward-compat.
+  outcome: v.optional(v.union(v.literal('tasks'), v.literal('decision'))),
   // Concrete discussion beats and the completion goal for the scenario's
   // conversations (see data/scenarios.ts). Optional for backward-compat with
   // worlds serialized before these fields existed.
@@ -54,8 +61,32 @@ export const serializedActiveScenario = v.object({
   // it equals startTime. Optional/defaulted for backward-compat.
   contentStartTime: v.optional(v.number()),
   // 'gathering' while participants are still travelling to a local scenario's
-  // location; 'active' once they've arrived (or universal scenarios, immediately).
-  phase: v.optional(v.union(v.literal('gathering'), v.literal('active'))),
+  // location; 'active' once they've arrived (or universal scenarios, immediately);
+  // 'working' for a local scenario after its planning conversation has delegated
+  // concrete tasks — participants disperse and each performs their assigned task.
+  phase: v.optional(v.union(v.literal('gathering'), v.literal('active'), v.literal('working'))),
+  // Concrete, LLM-generated tasks for the "working" phase of a local scenario, each
+  // delegated to a participant. Absent for universal scenarios (which stay on the
+  // talk-based topics model) and before delegation.
+  tasks: v.optional(
+    v.array(
+      v.object({
+        label: v.string(),
+        emoji: v.string(),
+        assigneeId: v.optional(playerId),
+        assigneeName: v.optional(v.string()),
+        // Engine-time (≈ epoch ms) this task became the assignee's active task, and
+        // the moment it finished. `startedAt`..`until` (= startedAt + durationMs)
+        // drives the on-screen progress bar.
+        startedAt: v.optional(v.number()),
+        durationMs: v.number(),
+        doneAt: v.optional(v.number()),
+      }),
+    ),
+  ),
+  // Set true once the (single) task-planning op has been requested for this
+  // scenario, so only one participant fires it. Cleared implies not yet delegated.
+  taskPlanRequested: v.optional(v.boolean()),
   endTime: v.number(),
 });
 export type SerializedActiveScenario = Infer<typeof serializedActiveScenario>;

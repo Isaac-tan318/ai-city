@@ -15,6 +15,7 @@ import { GameClock } from './GameClock.tsx';
 import { TimeControls } from './TimeControls.tsx';
 import { MiniMap } from './MiniMap.tsx';
 import { ScenariosPanel, ScenarioDetail } from './Scenarios.tsx';
+import { TensionsFeed } from './TensionsFeed.tsx';
 import type { Viewport } from 'pixi-viewport';
 
 export const SHOW_DEBUG_UI = !!import.meta.env.VITE_SHOW_DEBUG_UI;
@@ -75,11 +76,18 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
           </div>
           <GameClock historicalTime={historicalTime} worldStartTime={game.world.worldStartTime} />
           <TimeControls historicalTime={historicalTime} worldStartTime={game.world.worldStartTime} />
-          <ScenariosPanel
-            scenarios={game.world.activeScenarios ?? []}
-            nextScenarioTime={game.world.nextScenarioTime}
-            onSelect={setSelectedScenarioId}
-          />
+          <div className="absolute top-2 right-2 z-10 flex flex-col items-end gap-2 pointer-events-none">
+            <ScenariosPanel
+              scenarios={game.world.activeScenarios ?? []}
+              nextScenarioTime={game.world.nextScenarioTime}
+              onSelect={setSelectedScenarioId}
+            />
+            <TensionsFeed
+              worldId={worldId}
+              game={game}
+              onSelectPlayer={(id) => setSelectedElement({ kind: 'player', id })}
+            />
+          </div>
         </div>
         {/* Right column area */}
         <div

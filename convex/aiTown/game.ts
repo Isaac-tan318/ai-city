@@ -26,6 +26,7 @@ import { HistoricalObject } from '../engine/historicalObject';
 import { AgentDescription, serializedAgentDescription } from './agentDescription';
 import { parseMap, serializeMap } from '../util/object';
 import { tickScenarios } from './scenarios';
+import { SerializedRelationshipEvent, serializedRelationshipEvent } from './relationshipEvents';
 
 const gameState = v.object({
   world: v.object(serializedWorld),
@@ -41,6 +42,7 @@ const gameStateDiff = v.object({
   agentDescriptions: v.optional(v.array(v.object(serializedAgentDescription))),
   worldMap: v.optional(v.object(serializedWorldMap)),
   agentOperations: v.array(v.object({ name: v.string(), args: v.any() })),
+  relationshipEvents: v.optional(v.array(v.object(serializedRelationshipEvent))),
 });
 type GameStateDiff = Infer<typeof gameStateDiff>;
 
@@ -60,6 +62,10 @@ export class Game extends AbstractGame {
   agentDescriptions: Map<GameId<'agents'>, AgentDescription>;
 
   pendingOperations: Array<{ name: string; args: any }> = [];
+
+  // Relationship events (conflicts and their consequences) emitted during this
+  // step; carried in the diff and inserted transactionally in saveDiff.
+  pendingRelationshipEvents: SerializedRelationshipEvent[] = [];
 
   numPathfinds: number;
 
@@ -164,6 +170,10 @@ export class Game extends AbstractGame {
     this.pendingOperations.push({ name, args });
   }
 
+  emitRelationshipEvent(event: SerializedRelationshipEvent) {
+    this.pendingRelationshipEvents.push(event);
+  }
+
   handleInput<Name extends InputNames>(now: number, name: Name, args: InputArgs<Name>) {
     const handler = inputs[name]?.handler;
     if (!handler) {
@@ -254,6 +264,10 @@ export class Game extends AbstractGame {
       agentOperations: this.pendingOperations,
     };
     this.pendingOperations = [];
+    if (this.pendingRelationshipEvents.length > 0) {
+      result.relationshipEvents = this.pendingRelationshipEvents;
+      this.pendingRelationshipEvents = [];
+    }
     if (this.descriptionsModified) {
       result.playerDescriptions = serializeMap(this.playerDescriptions);
       result.agentDescriptions = serializeMap(this.agentDescriptions);
@@ -363,6 +377,10 @@ export class Game extends AbstractGame {
       } else {
         await ctx.db.insert('maps', { worldId, ...worldMap });
       }
+    }
+    // Persist relationship events emitted during this step.
+    for (const event of diff.relationshipEvents ?? []) {
+      await ctx.db.insert('relationshipEvents', { worldId, ...event });
     }
     // Start the desired agent operations.
     for (const operation of diff.agentOperations) {

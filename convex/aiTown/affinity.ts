@@ -5,6 +5,7 @@
 import {
   DEFAULT_AFFINITY,
   FAMILY_BASE_AFFINITY,
+  HOSTILE_AFFINITY_THRESHOLD,
   MAX_AFFINITY,
   MIN_AFFINITY,
 } from '../constants';
@@ -57,7 +58,7 @@ export function affinityLabel(n: number): string {
   if (n >= 80) return 'very close';
   if (n >= 65) return 'warm';
   if (n >= 45) return 'neutral';
-  if (n >= 25) return 'cool';
+  if (n >= HOSTILE_AFFINITY_THRESHOLD) return 'cool';
   return 'hostile';
 }
 
@@ -66,7 +67,7 @@ export function affinityEmoji(n: number): string {
   if (n >= 80) return '💚';
   if (n >= 65) return '🙂';
   if (n >= 45) return '😐';
-  if (n >= 25) return '🙁';
+  if (n >= HOSTILE_AFFINITY_THRESHOLD) return '🙁';
   return '💢';
 }
 
@@ -76,6 +77,6 @@ export function affinityColor(n: number): string {
   if (n >= 80) return '#4ade80';
   if (n >= 65) return '#86efac';
   if (n >= 45) return '#fcd34d';
-  if (n >= 25) return '#fb923c';
+  if (n >= HOSTILE_AFFINITY_THRESHOLD) return '#fb923c';
   return '#f87171';
 }

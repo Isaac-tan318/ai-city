@@ -35,6 +35,10 @@ const TablesToVacuum: TableNames[] = [
   // We can vacuum fewer tables without serious consequences, but the only
   // one that will cause issues over time is having >>100k vectors.
   'memoryEmbeddings',
+
+  // Conflict/consequence log for the Tensions feed and inspector history; only
+  // recent events are ever displayed, so old rows are safe to drop.
+  'relationshipEvents',
 ];
 
 export const vacuumOldEntries = internalMutation({

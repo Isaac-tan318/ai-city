@@ -10,7 +10,8 @@ import { useHistoricalValue } from '../hooks/useHistoricalValue.ts';
 import { PlayerDescription } from '../../convex/aiTown/playerDescription.ts';
 import { WorldMap } from '../../convex/aiTown/worldMap.ts';
 import { ServerGame } from '../hooks/serverGame.ts';
-import { AFFINITY_INDICATOR_MS } from '../../convex/constants.ts';
+import { AFFINITY_INDICATOR_MS, HOSTILE_AFFINITY_THRESHOLD } from '../../convex/constants.ts';
+import { affinityToward } from '../../convex/aiTown/affinity.ts';
 
 export type SelectElement = (element?: { kind: 'player'; id: GameId<'players'> }) => void;
 
@@ -70,6 +71,35 @@ export const Player = ({
         ? 'up'
         : 'down'
       : undefined;
+  // Persistent 💢 while this agent is mid-conflict: either arguing out a
+  // scenario's point of disagreement, or stuck in a conversation with someone
+  // they're hostile toward.
+  let inConflict = false;
+  if (agentForPlayer) {
+    const conversation = [...game.world.conversations.values()].find(
+      (c) => c.participants.get(player.id)?.status.kind === 'participating',
+    );
+    if (conversation) {
+      if (agentForPlayer.scenarioConflict) {
+        inConflict = true;
+      } else {
+        const family = game.agentDescriptions.get(agentForPlayer.id)?.family;
+        for (const [otherId, member] of conversation.participants.entries()) {
+          if (otherId === player.id || member.status.kind !== 'participating') continue;
+          const affinity = affinityToward({
+            affinities: agentForPlayer.affinities,
+            otherPlayerId: otherId,
+            family,
+            otherName: game.playerDescriptions.get(otherId)?.name,
+          });
+          if (affinity < HOSTILE_AFFINITY_THRESHOLD) {
+            inConflict = true;
+            break;
+          }
+        }
+      }
+    }
+  }
   const tileDim = game.worldMap.tileDim;
   const historicalFacing = { dx: historicalLocation.dx, dy: historicalLocation.dy };
   return (
@@ -82,6 +112,7 @@ export const Player = ({
         isThinking={isThinking}
         isSpeaking={isSpeaking}
         affinityChange={affinityChange}
+        inConflict={inConflict}
         emoji={
           player.activity && player.activity.until > (historicalTime ?? Date.now())
             ? player.activity?.emoji

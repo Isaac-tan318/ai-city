@@ -7,7 +7,15 @@ import { api, internal } from '../_generated/api';
 import * as embeddingsCache from './embeddingsCache';
 import { GameId, conversationId, playerId } from '../aiTown/ids';
 import { FamilyTie, affinityLabel, affinityToward, familyRelation } from '../aiTown/affinity';
-import { NUM_MEMORIES_TO_SEARCH, SCENARIO_GOAL_CHECK_MIN_MESSAGES } from '../constants';
+import {
+  NUM_MEMORIES_TO_SEARCH,
+  SCENARIO_GOAL_CHECK_MIN_MESSAGES,
+  SCENARIO_HISTORY_MESSAGE_COUNT,
+  SCENARIO_RECALL_MEMORY_COUNT,
+  SCENARIO_TASK_DEFAULT_DURATION_MS,
+  SCENARIO_TASK_MAX_DURATION_MS,
+  SCENARIO_TASK_MIN_DURATION_MS,
+} from '../constants';
 import { computeGameTime, formatGameTimestamp } from '../aiTown/gameTime';
 import { CITY_LOCATIONS } from '../../data/cityLocations';
 
@@ -67,6 +75,19 @@ export async function startConversationMessage(
     ...previousConversationPrompt(primaryOther, lastConversation, worldStartTime, gameTimeMs),
   );
   prompt.push(...relatedMemoriesPrompt(memories));
+  if (agent?.scenarioId) {
+    const scenarioMessages = await ctx.runQuery(selfInternal.loadScenarioMessages, {
+      worldId,
+      scenarioId: agent.scenarioId,
+      excludeConversationId: conversationId,
+      limit: SCENARIO_HISTORY_MESSAGE_COUNT,
+    });
+    prompt.push(...scenarioHistoryPrompt(scenarioMessages));
+  }
+  if (agent?.scenarioInstruction) {
+    const pastScenarios = await recallPastScenarios(ctx, player.id as GameId<'players'>, agent, memories);
+    prompt.push(...pastScenariosPrompt(pastScenarios));
+  }
   if (memoryWithOtherPlayer && primaryOther) {
     prompt.push(
       `You may briefly reference your last conversation with ${primaryOther.name} in one short clause, but keep it light.`,
@@ -126,6 +147,19 @@ export async function continueConversationMessage(
   prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
   prompt.push(...selfAndOthersPrompt(agent, others));
   prompt.push(...relatedMemoriesPrompt(memories));
+  if (agent?.scenarioId) {
+    const scenarioMessages = await ctx.runQuery(selfInternal.loadScenarioMessages, {
+      worldId,
+      scenarioId: agent.scenarioId,
+      excludeConversationId: conversationId,
+      limit: SCENARIO_HISTORY_MESSAGE_COUNT,
+    });
+    prompt.push(...scenarioHistoryPrompt(scenarioMessages));
+  }
+  if (agent?.scenarioInstruction) {
+    const pastScenarios = await recallPastScenarios(ctx, player.id as GameId<'players'>, agent, memories);
+    prompt.push(...pastScenariosPrompt(pastScenarios));
+  }
   prompt.push(
     `Below is the current chat history.`,
     `DO NOT greet them again. Do NOT use the word "Hey" too often. Your response should be brief and within 200 characters.`,
@@ -263,6 +297,7 @@ export async function decideNextSpeaker(
   // speaker is enlisted in a scenario that carries a completion goal.
   const scenarioGoal = agent?.scenarioInstruction ? agent?.scenarioGoal : undefined;
   const topics = (agent?.scenarioInstruction ? agent?.scenarioTopics : undefined) ?? [];
+  const scenarioConflict = agent?.scenarioInstruction ? agent?.scenarioConflict : undefined;
   const prevMessages = await ctx.runQuery(api.messages.listMessages, { worldId, conversationId });
   const checkGoal = !!scenarioGoal && prevMessages.length >= SCENARIO_GOAL_CHECK_MIN_MESSAGES;
 
@@ -287,6 +322,9 @@ export async function decideNextSpeaker(
     promptLines.push(
       `This conversation is part of a scenario. Its overall goal: ${scenarioGoal}`,
       topics.length > 0 ? `Tasks it should work through:\n${numberedTopics}` : ``,
+      scenarioConflict
+        ? `There is a genuine disagreement at the heart of this: ${scenarioConflict} Only count the goal as met once the group has actually argued this out and reached a clear joint decision or compromise — NOT if they gave in instantly or never really engaged with the disagreement.`
+        : ``,
       `First, decide who should speak next from: ${candidateNames.join(', ')} (pick whoever was addressed or asked a question, or who would most plausibly jump in).`,
       topics.length > 0
         ? `Second, list the task numbers above that the group has SUBSTANTIVELY covered so far (discussed with real content, not merely mentioned in passing).`
@@ -412,6 +450,7 @@ function selfAndOthersPrompt(
     scenarioInstruction?: string;
     scenarioTopics?: string[];
     scenarioGoal?: string;
+    scenarioConflict?: string;
     health?: string;
   } | null,
   others: OtherParticipant[],
@@ -462,6 +501,12 @@ function selfAndOthersPrompt(
       `SCENARIO DIRECTIVE (follow this right now): ${agent.scenarioInstruction}`,
       `Weave this directive naturally into the conversation without breaking character.`,
     );
+    if (agent.scenarioConflict) {
+      prompt.push(
+        `POINT OF DISAGREEMENT: ${agent.scenarioConflict}`,
+        `You genuinely disagree with some of the others here. Pick the side that fits YOUR character, background and feelings toward them, and argue for it — make your case, push back when you disagree, and don't just cave to keep the peace. Let the argument actually play out over a few turns before anyone gives ground or a compromise is reached.`,
+      );
+    }
     if (agent.scenarioTopics && agent.scenarioTopics.length > 0) {
       prompt.push(
         `Work through these specific points over the conversation (advance the discussion — don't just repeat yourself or restate the situation):`,
@@ -538,6 +583,53 @@ function relatedMemoriesPrompt(memories: memory.Memory[]): string[] {
   return prompt;
 }
 
+// Render recent messages from the rest of the current scenario (its OTHER
+// conversations) so the speaker stays consistent with what the group has already
+// said or agreed — e.g. tasks another pair has already claimed.
+function scenarioHistoryPrompt(msgs: { authorName: string; text: string }[]): string[] {
+  const prompt: string[] = [];
+  if (msgs.length > 0) {
+    prompt.push(
+      `Earlier in this same scenario, others said the following in conversations you weren't part of. Stay consistent with it — especially any plan already made or tasks already claimed or assigned; don't contradict or re-litigate it:`,
+    );
+    for (const m of msgs) {
+      prompt.push(` - ${m.authorName}: ${m.text}`);
+    }
+  }
+  return prompt;
+}
+
+// Recall memories of PAST scenarios (or similar situations) this agent lived through,
+// so a new scenario is grounded in how earlier ones went. Every scenario conversation
+// is already remembered by the ordinary memory flow; the ordinary search is seeded by
+// WHO you're talking to, so it rarely surfaces those. We re-search seeded by the
+// current scenario's theme (name + directive) to pull up the relevant ones, dropping
+// any already shown by the generic search so we don't repeat them.
+async function recallPastScenarios(
+  ctx: ActionCtx,
+  playerId: GameId<'players'>,
+  agent: { scenarioName?: string; scenarioInstruction?: string },
+  alreadyShown: memory.Memory[],
+): Promise<memory.Memory[]> {
+  const theme = [agent.scenarioName, agent.scenarioInstruction].filter(Boolean).join(': ');
+  if (!theme) return [];
+  const embedding = await embeddingsCache.fetch(ctx, `A past situation like this: ${theme}`);
+  const found = await memory.searchMemories(ctx, playerId, embedding, SCENARIO_RECALL_MEMORY_COUNT);
+  const shownIds = new Set(alreadyShown.map((m) => m._id));
+  return found.filter((m) => !shownIds.has(m._id));
+}
+
+function pastScenariosPrompt(memories: memory.Memory[]): string[] {
+  const prompt: string[] = [];
+  if (memories.length > 0) {
+    prompt.push(`You also recall these past situations like this one, which you can draw on:`);
+    for (const m of memories) {
+      prompt.push(` - ${m.description}`);
+    }
+  }
+  return prompt;
+}
+
 async function previousMessages(
   ctx: ActionCtx,
   worldId: Id<'worlds'>,
@@ -552,6 +644,164 @@ async function previousMessages(
     });
   }
   return llmMessages;
+}
+
+// Recent messages from the rest of a scenario — every message stamped with this
+// `scenarioId` EXCEPT those in `excludeConversationId` (the caller's current chat,
+// which already comes through as the live history). Most recent `limit`, oldest
+// first, with author names resolved.
+export const loadScenarioMessages = internalQuery({
+  args: {
+    worldId: v.id('worlds'),
+    scenarioId: v.string(),
+    // Omit to read the whole scenario transcript (used by the task planner); pass
+    // the caller's current conversation to skip messages already shown as live chat.
+    excludeConversationId: v.optional(conversationId),
+    limit: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const rows = await ctx.db
+      .query('messages')
+      .withIndex('by_scenario', (q) =>
+        q.eq('worldId', args.worldId).eq('scenarioId', args.scenarioId),
+      )
+      .collect();
+    const recent = rows
+      .filter((m) => !args.excludeConversationId || m.conversationId !== args.excludeConversationId)
+      .slice(-args.limit);
+    const nameCache = new Map<string, string>();
+    const out: { authorName: string; text: string }[] = [];
+    for (const m of recent) {
+      let name = nameCache.get(m.author);
+      if (name === undefined) {
+        const desc = await ctx.db
+          .query('playerDescriptions')
+          .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('playerId', m.author))
+          .first();
+        name = desc?.name ?? 'Someone';
+        nameCache.set(m.author, name);
+      }
+      out.push({ authorName: name, text: m.text });
+    }
+    return out;
+  },
+});
+
+// Context the task planner needs: the active scenario's framing plus its
+// participants (name + the compact scenario profile others see).
+export const loadScenarioPlanData = internalQuery({
+  args: { worldId: v.id('worlds'), scenarioId: v.string() },
+  handler: async (ctx, args) => {
+    const world = await ctx.db.get(args.worldId);
+    if (!world) {
+      throw new Error(`World ${args.worldId} not found`);
+    }
+    const sc = (world.activeScenarios ?? []).find((s) => s.id === args.scenarioId);
+    if (!sc) return null;
+    const participants: { id: string; name: string; scenarioProfile?: string }[] = [];
+    for (let i = 0; i < sc.participantIds.length; i++) {
+      const pid = sc.participantIds[i];
+      const agent = world.agents.find((a) => a.playerId === pid);
+      participants.push({
+        id: pid,
+        name: sc.participantNames[i] ?? 'Someone',
+        scenarioProfile: agent?.scenarioProfile,
+      });
+    }
+    return {
+      name: sc.name,
+      instruction: sc.instruction,
+      context: sc.context,
+      goals: sc.goals,
+      participants,
+    };
+  },
+});
+
+// Turn a local scenario's just-concluded planning conversation into concrete,
+// physical to-do tasks, each delegated to a participant (grounded in what they
+// actually agreed). Returns [] on any failure so the caller degrades gracefully.
+export async function planScenarioTasks(
+  ctx: ActionCtx,
+  worldId: Id<'worlds'>,
+  scenarioId: string,
+): Promise<{ label: string; emoji: string; assigneeId: string; durationMs: number }[]> {
+  const data = await ctx.runQuery(selfInternal.loadScenarioPlanData, { worldId, scenarioId });
+  if (!data || data.participants.length === 0) return [];
+  const transcript = await ctx.runQuery(selfInternal.loadScenarioMessages, {
+    worldId,
+    scenarioId,
+    limit: 40,
+  });
+  const names = data.participants.map((p) => p.name);
+  const profileLines = data.participants
+    .filter((p) => p.scenarioProfile)
+    .map((p) => ` - ${p.name}: ${p.scenarioProfile}`);
+  const transcriptText =
+    transcript.length > 0
+      ? transcript.map((m) => `${m.authorName}: ${m.text}`).join('\n')
+      : '(no transcript available)';
+  const prompt = [
+    `You are planning the hands-on work for a workplace scene in a small town.`,
+    `Scenario: ${data.name} — ${data.instruction}`,
+    `Situation: ${data.context}`,
+    data.goals ? `Guidance on who does what: ${data.goals}` : ``,
+    `People present (use these EXACT names as assignees): ${names.join(', ')}.`,
+    ...(profileLines.length > 0 ? [`Relevant notes:`, ...profileLines] : []),
+    ``,
+    `They just finished talking and agreed a plan. Here is what they said:`,
+    transcriptText,
+    ``,
+    `Turn their plan into concrete, physical to-do tasks — the actual hands-on work each person now goes off to DO (not talk about). Honour who agreed to do what. Give each person at least one task; aim for ${names.length}-${names.length + 3} tasks total. Keep each label a short imperative of at most ~6 words.`,
+    `Reply with ONLY strict JSON, no prose: {"tasks":[{"label":"...","emoji":"<one emoji>","assignee":"<one of: ${names.join(
+      ', ',
+    )}>","durationSec":<number 20-90>}]}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const { content } = await chatCompletion({
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: 400,
+  });
+  return parseScenarioTasks(content, data.participants);
+}
+
+// Tolerantly parse the planner's JSON (`{"tasks":[{label,emoji,assignee,durationSec}]}`).
+// Resolves assignee names to player ids (falling back to round-robin) and clamps
+// durations to the configured range.
+function parseScenarioTasks(
+  content: string,
+  participants: { id: string; name: string }[],
+): { label: string; emoji: string; assigneeId: string; durationMs: number }[] {
+  let arr: any[] = [];
+  try {
+    const match = content.match(/\{[\s\S]*\}/);
+    const obj = JSON.parse(match ? match[0] : content);
+    arr = Array.isArray(obj.tasks) ? obj.tasks : Array.isArray(obj) ? obj : [];
+  } catch {
+    return [];
+  }
+  const byName = new Map(participants.map((p) => [p.name.toLowerCase(), p.id]));
+  const out: { label: string; emoji: string; assigneeId: string; durationMs: number }[] = [];
+  for (let i = 0; i < arr.length; i++) {
+    const t = arr[i] ?? {};
+    const label = typeof t.label === 'string' ? t.label.trim() : '';
+    if (!label) continue;
+    const emoji = typeof t.emoji === 'string' && t.emoji.trim() ? t.emoji.trim() : '🛠️';
+    const nameKey = typeof t.assignee === 'string' ? t.assignee.trim().toLowerCase() : '';
+    let assigneeId =
+      byName.get(nameKey) ??
+      [...byName.entries()].find(([n]) => nameKey && (nameKey.includes(n) || n.includes(nameKey)))
+        ?.[1];
+    if (!assigneeId) assigneeId = participants[i % participants.length].id;
+    const sec = Number(t.durationSec);
+    const durationMs = Number.isFinite(sec)
+      ? Math.min(SCENARIO_TASK_MAX_DURATION_MS, Math.max(SCENARIO_TASK_MIN_DURATION_MS, sec * 1000))
+      : SCENARIO_TASK_DEFAULT_DURATION_MS;
+    out.push({ label, emoji, assigneeId, durationMs });
+  }
+  return out;
 }
 
 export const queryPromptData = internalQuery({

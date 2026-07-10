@@ -15,6 +15,13 @@
 
 export type ScenarioScope = 'universal' | 'local';
 
+// What a scenario is ultimately for:
+//  - 'tasks'    (default for local scenarios): after the planning conversation the
+//    group delegates concrete work and enters the "working" phase (progress bars).
+//  - 'decision' (default for universal scenarios): the group just needs to reach a
+//    joint decision — no tasks, no working phase; the scenario ends on goal-met.
+export type ScenarioOutcome = 'tasks' | 'decision';
+
 export type ScenarioDef = {
   id: string;
   name: string;
@@ -27,6 +34,9 @@ export type ScenarioDef = {
   durationMs?: number;
   // Minimum participants required for the scenario to start.
   minParticipants: number;
+  // The kind of resolution the scenario drives toward. Defaults (resolved in
+  // startScenario): local -> 'tasks', universal -> 'decision'.
+  outcome?: ScenarioOutcome;
   // The directive injected into each participant's prompts while active.
   instruction: string;
   // --- Info-panel detail ---
@@ -35,6 +45,11 @@ export type ScenarioDef = {
   relationships: string;
   context: string;
   goals: string;
+  // An authored point of disagreement — the fault line and the opposing positions
+  // (e.g. "split over rushing the submission tonight vs asking for an extension").
+  // Injected into participants' prompts so they take clear sides and argue it out
+  // before resolving. Optional; omit for a friction-free scenario.
+  conflict?: string;
   // --- Dialogue steering ---
   // Concrete discussion beats injected into participants' conversation prompts so
   // they work through real content instead of repeating themselves.
@@ -186,6 +201,99 @@ export const UNIVERSAL_SCENARIOS: ScenarioDef[] = [
     completionGoal:
       'the group has exchanged greetings and compared or coordinated their reunion-dinner and visiting plans',
   },
+  {
+    id: 'dinner_decision',
+    name: 'What’s for Dinner?',
+    emoji: '🍽️',
+    scope: 'universal',
+    outcome: 'decision',
+    minParticipants: 2,
+    instruction:
+      'The group is hungry and trying to agree on where to eat together tonight. Push for the food YOU want, weigh price, distance, queue and cravings, and hash it out until everyone lands on ONE place.',
+    whatHappens:
+      'A hungry huddle forms over the eternal question of where to eat. Suggestions fly — hawker, zi char, a new café, prata at midnight — and nobody wants to be the one who decides.',
+    background:
+      'Deciding what to eat is Singapore’s favourite low-stakes argument. Everyone has a craving, a budget, and a strong opinion on whether it’s worth queueing.',
+    relationships:
+      'Friends and neighbours who eat together often, each with well-known food quirks — the fussy one, the cheapskate, the one who always suggests the same stall.',
+    context:
+      'It is dinnertime and everyone is hungry and slightly cranky. No one has committed to a plan yet.',
+    goals:
+      'Champion your own craving, veto what you can’t stand, factor in cost and queue, and get the group to actually commit to one place instead of dithering.',
+    conflict:
+      'Cravings clash hard: someone wants cheap familiar hawker food, someone wants to splurge on the trendy new place, someone is sick of the usual and someone just wants whatever is closest. Budget versus adventure versus effort — nobody wants to give in first.',
+    topics: [
+      'what everyone is actually craving tonight',
+      'cheap and familiar versus somewhere new and pricier',
+      'how far to travel and how long the queue will be',
+      'dietary limits and who refuses what',
+      'locking in one final choice everyone can live with',
+    ],
+    completionGoal:
+      'the group has settled on ONE specific place to eat that everyone has agreed to',
+  },
+  {
+    id: 'movie_night_pick',
+    name: 'Movie Night Pick',
+    emoji: '🎬',
+    scope: 'universal',
+    outcome: 'decision',
+    minParticipants: 2,
+    instruction:
+      'The group is planning a movie night and can’t agree on what to watch. Argue for your genre, talk showtimes or streaming, and settle on ONE film everyone will actually sit through.',
+    whatHappens:
+      'A movie night is coming together, but the group chat has stalled on the only hard part: what to actually watch. Everyone has a pick and a reason the others are wrong.',
+    background:
+      'Picking a film for a group is a negotiation — action fans, horror lovers, and the person who only wants a feel-good comedy all have to be satisfied at once.',
+    relationships:
+      'A friend group that hangs out often; their taste differences are a running joke, and someone always ends up outvoted.',
+    context:
+      'The night is set but the film is not. People are lobbying hard for their pick.',
+    goals:
+      'Pitch your genre, shoot down the ones you’ll hate, weigh runtime and where to watch, and get the group to commit to a single film.',
+    conflict:
+      'Tastes are genuinely opposed: one wants a scary horror, one refuses anything violent, one wants a long epic and one will fall asleep past two hours. Everyone thinks their pick is the obvious choice.',
+    topics: [
+      'which genre the night should be',
+      'a specific film each person is pushing for',
+      'runtime and how late it will run',
+      'cinema tickets versus streaming at home',
+      'agreeing on the one film to watch',
+    ],
+    completionGoal:
+      'the group has chosen ONE specific film to watch together',
+  },
+  {
+    id: 'weekend_trip_plan',
+    name: 'Weekend Trip Plan',
+    emoji: '🧳',
+    scope: 'universal',
+    outcome: 'decision',
+    minParticipants: 2,
+    instruction:
+      'The group is toying with a short weekend getaway and needs to agree where to go. Push your destination, weigh budget and travel time, and decide on ONE plan (or agree to bail).',
+    whatHappens:
+      'Talk turns to escaping for the weekend — a JB food run, a Batam beach, or just a staycation. Excitement is high but nobody agrees on where or how much to spend.',
+    background:
+      'Quick regional getaways are a beloved Singapore weekend habit, but they live or die on agreeing budget, timing, and who is actually free.',
+    relationships:
+      'Friends who travel well together in theory but have very different budgets and tolerances for hassle.',
+    context:
+      'The weekend is open and the idea of a trip is on the table, but nothing is booked and opinions differ.',
+    goals:
+      'Pitch your ideal getaway, be honest about budget and time, weigh the hassle, and get the group to commit to a single plan or call it off.',
+    conflict:
+      'The split is real: one wants a cheap no-frills day trip, one wants a proper hotel weekend, one is worried about money, and one would rather just staycation at home. Ambition versus budget versus effort.',
+    topics: [
+      'where to actually go — or whether to stay in',
+      'the budget everyone can stomach',
+      'how much travel and hassle is worth it',
+      'who is genuinely free and committed',
+      'locking in one plan or deciding to bail',
+    ],
+    completionGoal:
+      'the group has agreed on ONE weekend plan (a specific destination, or a clear decision not to go)',
+  },
 ];
 
 export const LOCAL_SCENARIOS: ScenarioDef[] = [
@@ -209,6 +317,8 @@ export const LOCAL_SCENARIOS: ScenarioDef[] = [
       'It is deadline day. The proposal is nearly done but not quite, and there is no time to spare.',
     goals:
       'Clara should steer the framing and keep morale up; Lukas should nail down the experimental results and methods; Isabel should pressure-test the ideas and catch flaws — together get the proposal submitted in time.',
+    conflict:
+      'The team is split on whether to submit tonight. One camp wants to send the strong-but-imperfect proposal in before the midnight deadline; the other insists the shakier results need re-running first, even if it means begging for an extension. Money, pride, and whose section is weakest are all on the line.',
     topics: [
       'whether the latest experimental results actually hold up',
       'how to frame the proposal’s central claim',
@@ -297,6 +407,8 @@ export const LOCAL_SCENARIOS: ScenarioDef[] = [
       'The inspector is here right now, a few stalls away and getting closer.',
     goals:
       'Sarah should whip her stall into shape and keep her composure; Rahman should pass the word and help the others; both should aim to come through the inspection clean.',
+    conflict:
+      'They disagree on how to handle the inspector. One wants to quietly warn every stall down the row and present a united front; the other thinks tipping people off is asking for trouble and each stall should just cover itself. There is old rivalry under the sudden teamwork.',
     topics: [
       'what the inspector is most likely to check',
       'the cleaning and tidying to do right now',
@@ -396,6 +508,103 @@ export const LOCAL_SCENARIOS: ScenarioDef[] = [
     ],
     completionGoal:
       'they have split the remaining work and have a plan to ship the project before the deadline',
+  },
+  // --- Local DECISION scenarios (no tasks — the group just has to decide) ---
+  {
+    id: 'cafe_new_drink',
+    name: 'New Drink to Add',
+    emoji: '🧋',
+    scope: 'local',
+    locationId: 'shophouses',
+    outcome: 'decision',
+    minParticipants: 2,
+    instruction:
+      'The café is deciding on ONE new drink to add to the menu this season. Pitch your idea, argue over what customers actually want versus what’s fun to make, and settle on a single addition.',
+    whatHappens:
+      'Between orders the café crew debates the one new drink to put on the season’s menu — a trendy matcha, a classic they do better, or a wildcard special.',
+    background:
+      'A café’s menu is its personality. A new drink has to sell, fit the brand, and not slow the bar down during a rush — so the choice matters more than it sounds.',
+    relationships:
+      'Baristas who take pride in their craft, with friendly rivalry over whose taste is better and who has to actually make the thing all day.',
+    context:
+      'It is a quiet lull and the menu decision has been put off long enough — they need to pick today.',
+    goals:
+      'Argue for your drink, weigh what will actually sell against what’s fun or on-trend, consider cost and how fiddly it is to make, and commit to one.',
+    conflict:
+      'Two visions clash: one wants a safe crowd-pleaser that sells and pours fast, the other wants an ambitious signature drink that’s trendy but slow and pricey to make. Craft pride versus practicality.',
+    topics: [
+      'what customers are actually asking for',
+      'trendy signature drink versus reliable crowd-pleaser',
+      'ingredient cost and margin',
+      'how fiddly it is to make during a rush',
+      'committing to one drink for the menu',
+    ],
+    completionGoal:
+      'they have agreed on ONE specific new drink to add to the menu',
+  },
+  {
+    id: 'astar_project_priority',
+    name: 'Which Project First',
+    emoji: '🧭',
+    scope: 'local',
+    locationId: 'astar',
+    outcome: 'decision',
+    minParticipants: 2,
+    instruction:
+      'The lab can only push ONE project hard this quarter and has to decide which. Make the case for the direction you believe in, weigh impact against feasibility, and reach a joint call.',
+    whatHappens:
+      'With limited time and people, the lab huddles to decide which project gets the resources this quarter — and which get parked.',
+    background:
+      'Research groups constantly triage: chasing the exciting high-risk idea versus the safer work that reliably produces papers and keeps funders happy.',
+    relationships:
+      'A PI and researchers who respect each other but have staked their reputations on different lines of work.',
+    context:
+      'Resourcing is due and they can’t hedge any longer — one project has to be chosen to lead with.',
+    goals:
+      'Advocate for your preferred project, be honest about risk and effort, weigh impact versus what’s achievable, and converge on a single priority.',
+    conflict:
+      'The split is sharp: one backs the bold, high-risk project that could be a breakthrough (or a dead end); the other wants the safe, incremental work that guarantees results and funding. Ambition versus security — and each has a personal stake in their line.',
+    topics: [
+      'the potential impact of each project',
+      'how realistic each is with the time and people available',
+      'what funders and reviewers will reward',
+      'whose work gets parked and how they feel about it',
+      'committing to one project to lead with',
+    ],
+    completionGoal:
+      'the lab has agreed which single project to prioritise this quarter',
+  },
+  {
+    id: 'hawker_price_change',
+    name: 'Raise Prices?',
+    emoji: '💰',
+    scope: 'local',
+    locationId: 'restaurant',
+    outcome: 'decision',
+    minParticipants: 2,
+    instruction:
+      'Costs are up and the stallholders are debating whether to raise prices — and by how much. Argue your position, weigh regulars versus margins, and reach a decision together.',
+    whatHappens:
+      'Over a slow stretch the hawkers thrash out the touchy question of raising prices as ingredient costs climb, worried about scaring off loyal regulars.',
+    background:
+      'Hawker prices are famously sensitive — even a fifty-cent rise makes the news and upsets regulars, but stallholders are squeezed by rising costs and rent.',
+    relationships:
+      'Neighbouring stallholders who’ve fed the same regulars for years and don’t want to be the first to hike prices.',
+    context:
+      'Costs have risen enough that the status quo is hurting, and they need to decide on a stance today.',
+    goals:
+      'State your position on raising prices, weigh keeping regulars happy against staying afloat, consider portion sizes as an alternative, and reach a shared decision.',
+    conflict:
+      'They genuinely disagree: one insists on holding prices to protect loyal regulars and reputation, even if margins bleed; the other says refusing to raise prices is unsustainable and they’ll go under being sentimental. Loyalty versus survival.',
+    topics: [
+      'how much costs have actually gone up',
+      'whether regulars will tolerate a rise',
+      'shrinking portions instead of raising prices',
+      'raising together versus each stall deciding alone',
+      'agreeing on a final stance and amount',
+    ],
+    completionGoal:
+      'the stallholders have agreed on a clear decision about whether and how much to raise prices',
   },
 ];
 

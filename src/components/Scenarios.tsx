@@ -36,8 +36,9 @@ function formatCountdown(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-// Top-right stack of active-scenario chips plus a countdown to the next scenario.
-// Click a chip to open its detail.
+// Stack of active-scenario chips plus a countdown to the next scenario, rendered
+// inside the shared top-right corner stack in Game.tsx. Click a chip to open its
+// detail.
 export function ScenariosPanel({
   scenarios,
   nextScenarioTime,
@@ -61,13 +62,19 @@ export function ScenariosPanel({
   );
   const remaining = nextScenarioTime !== undefined ? nextScenarioTime - nowMs : undefined;
   return (
-    <div className="absolute top-2 right-2 z-10 flex flex-col items-end gap-1.5 pointer-events-auto">
+    <div className="flex flex-col items-end gap-1.5 pointer-events-auto">
       <div className="text-[10px] uppercase tracking-widest text-white/70 font-display shadow-solid pr-1">
         Scenarios
       </div>
       {ordered.map((s) => {
-        const topics = s.topics ?? [];
-        const doneCount = (s.topicsDone ?? []).filter(Boolean).length;
+        // Once a local scenario has delegated concrete tasks, count those; otherwise
+        // fall back to the talk-based topics.
+        const tasks = s.tasks ?? [];
+        const itemCount = tasks.length > 0 ? tasks.length : (s.topics ?? []).length;
+        const doneCount =
+          tasks.length > 0
+            ? tasks.filter((t) => t.doneAt).length
+            : (s.topicsDone ?? []).filter(Boolean).length;
         const gathering = s.phase === 'gathering';
         const complete = !!s.goalMet;
         const subLabel = gathering
@@ -99,14 +106,14 @@ export function ScenariosPanel({
               </span>
             </span>
             <span className="flex items-center gap-1.5 shrink-0 ml-auto">
-              {!gathering && topics.length > 0 && (
+              {!gathering && itemCount > 0 && (
                 <span
                   className={`text-[10px] leading-none tabular-nums ${
                     complete ? 'text-green-300' : 'text-white/65'
                   }`}
-                  title={`${doneCount} of ${topics.length} tasks done`}
+                  title={`${doneCount} of ${itemCount} tasks done`}
                 >
-                  {doneCount}/{topics.length}
+                  {doneCount}/{itemCount}
                 </span>
               )}
               {complete ? (
@@ -165,6 +172,7 @@ function DetailSection({ title, body }: { title: string; body: string }) {
 // goal achieved.
 function StatusBadge({ scenario }: { scenario: SerializedActiveScenario }) {
   const gathering = scenario.phase === 'gathering';
+  const working = scenario.phase === 'working';
   const complete = !!scenario.goalMet;
   const cls = complete
     ? 'bg-green-500 text-black'
@@ -175,7 +183,9 @@ function StatusBadge({ scenario }: { scenario: SerializedActiveScenario }) {
     ? 'Goal achieved'
     : gathering
       ? 'Gathering participants'
-      : 'In progress';
+      : working
+        ? 'Working on tasks'
+        : 'In progress';
   return (
     <span
       className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${cls}`}
@@ -186,25 +196,128 @@ function StatusBadge({ scenario }: { scenario: SerializedActiveScenario }) {
   );
 }
 
-// Structured tasks checklist + goal badge, driven by live completion tracking.
-// Falls back to the narrative blurb for scenarios without structured tasks
-// (e.g. manually injected ones).
-function TasksAndGoalSection({ scenario }: { scenario: SerializedActiveScenario }) {
-  const topics = scenario.topics ?? [];
-  const done = scenario.topicsDone ?? [];
-  const goalMet = !!scenario.goalMet;
-  const doneCount = done.filter(Boolean).length;
+// Percent-complete of a delegated task (0–100), from `startedAt`..`startedAt+durationMs`.
+function scenarioTaskProgressPct(
+  task: { startedAt?: number; durationMs: number; doneAt?: number },
+  now: number,
+): number {
+  if (task.doneAt) return 100;
+  if (task.startedAt === undefined || task.durationMs <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round(((now - task.startedAt) / task.durationMs) * 100)));
+}
 
-  if (topics.length === 0 && !scenario.completionGoal) {
+// The completion-goal badge + text, shared by the task and topic views.
+function GoalRow({
+  goal,
+  goalMet,
+  label = 'Goal',
+}: {
+  goal: string;
+  goalMet: boolean;
+  label?: string;
+}) {
+  return (
+    <div>
+      <div className="text-xs uppercase tracking-widest text-amber-300/90 mb-1.5">{label}</div>
+      <div className="flex items-start gap-2">
+        <span
+          className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+            goalMet ? 'bg-green-500 text-black' : 'bg-amber-500/20 text-amber-300'
+          }`}
+        >
+          {goalMet ? 'Achieved ✓' : 'In progress'}
+        </span>
+        <p className="text-brown-100 text-sm leading-relaxed">{goal}</p>
+      </div>
+    </div>
+  );
+}
+
+// Structured tasks/goal, driven by live completion tracking. For a local scenario
+// that has delegated concrete tasks, shows each task with its assignee and a live
+// progress bar; otherwise falls back to the talk-based topics checklist (universal /
+// manual scenarios) or the narrative blurb.
+function TasksAndGoalSection({ scenario }: { scenario: SerializedActiveScenario }) {
+  const tasks = scenario.tasks ?? [];
+  const topics = scenario.topics ?? [];
+  const goalMet = !!scenario.goalMet;
+
+  // Tick for the live task progress bars (only while there are tasks to animate).
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (tasks.length === 0) return;
+    const t = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [tasks.length]);
+
+  if (tasks.length === 0 && topics.length === 0 && !scenario.completionGoal) {
     return <DetailSection title="Goals & tasks" body={scenario.goals} />;
   }
 
+  // Delegated-tasks view.
+  if (tasks.length > 0) {
+    const doneCount = tasks.filter((t) => t.doneAt).length;
+    return (
+      <div className="space-y-3">
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <div className="text-xs uppercase tracking-widest text-amber-300/90">Tasks</div>
+            <div className="text-[11px] text-brown-300 tabular-nums">
+              {doneCount}/{tasks.length} done
+            </div>
+          </div>
+          <ul className="space-y-2">
+            {tasks.map((t, i) => {
+              const isDone = !!t.doneAt;
+              const pct = scenarioTaskProgressPct(t, nowMs);
+              return (
+                <li key={i} className="text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="shrink-0" aria-hidden>
+                      {t.emoji}
+                    </span>
+                    <span
+                      className={`flex-1 ${isDone ? 'text-brown-300 line-through' : 'text-brown-100'}`}
+                    >
+                      {t.label}
+                    </span>
+                    {t.assigneeName && (
+                      <span className="shrink-0 text-[11px] text-amber-300/90">
+                        {t.assigneeName}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 h-2 w-full rounded overflow-hidden bg-black/30">
+                    <div
+                      className={`h-full rounded transition-all ${
+                        isDone ? 'bg-green-500' : 'bg-amber-400'
+                      }`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+        {scenario.completionGoal && <GoalRow goal={scenario.completionGoal} goalMet={goalMet} />}
+      </div>
+    );
+  }
+
+  // Talk-based topics checklist (universal / manual / decision scenarios). Decision
+  // scenarios reframe these as "considerations" leading to a "decision".
+  const isDecision = scenario.outcome === 'decision';
+  const done = scenario.topicsDone ?? [];
+  const doneCount = done.filter(Boolean).length;
   return (
     <div className="space-y-3">
       {topics.length > 0 && (
         <div>
           <div className="flex items-center justify-between mb-1.5">
-            <div className="text-xs uppercase tracking-widest text-amber-300/90">Tasks</div>
+            <div className="text-xs uppercase tracking-widest text-amber-300/90">
+              {isDecision ? 'Considerations' : 'Tasks'}
+            </div>
             <div className="text-[11px] text-brown-300 tabular-nums">
               {doneCount}/{topics.length} done
             </div>
@@ -232,19 +345,11 @@ function TasksAndGoalSection({ scenario }: { scenario: SerializedActiveScenario 
         </div>
       )}
       {scenario.completionGoal && (
-        <div>
-          <div className="text-xs uppercase tracking-widest text-amber-300/90 mb-1.5">Goal</div>
-          <div className="flex items-start gap-2">
-            <span
-              className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
-                goalMet ? 'bg-green-500 text-black' : 'bg-amber-500/20 text-amber-300'
-              }`}
-            >
-              {goalMet ? 'Achieved ✓' : 'In progress'}
-            </span>
-            <p className="text-brown-100 text-sm leading-relaxed">{scenario.completionGoal}</p>
-          </div>
-        </div>
+        <GoalRow
+          goal={scenario.completionGoal}
+          goalMet={goalMet}
+          label={isDecision ? 'Decision' : 'Goal'}
+        />
       )}
     </div>
   );
@@ -340,6 +445,9 @@ export function ScenarioDetail({
           )}
 
           <TasksAndGoalSection scenario={scenario} />
+          {scenario.conflict && (
+            <DetailSection title="Where they disagree" body={scenario.conflict} />
+          )}
           <DetailSection title="What's happening" body={scenario.whatHappens} />
           <DetailSection title="Background" body={scenario.background} />
           <DetailSection title="Relationships" body={scenario.relationships} />

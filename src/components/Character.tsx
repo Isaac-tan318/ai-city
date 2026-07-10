@@ -13,6 +13,7 @@ export const Character = ({
   isThinking = false,
   isSpeaking = false,
   affinityChange,
+  inConflict = false,
   emoji = '',
   isViewer = false,
   speed = 0.1,
@@ -33,6 +34,9 @@ export const Character = ({
   isSpeaking?: boolean;
   // Briefly flashes a 💗 (affinity rose) or 💔 (affinity fell) after a conversation.
   affinityChange?: 'up' | 'down';
+  // Persistent 💢 while the character is mid-conflict (arguing a scenario
+  // disagreement, or conversing with someone they're hostile toward).
+  inConflict?: boolean;
   emoji?: string;
   // Highlights the player.
   isViewer?: boolean;
@@ -115,6 +119,9 @@ export const Character = ({
           text={affinityChange === 'up' ? '💗' : '💔'}
           anchor={{ x: 0.5, y: 0.5 }}
         />
+      )}
+      {inConflict && (
+        <Text x={-16} y={-40} scale={0.7} text={'💢'} anchor={{ x: 0.5, y: 0.5 }} />
       )}
     </Container>
   );

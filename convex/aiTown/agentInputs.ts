@@ -9,6 +9,8 @@ import { Descriptions } from '../../data/characters';
 import { AgentDescription } from './agentDescription';
 import { Agent, scheduleStep } from './agent';
 import { affinityToward, clampAffinity } from './affinity';
+import { applyShortTermDeltas, shortTermSensitivity, type ShortTermDelta } from './shortTerm';
+import { DEFAULT_BALANCE, MAX_LEARNED_TRAITS } from '../constants';
 import { injectCatalogScenario } from './scenarios';
 import { scenarioById } from '../../data/scenarios';
 import { CITY_LOCATIONS, homeFor } from '../../data/cityLocations';
@@ -168,6 +170,9 @@ export const agentInputs = {
       destination: v.optional(point),
       invitee: v.optional(v.id('players')),
       activity: v.optional(activity),
+      // Cost (local dollars) of the chosen free-roam activity, deducted from the
+      // agent's balance so discretionary spending feeds financial pressure.
+      activityCost: v.optional(v.number()),
     },
     handler: (game, now, args) => {
       const agentId = parseGameId('agents', args.agentId);
@@ -198,6 +203,9 @@ export const agentInputs = {
       }
       if (args.activity) {
         player.activity = args.activity;
+        if (args.activityCost && args.activityCost > 0) {
+          agent.balance = (agent.balance ?? DEFAULT_BALANCE) - args.activityCost;
+        }
       }
       return null;
     },
@@ -465,6 +473,72 @@ export const agentInputs = {
       if (net !== 0) {
         agent.lastAffinityChange = { at: now, net };
       }
+      return null;
+    },
+  }),
+  // Write-back for interaction/scenario outcomes that shift this agent's short-term
+  // gauges (mood/stress/fatigue/hunger). Mirrors agentApplyAffinity: applies each
+  // delta on top of the current value, scaled by the agent's profile-derived
+  // reactivity, clamps to [0,100], and flags a transient map badge. Used by the
+  // post-conversation and post-scenario write-backs.
+  agentApplyShortTerm: inputHandler({
+    args: {
+      agentId,
+      deltas: v.array(
+        v.object({
+          component: v.union(
+            v.literal('mood'),
+            v.literal('stress'),
+            v.literal('fatigue'),
+            v.literal('hunger'),
+          ),
+          delta: v.number(),
+        }),
+      ),
+      reason: v.optional(v.string()),
+    },
+    handler: (game, now, args) => {
+      const agentId = parseGameId('agents', args.agentId);
+      const agent = game.world.agents.get(agentId);
+      if (!agent) {
+        throw new Error(`Couldn't find agent: ${agentId}`);
+      }
+      if (args.deltas.length === 0) return null;
+      const profile = game.agentDescriptions.get(agentId)?.profile;
+      const multipliers = shortTermSensitivity(profile);
+      const { shortTerm, net } = applyShortTermDeltas(
+        agent.shortTerm,
+        args.deltas as ShortTermDelta[],
+        now,
+        multipliers,
+      );
+      agent.shortTerm = shortTerm;
+      if (net !== 0) {
+        agent.lastShortTermChange = { at: now, net };
+      }
+      return null;
+    },
+  }),
+  // Promote a reflected-on insight to a durable "learned trait" (spec point 6).
+  // Appended to a bounded, de-duplicated list kept separate from the authored
+  // profile so runtime learning never overwrites the hand-authored persona.
+  agentAddLearnedTrait: inputHandler({
+    args: {
+      agentId,
+      trait: v.string(),
+    },
+    handler: (game, _now, args) => {
+      const agentId = parseGameId('agents', args.agentId);
+      const agent = game.world.agents.get(agentId);
+      if (!agent) {
+        throw new Error(`Couldn't find agent: ${agentId}`);
+      }
+      const trait = args.trait.trim();
+      if (!trait) return null;
+      const existing = agent.learnedTraits ?? [];
+      const norm = trait.toLowerCase();
+      if (existing.some((t) => t.toLowerCase() === norm)) return null;
+      agent.learnedTraits = [...existing, trait].slice(-MAX_LEARNED_TRAITS);
       return null;
     },
   }),

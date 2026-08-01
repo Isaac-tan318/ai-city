@@ -18,6 +18,12 @@ import {
   affinityLabel,
   affinityToward,
 } from '../../convex/aiTown/affinity';
+import {
+  buildShortTermSnapshot,
+  gaugeColor,
+  SHORT_TERM_EMOJI,
+  type ShortTermComponent,
+} from '../../convex/aiTown/shortTerm';
 import { ALL_SCENARIOS } from '../../data/scenarios';
 
 // The scenario generator offers the same catalogue the automatic system draws
@@ -569,6 +575,27 @@ export default function PlayerDetails({
   //   [...inflightInputs.values()].find((i) => i.name === inputName) ? ' opacity-50' : '';
 
   const pendingSuffix = (s: string) => '';
+
+  // Short-term wellbeing snapshot for the inspector panel (combines the new gauges
+  // with the derived financial pressure and existing health).
+  const wellbeing = agentForPlayer
+    ? buildShortTermSnapshot({
+        shortTerm: agentForPlayer.shortTerm,
+        balance: agentForPlayer.balance,
+        health: agentForPlayer.health,
+        now: nowMs,
+      })
+    : undefined;
+  const wellbeingGauges: { key: ShortTermComponent | 'financialPressure'; label: string; value: number }[] =
+    wellbeing
+      ? [
+          { key: 'mood', label: 'Mood', value: wellbeing.mood },
+          { key: 'stress', label: 'Stress', value: wellbeing.stress },
+          { key: 'fatigue', label: 'Fatigue', value: wellbeing.fatigue },
+          { key: 'hunger', label: 'Hunger', value: wellbeing.hunger },
+          { key: 'financialPressure', label: 'Money stress', value: wellbeing.financialPressure },
+        ]
+      : [];
   return (
     <>
       <div className="flex gap-4">
@@ -762,6 +789,53 @@ export default function PlayerDetails({
                 </li>
               );
             })}
+          </ul>
+        </div>
+      )}
+      {!isMe && wellbeing && (
+        <div className="box flex-grow mb-4">
+          <h2 className="bg-brown-700 text-base sm:text-lg text-center px-2 py-1">
+            Wellbeing{wellbeing.health === 'sick' ? ' · 🤒 unwell' : ''}
+          </h2>
+          <ul className="bg-brown-700 text-sm leading-snug px-3 pb-3 pt-2 flex flex-col gap-2">
+            {wellbeingGauges.map((g) => (
+              <li key={g.key} className="flex flex-col gap-1">
+                <div className="flex items-center gap-2">
+                  <span className="shrink-0">{SHORT_TERM_EMOJI[g.key]}</span>
+                  <span className="flex-1">{g.label}</span>
+                  <span className="text-white/70 shrink-0">{g.value}</span>
+                </div>
+                <div
+                  className="h-2 w-full rounded overflow-hidden bg-black/30"
+                  role="meter"
+                  aria-valuenow={g.value}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  title={`${g.label} ${g.value}/100`}
+                >
+                  <div
+                    className="h-full rounded transition-all"
+                    style={{ width: `${g.value}%`, backgroundColor: gaugeColor(g.key, g.value) }}
+                  />
+                </div>
+              </li>
+            ))}
+            <li className="text-xs text-white/60 pt-1">
+              💵 Savings:{' '}
+              {wellbeing.balance < 0 ? `-$${-wellbeing.balance}` : `$${wellbeing.balance}`}
+            </li>
+            {agentForPlayer?.learnedTraits && agentForPlayer.learnedTraits.length > 0 && (
+              <li className="flex flex-col gap-1 pt-1">
+                <div className="text-[10px] uppercase tracking-widest text-white/50">
+                  Learned about self
+                </div>
+                <ul className="list-disc pl-5 flex flex-col gap-0.5 text-xs text-white/70">
+                  {agentForPlayer.learnedTraits.map((t, i) => (
+                    <li key={i}>{t}</li>
+                  ))}
+                </ul>
+              </li>
+            )}
           </ul>
         </div>
       )}

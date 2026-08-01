@@ -76,6 +76,7 @@ export function tickScenarios(game: Game, now: number): void {
       continue;
     }
     if (sc.endTime <= now) {
+      rememberScenarioForParticipants(game, sc);
       clearScenarioParticipants(game, sc.id);
       cooldowns[scopeKeyFor(sc.scope, sc.locationId)] = now + SCENARIO_COOLDOWN_MS;
     } else {
@@ -101,6 +102,7 @@ export function tickScenarios(game: Game, now: number): void {
       }
       // Re-check expiry — working completion above can retire the scenario early.
       if (sc.endTime <= now) {
+        rememberScenarioForParticipants(game, sc);
         clearScenarioParticipants(game, sc.id);
         cooldowns[scopeKeyFor(sc.scope, sc.locationId)] = now + SCENARIO_COOLDOWN_MS;
       } else {
@@ -427,6 +429,34 @@ function maybePromoteScenario(game: Game, now: number, sc: SerializedActiveScena
     if (agent.scenarioId !== sc.id) continue;
     delete agent.scenarioTarget;
     delete agent.scenarioArrivalTime;
+  }
+}
+
+// Schedule a lock-free post-scenario memory op for each participant BEFORE the
+// scenario is torn down (spec point 6). The scenario's fields are passed in as op
+// args because the active-scenario entry is about to be removed. Skipped for a
+// gathering that expired without ever running content.
+function rememberScenarioForParticipants(game: Game, sc: SerializedActiveScenario): void {
+  if (sc.phase === 'gathering') return;
+  const plannerId = [...sc.participantIds].sort()[0];
+  for (const pid of sc.participantIds) {
+    const agent = [...game.world.agents.values()].find(
+      (a) => a.playerId === pid && a.scenarioId === sc.id,
+    );
+    if (!agent) continue;
+    game.scheduleOperation('agentRememberScenario', {
+      worldId: game.worldId,
+      agentId: agent.id,
+      playerId: pid,
+      name: game.playerDescriptions.get(parseGameId('players', pid))?.name ?? 'Someone',
+      scenarioName: sc.name,
+      instruction: sc.instruction,
+      goal: sc.completionGoal ?? sc.goals,
+      goalMet: !!sc.goalMet,
+      outcome: sc.outcome ?? 'decision',
+      wasPlanner: pid === plannerId,
+      conflict: sc.conflict,
+    });
   }
 }
 

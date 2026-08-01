@@ -232,7 +232,17 @@ export const TENSIONS_FEED_WINDOW_MS = 5 * 60_000;
 export const RECENT_RELATIONSHIP_EVENTS_LIMIT = 30;
 export const PLAYER_RELATIONSHIP_EVENTS_LIMIT = 50;
 
-export type Activity = { description: string; emoji: string; duration: number };
+// `cost` (local dollars, default 0) is deducted from the agent's balance when the
+// activity is committed, feeding financial pressure. `energy` (0–100, default 0)
+// is how tiring the activity is, used by the Phase 3 activity scorer (a tired
+// agent avoids high-energy options). Both optional so most activities stay free.
+export type Activity = {
+  description: string;
+  emoji: string;
+  duration: number;
+  cost?: number;
+  energy?: number;
+};
 
 // Generic fallback used for humans or any character without a bespoke list.
 export const ACTIVITIES: Activity[] = [
@@ -245,44 +255,44 @@ export const ACTIVITIES: Activity[] = [
 // rather than everyone reading/daydreaming/gardening at random.
 export const CHARACTER_ACTIVITIES: Record<string, Activity[]> = {
   Cedric: [
-    { description: 'wiping down the counter', emoji: '☕', duration: 20_000 },
-    { description: 'chatting up a regular', emoji: '💬', duration: 20_000 },
-    { description: 'humming a tune', emoji: '🎶', duration: 20_000 },
+    { description: 'wiping down the counter', emoji: '☕', duration: 20_000, energy: 15 },
+    { description: 'chatting up a regular', emoji: '💬', duration: 20_000, energy: 5 },
+    { description: 'humming a tune', emoji: '🎶', duration: 20_000, energy: 0 },
   ],
   James: [
-    { description: 'waiting for a fare', emoji: '🚗', duration: 20_000 },
-    { description: 'checking the Grab app', emoji: '📱', duration: 20_000 },
-    { description: 'cracking a joke with a passenger', emoji: '😄', duration: 20_000 },
+    { description: 'waiting for a fare', emoji: '🚗', duration: 20_000, energy: 5 },
+    { description: 'checking the Grab app', emoji: '📱', duration: 20_000, energy: 0 },
+    { description: 'grabbing a kopi', emoji: '☕', duration: 20_000, cost: 3, energy: 0 },
   ],
   Sarah: [
-    { description: 'frying up an order', emoji: '🍳', duration: 20_000 },
-    { description: 'wiping down the tables', emoji: '🧽', duration: 20_000 },
-    { description: 'sneaking in an extra egg', emoji: '🥚', duration: 20_000 },
+    { description: 'frying up an order', emoji: '🍳', duration: 20_000, energy: 25 },
+    { description: 'wiping down the tables', emoji: '🧽', duration: 20_000, energy: 20 },
+    { description: 'sneaking in an extra egg', emoji: '🥚', duration: 20_000, energy: 5 },
   ],
   Isabel: [
-    { description: 'scribbling equations', emoji: '📝', duration: 20_000 },
-    { description: 'reading a paper', emoji: '📄', duration: 20_000 },
-    { description: 'lost in thought', emoji: '🧠', duration: 20_000 },
+    { description: 'scribbling equations', emoji: '📝', duration: 20_000, energy: 10 },
+    { description: 'reading a paper', emoji: '📄', duration: 20_000, energy: 5 },
+    { description: 'lost in thought', emoji: '🧠', duration: 20_000, energy: 0 },
   ],
   Xavier: [
-    { description: "debugging a friend's code", emoji: '💻', duration: 20_000 },
-    { description: 'sipping iced Milo', emoji: '🥤', duration: 20_000 },
-    { description: 'rushing a deadline', emoji: '😩', duration: 20_000 },
+    { description: "debugging a friend's code", emoji: '💻', duration: 20_000, energy: 25 },
+    { description: 'sipping iced Milo', emoji: '🥤', duration: 20_000, cost: 3, energy: 0 },
+    { description: 'rushing a deadline', emoji: '😩', duration: 20_000, energy: 40 },
   ],
   Rahman: [
-    { description: 'pulling a long teh tarik', emoji: '🫖', duration: 20_000 },
-    { description: 'chatting with a regular', emoji: '💬', duration: 20_000 },
-    { description: 'wiping down the drinks counter', emoji: '🧽', duration: 20_000 },
+    { description: 'pulling a long teh tarik', emoji: '🫖', duration: 20_000, energy: 15 },
+    { description: 'chatting with a regular', emoji: '💬', duration: 20_000, energy: 5 },
+    { description: 'treating himself to a snack', emoji: '🍢', duration: 20_000, cost: 4, energy: 0 },
   ],
   Lukas: [
-    { description: 'sketching an experiment in his notebook', emoji: '📓', duration: 20_000 },
-    { description: 'planning a weekend bouldering trip', emoji: '🧗', duration: 20_000 },
-    { description: 'frowning at a vague meeting invite', emoji: '🤨', duration: 20_000 },
+    { description: 'sketching an experiment in his notebook', emoji: '📓', duration: 20_000, energy: 5 },
+    { description: 'planning a weekend bouldering trip', emoji: '🧗', duration: 20_000, cost: 20, energy: 10 },
+    { description: 'frowning at a vague meeting invite', emoji: '🤨', duration: 20_000, energy: 0 },
   ],
   Clara: [
-    { description: 'reviewing a draft paper', emoji: '📄', duration: 20_000 },
-    { description: 'sipping a proper cup of tea', emoji: '🫖', duration: 20_000 },
-    { description: 'mentoring a postdoc', emoji: '🧑‍🔬', duration: 20_000 },
+    { description: 'reviewing a draft paper', emoji: '📄', duration: 20_000, energy: 10 },
+    { description: 'sipping a proper cup of tea', emoji: '🫖', duration: 20_000, cost: 4, energy: 0 },
+    { description: 'mentoring a postdoc', emoji: '🧑‍🔬', duration: 20_000, energy: 15 },
   ],
 };
 
@@ -337,3 +347,66 @@ export const SICK_DURATION_DAYS = 2;
 // Chance a well agent catches the illness from a sick partner during a single
 // conversation (rolled once per conversation).
 export const CONTAGION_PROBABILITY = 0.25;
+
+// --- Short-term memory (dynamic per-agent affective/physiological state) ---
+// Four gauges on a 0–100 scale, distinct from the durable `profile`. Unlike
+// affinity (directional, per-other-player) these are single per-agent values.
+// Each drifts back toward its baseline over time; events push it around.
+export const SHORT_TERM_MIN = 0;
+export const SHORT_TERM_MAX = 100;
+// Where each gauge sits at rest / drifts back toward.
+export const MOOD_BASELINE = 60;
+export const STRESS_BASELINE = 15;
+export const FATIGUE_BASELINE = 10;
+export const HUNGER_BASELINE = 10;
+// Points each gauge moves back toward its baseline at a day rollover.
+export const SHORT_TERM_DAILY_DECAY = 25;
+// Fatigue gained on arriving at a demanding work block vs. any other "away" (out
+// of the house) schedule step. Resets at the nightly sleep step.
+export const FATIGUE_PER_WORK_BLOCK = 12;
+// Hunger accrued per in-game hour spent on a non-meal step; a meal step resets it.
+export const HUNGER_PER_GAME_HOUR = 7;
+// Sickness bleeds into the affective gauges each day it persists.
+export const SICK_STRESS_PER_DAY = 12;
+export const SICK_MOOD_PENALTY_PER_DAY = 10;
+// Clamp on how far a gauge can move from one interaction/scenario outcome, so a
+// single event nudges rather than swings (mirrors MAX_AFFINITY_CHANGE_PER_*).
+export const MAX_SHORT_TERM_CHANGE_PER_EVENT = 20;
+// How long (real ms) the transient short-term-shift map indicator stays up.
+export const SHORT_TERM_INDICATOR_MS = 6000;
+// Cap on how many durable "learned traits" an agent accumulates from reflection
+// (spec point 6); oldest are dropped past this so the list stays bounded.
+export const MAX_LEARNED_TRAITS = 6;
+
+// --- Economic model (savings + costs → financial pressure) ---
+// Every agent tracks a savings balance in local dollars. Income is credited on
+// work days; activities/scenario tasks cost money. `financialPressure` is a
+// 0–100 gauge derived from how far the balance sits below the comfort threshold.
+export const DEFAULT_BALANCE = 400;
+// Credited to a working agent at each weekday rollover (a day's pay).
+export const DAILY_INCOME = 120;
+// Living costs (rent, transport, utilities) deducted EVERY day, weekends included.
+// Tuned so weekday pay roughly covers a full week of expenses + meals, leaving the
+// balance near-neutral in the long run but dipping into pressure after a shock
+// (e.g. a sick spell with no income) or a spendy stretch — so financial pressure
+// is a live, situational signal rather than always 0 or a runaway death spiral.
+export const DAILY_EXPENSES = 85;
+// At/above this balance financial pressure is 0; at 0 it is 100 (linear between).
+export const FINANCIAL_COMFORT_THRESHOLD = 300;
+// Default cost of an activity when its Activity def omits `cost` (most are free).
+export const DEFAULT_ACTIVITY_COST = 0;
+
+// --- Short-term-driven behaviour (numeric scoring weights) ---
+// How steeply tiredness/stress raise the effective distance penalty when choosing
+// whom to approach (added on top of CANDIDATE_AFFINITY_WEIGHT). 0 = no effect.
+export const CANDIDATE_FATIGUE_DISTANCE_WEIGHT = 0.03;
+// Activity scoring: how much an option's cost is penalised, scaled by the agent's
+// current financial pressure, and how much its energy cost is penalised, scaled by
+// fatigue. Both are 0–1 multipliers over the option's raw cost/energy.
+export const ACTIVITY_COST_PRESSURE_WEIGHT = 0.6;
+export const ACTIVITY_ENERGY_FATIGUE_WEIGHT = 0.5;
+// Cost (local dollars) deducted when an agent settles into a meal schedule step.
+export const MEAL_COST = 8;
+// Fatigue gained on arriving at an "away" (non-home, non-meal) schedule step —
+// this stands in for the travel + exertion of going out to do something.
+export const AWAY_STEP_FATIGUE = 8;

@@ -8,7 +8,11 @@ import { GameId, agentId, conversationId, playerId } from '../aiTown/ids';
 import { SerializedPlayer } from '../aiTown/player';
 import { memoryFields } from './schema';
 import { formatGameTimestamp } from '../aiTown/gameTime';
-import { MAX_AFFINITY_CHANGE_PER_CONVERSATION } from '../constants';
+import {
+  MAX_AFFINITY_CHANGE_PER_CONVERSATION,
+  MAX_SHORT_TERM_CHANGE_PER_EVENT,
+} from '../constants';
+import type { ShortTermComponent, ShortTermDelta } from '../aiTown/shortTerm';
 
 // One affinity adjustment produced by the end-of-conversation evaluation.
 export type AffinityDelta = { playerId: string; delta: number };
@@ -41,7 +45,7 @@ export async function rememberConversation(
   const { player, otherPlayer, otherParticipants, worldStartTime } = data;
   const messages = await ctx.runQuery(selfInternal.loadMessages, { worldId, conversationId });
   if (!messages.length) {
-    return { affinityDeltas: [] as AffinityDelta[] };
+    return { affinityDeltas: [] as AffinityDelta[], shortTermDeltas: [] as ShortTermDelta[] };
   }
 
   const rosterNames = otherParticipants.map((p) => p.name).join(', ');
@@ -57,7 +61,12 @@ export async function rememberConversation(
       mapping each of these people — ${rosterNames} — to an integer from -10 to 10 capturing how your regard
       for them shifted during THIS conversation: negative if you clashed, disagreed, or were treated badly
       (e.g. a tense decision where you held conflicting views), positive if it was warm, supportive, or you
-      found common ground, and 0 if neutral try to keep neutral unless the conversation was particularly moving. For example: "Affinity: {"${otherPlayer.name}": 0}".`,
+      found common ground, and 0 if neutral try to keep neutral unless the conversation was particularly moving. For example: "Affinity: {"${otherPlayer.name}": 0}". Then, on ANOTHER separate last line beginning with
+      "Feelings:", output strict JSON with two integers from -10 to 10 describing how THIS conversation left
+      YOU feeling: "mood" (positive if it lifted your spirits — a warm chat, a good outcome; negative if it
+      was draining or upsetting) and "stress" (positive if it left you more tense or pressured — a conflict,
+      being dismissed, an unresolved problem; negative if it relieved tension). Keep both near 0 unless the
+      conversation was genuinely affecting. For example: "Feelings: {"mood": 0, "stress": 0}".`,
     },
   ];
   const authors = new Set<GameId<'players'>>();
@@ -75,8 +84,13 @@ export async function rememberConversation(
     messages: llmMessages,
     max_tokens: 500,
   });
-  // Split off the affinity judgement so it never gets stored as memory text.
-  const { summary, deltas: affinityDeltas } = parseAffinityLine(content, otherParticipants);
+  // Split off the affinity + feelings judgements so they never get stored as
+  // memory text (parse feelings from the affinity-cleaned summary).
+  const { summary: summaryAfterAffinity, deltas: affinityDeltas } = parseAffinityLine(
+    content,
+    otherParticipants,
+  );
+  const { summary, deltas: shortTermDeltas } = parseFeelingsLine(summaryAfterAffinity);
   const description = `Conversation with ${otherPlayer.name} at ${formatGameTimestamp(
     data.conversation._creationTime,
     worldStartTime,
@@ -97,8 +111,122 @@ export async function rememberConversation(
     },
     embedding,
   });
-  await reflectOnMemories(ctx, worldId, playerId);
-  return { description, affinityDeltas };
+  const learnedTrait = await reflectOnMemories(ctx, worldId, playerId);
+  return { description, affinityDeltas, shortTermDeltas, learnedTrait };
+}
+
+// A lasting takeaway an agent forms when a scenario wraps up (spec point 6).
+// Unlike the per-conversation memories the scenario's chats already produce, this
+// captures the OUTCOME and the agent's residual feelings about it, and returns
+// mood/stress deltas to apply. Stored as a reflection so it's recalled later when a
+// similar scenario recurs.
+export type ScenarioMemoryInput = {
+  name: string; // the character's own name
+  scenarioName: string;
+  instruction: string;
+  goal?: string;
+  goalMet: boolean;
+  outcome: string; // 'tasks' | 'decision'
+  wasPlanner: boolean;
+  conflict?: string;
+};
+
+export async function rememberScenarioOutcome(
+  ctx: ActionCtx,
+  worldId: Id<'worlds'>,
+  playerId: GameId<'players'>,
+  input: ScenarioMemoryInput,
+): Promise<{ description: string; shortTermDeltas: ShortTermDelta[] }> {
+  const roleNote = input.wasPlanner
+    ? 'You were the one who pulled the plan together.'
+    : 'You took part in it.';
+  const outcomeNote = input.goalMet
+    ? 'In the end the group reached a workable decision or got the work done.'
+    : 'It wrapped up without really resolving.';
+  const prompt = [
+    `You are ${input.name}. A situation just wrapped up: "${input.scenarioName}".`,
+    `What it was about: ${input.instruction}`,
+    input.goal ? `The aim was: ${input.goal}` : '',
+    input.conflict ? `There was disagreement over: ${input.conflict}` : '',
+    `${outcomeNote} ${roleNote}`,
+    `In 1-2 first-person sentences, note how this went for you and how you feel about the outcome — a lasting takeaway, not a play-by-play.`,
+    `Then, on a separate last line beginning with "Feelings:", output strict JSON with two integers from -20 to 20: "mood" (positive if the outcome pleased you, negative if it left you deflated) and "stress" (positive if it left you tense or frustrated — e.g. you were overruled or it stayed unresolved; negative if it relieved pressure). For example: "Feelings: {"mood": 0, "stress": 0}".`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  let content = '';
+  try {
+    const res = await chatCompletion({ messages: [{ role: 'user', content: prompt }], max_tokens: 220 });
+    content = res.content;
+  } catch (err) {
+    console.error(`rememberScenarioOutcome LLM failed: ${(err as Error).message}`);
+    content = `${roleNote} ${outcomeNote}`;
+  }
+  const { summary, deltas: parsedDeltas } = parseFeelingsLine(content);
+  const description = `${input.scenarioName}: ${summary || `${roleNote} ${outcomeNote}`}`;
+  // Heuristic fallback so short-term still moves even if the Feelings line is absent.
+  const shortTermDeltas = parsedDeltas.length > 0 ? parsedDeltas : heuristicScenarioFeelings(input);
+  const importance = await calculateImportance(description);
+  const { embedding } = await fetchEmbedding(description);
+  await ctx.runMutation(selfInternal.insertReflectionMemories, {
+    worldId,
+    playerId,
+    reflections: [{ description, relatedMemoryIds: [], importance, embedding }],
+  });
+  return { description, shortTermDeltas };
+}
+
+// Deterministic mood/stress fallback from a scenario outcome, used when the LLM
+// omits or garbles the Feelings line.
+function heuristicScenarioFeelings(input: ScenarioMemoryInput): ShortTermDelta[] {
+  if (input.goalMet) {
+    return [
+      { component: 'mood', delta: 6 },
+      { component: 'stress', delta: -4 },
+    ];
+  }
+  return [
+    { component: 'mood', delta: -5 },
+    { component: 'stress', delta: input.conflict ? 10 : 6 },
+  ];
+}
+
+// Pull the trailing `Feelings: {"mood":..,"stress":..}` line out of the summary:
+// returns the cleaned summary (line removed so it isn't stored) plus the parsed,
+// clamped mood/stress deltas. Tolerant of a missing/malformed line.
+function parseFeelingsLine(content: string): { summary: string; deltas: ShortTermDelta[] } {
+  const kept: string[] = [];
+  let jsonText: string | undefined;
+  for (const line of content.split('\n')) {
+    const m = line.match(/^\s*Feelings:\s*(.*)$/i);
+    if (m && jsonText === undefined) {
+      jsonText = m[1];
+    } else {
+      kept.push(line);
+    }
+  }
+  const summary = kept.join('\n').trim();
+  const deltas: ShortTermDelta[] = [];
+  if (jsonText) {
+    try {
+      const match = jsonText.match(/\{[\s\S]*\}/);
+      const obj = JSON.parse(match ? match[0] : jsonText);
+      for (const component of ['mood', 'stress'] as ShortTermComponent[]) {
+        const raw = obj[component];
+        const n = typeof raw === 'number' ? raw : Number(raw);
+        if (!Number.isFinite(n) || n === 0) continue;
+        const clamped = Math.max(
+          -MAX_SHORT_TERM_CHANGE_PER_EVENT,
+          Math.min(MAX_SHORT_TERM_CHANGE_PER_EVENT, Math.round(n)),
+        );
+        if (clamped !== 0) deltas.push({ component, delta: clamped });
+      }
+    } catch {
+      // Unparseable feelings line — leave short-term state unchanged.
+    }
+  }
+  return { summary, deltas };
 }
 
 // Pull the trailing `Affinity: {...}` line out of the summary completion: it
@@ -419,7 +547,7 @@ async function reflectOnMemories(
   const shouldReflect = sumOfImportanceScore > 500;
 
   if (!shouldReflect) {
-    return false;
+    return undefined;
   }
   console.debug('sum of importance score = ', sumOfImportanceScore);
   console.debug('Reflecting...');
@@ -444,6 +572,7 @@ async function reflectOnMemories(
     ],
   });
 
+  let topInsight: string | undefined;
   try {
     const insights = JSON.parse(reflection) as { insight: string; statementIds: number[] }[];
     const memoriesToSave = await asyncMap(insights, async (item) => {
@@ -464,12 +593,16 @@ async function reflectOnMemories(
       playerId,
       reflections: memoriesToSave,
     });
+    // The single strongest insight is a candidate to promote to a durable
+    // "learned trait" (a stable pattern across many memories) — returned so the
+    // caller can write it to the agent, separate from the authored profile.
+    topInsight = insights.find((i) => i.insight?.trim())?.insight?.trim();
   } catch (e) {
     console.error('error saving or parsing reflection', e);
     console.debug('reflection', reflection);
-    return false;
+    return undefined;
   }
-  return true;
+  return topInsight;
 }
 export const getReflectionMemories = internalQuery({
   args: { worldId: v.id('worlds'), playerId, numberOfItems: v.number() },

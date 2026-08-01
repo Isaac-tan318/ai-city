@@ -13,6 +13,12 @@
 // activity, the relationships among participants, the current context, and the
 // tasks / interaction goals each character may pursue.
 
+
+// caine/ focal agent summarise agentes memories
+// decider makes optimal scenario decision
+// focal agent makes the decision and matches against decider's decision
+// store mood with convo
+
 export type ScenarioScope = 'universal' | 'local';
 
 // What a scenario is ultimately for:

@@ -58,6 +58,31 @@ import {
   GROUP_EXIT_LOW_AFFINITY_THRESHOLD,
 } from '../constants';
 import { affinityToward, clampAffinity, FamilyTie } from './affinity';
+import {
+  buildShortTermSnapshot,
+  clampGauge,
+  decayTowardBaseline,
+  defaultShortTerm,
+  shortTermSelfDescription,
+  shortTermSensitivity,
+  type ShortTerm,
+} from './shortTerm';
+import {
+  SHORT_TERM_DAILY_DECAY,
+  DAILY_INCOME,
+  DAILY_EXPENSES,
+  DEFAULT_BALANCE,
+  SICK_STRESS_PER_DAY,
+  SICK_MOOD_PENALTY_PER_DAY,
+  MEAL_COST,
+  AWAY_STEP_FATIGUE,
+  FATIGUE_PER_WORK_BLOCK,
+  HUNGER_PER_GAME_HOUR,
+  FATIGUE_BASELINE,
+  STRESS_BASELINE,
+  HUNGER_BASELINE,
+  CANDIDATE_FATIGUE_DISTANCE_WEIGHT,
+} from '../constants';
 import { getLocationById, homeFor, workLeashAnchor } from '../../data/cityLocations';
 import { pickContextualEvent, buildSickSchedule } from '../../data/routines';
 
@@ -142,6 +167,30 @@ export class Agent {
   // it happened; `net` is the summed delta (>0 warmed, <0 cooled). The frontend
   // only shows it for AFFINITY_INDICATOR_MS, so it doesn't need clearing.
   lastAffinityChange?: { at: number; net: number };
+  // --- Short-term memory ---
+  // Mutable affective/physiological gauges (mood/stress/fatigue/hunger, each
+  // 0–100; see convex/aiTown/shortTerm.ts). Lazily created: absent means "at
+  // baseline". Distinct from the durable authored `profile` on AgentDescription.
+  shortTerm?: ShortTerm;
+  // Savings balance (local dollars) for the economic model. Income is credited on
+  // work days and activities/tasks cost money; financial pressure is derived from
+  // this (shortTerm.financialPressure). Absent means DEFAULT_BALANCE.
+  balance?: number;
+  // The game-day the once-per-day short-term bookkeeping (decay/income) last ran.
+  shortTermCheckedForDay?: number;
+  // The game-day hunger was last reset by a meal (so we accrue from the right base).
+  lastMealDay?: number;
+  // Guard so per-step fatigue/hunger accrual fires once per schedule step (a step
+  // can re-set its activity after a contextual micro-event expires). Keyed by
+  // `${dayNumber}:${currentStepIndex}`.
+  shortTermStepKey?: string;
+  // Transient marker of the most recent short-term shift, for a brief map badge.
+  lastShortTermChange?: { at: number; net: number };
+  // --- Long-term promotion ---
+  // Durable traits the agent has learned about itself by reflecting across many
+  // memories/scenarios (spec point 6). Kept SEPARATE from the authored `profile`
+  // so runtime learning augments, never overwrites, the hand-authored persona.
+  learnedTraits?: string[];
 
   constructor(serialized: SerializedAgent) {
     const {
@@ -173,6 +222,13 @@ export class Agent {
       scenarioConflict,
       affinities,
       lastAffinityChange,
+      shortTerm,
+      balance,
+      shortTermCheckedForDay,
+      lastMealDay,
+      shortTermStepKey,
+      lastShortTermChange,
+      learnedTraits,
     } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
@@ -211,6 +267,13 @@ export class Agent {
     this.scenarioConflict = scenarioConflict;
     this.affinities = affinities;
     this.lastAffinityChange = lastAffinityChange;
+    this.shortTerm = shortTerm;
+    this.balance = balance;
+    this.shortTermCheckedForDay = shortTermCheckedForDay;
+    this.lastMealDay = lastMealDay;
+    this.shortTermStepKey = shortTermStepKey;
+    this.lastShortTermChange = lastShortTermChange;
+    this.learnedTraits = learnedTraits;
   }
 
   tick(game: Game, now: number) {
@@ -899,6 +962,14 @@ export class Agent {
       this.updateHealthForNewDay(gt.dayNumber);
     }
 
+    // Once-per-day short-term bookkeeping: decay the gauges back toward baseline,
+    // couple in any sickness, and pay a working day's income. Runs after the health
+    // roll so sickness set today is reflected in the same day's mood/stress.
+    if (this.shortTermCheckedForDay !== gt.dayNumber) {
+      this.shortTermCheckedForDay = gt.dayNumber;
+      this.updateShortTermForNewDay(gt.dayNumber, now);
+    }
+
     // If sick and today's rest schedule isn't set up yet, stay home and rest —
     // skip the LLM planner entirely. Don't interrupt an active conversation.
     if (
@@ -986,6 +1057,16 @@ export class Agent {
         this.lastPlanAttempt = now;
         delete this.scheduleNeedsRefresh;
         delete this.forcePlan;
+        // Precompute the short-term self-state note so the planner can factor it in
+        // (rest when exhausted, cheaper choices when money is tight).
+        const shortTermNote = shortTermSelfDescription(
+          buildShortTermSnapshot({
+            shortTerm: this.shortTerm,
+            balance: this.balance,
+            health: this.health,
+            now,
+          }),
+        );
         this.startOperation(game, now, 'agentPlanDay', {
           worldId: game.worldId,
           agentId: this.id,
@@ -998,6 +1079,7 @@ export class Agent {
           currentMinutesIntoDay: gt.minutesIntoDay,
           existingSchedule: (disrupted || conversationRefresh || forcePlan) ? this.schedule : undefined,
           scenarioInstruction: this.scenarioInstruction,
+          shortTermNote,
         });
         return true;
       }
@@ -1115,6 +1197,29 @@ export class Agent {
       const nextStep = this.schedule[this.currentStepIndex + 1];
       const stepEndMinutes = nextStep ? nextStep.startMinute : 24 * 60;
       const minutesLeft = Math.max(1, stepEndMinutes - gt.minutesIntoDay);
+      // Short-term accrual for settling into this step, guarded to once per step
+      // (the block re-runs after a contextual micro-event expires): fatigue/hunger
+      // creep up on an "away" step, or reset on a meal/sleep step. The key includes
+      // the step's start time so a mid-day re-plan (which resets currentStepIndex to
+      // 0) doesn't collide with an already-accrued "day:0" and skip accrual.
+      const stepKey = `${gt.dayNumber}:${this.currentStepIndex}:${step.startMinute}`;
+      if (this.shortTermStepKey !== stepKey) {
+        this.shortTermStepKey = stepKey;
+        // A step at the agent's OWN workplace is work, not a meal — even the hawker
+        // workers whose workplace is the 'restaurant' and whose text mentions food.
+        const isOwnWorkplace = !!workLeashAnchor(player.name, step);
+        // Profile-derived fatigue reactivity (fit → tires slower, frail → faster).
+        const fatigueMultiplier =
+          shortTermSensitivity(game.agentDescriptions.get(this.id)?.profile).fatigue ?? 1;
+        this.accrueStepShortTerm(
+          step,
+          minutesLeft,
+          gt.dayNumber,
+          now,
+          isOwnWorkplace,
+          fatigueMultiplier,
+        );
+      }
       // Game-minute → real-ms: each in-game minute lasts CYCLE_MS / (24*60).
       const realMsPerGameMinute = (10 * 60 * 1000) / (24 * 60);
       // Stage 2: sometimes swap in a short contextual micro-event tied to the
@@ -1195,6 +1300,13 @@ export class Agent {
       scenarioConflict: this.scenarioConflict,
       affinities: this.affinities,
       lastAffinityChange: this.lastAffinityChange,
+      shortTerm: this.shortTerm,
+      balance: this.balance,
+      shortTermCheckedForDay: this.shortTermCheckedForDay,
+      lastMealDay: this.lastMealDay,
+      shortTermStepKey: this.shortTermStepKey,
+      lastShortTermChange: this.lastShortTermChange,
+      learnedTraits: this.learnedTraits,
     };
   }
 
@@ -1229,6 +1341,91 @@ export class Agent {
     } else {
       this.consecutiveWorkDays = 0;
     }
+  }
+
+  // --- Short-term memory: once-per-day bookkeeping ---
+  // Decay each gauge toward its baseline, bleed any sickness into mood/stress, and
+  // credit a working day's income. Called once per game-day from tickSchedule.
+  updateShortTermForNewDay(dayNumber: number, now: number) {
+    let st = decayTowardBaseline(
+      this.shortTerm ?? defaultShortTerm(now),
+      SHORT_TERM_DAILY_DECAY,
+      now,
+    );
+    if (this.health === 'sick') {
+      st = {
+        ...st,
+        stress: clampGauge(st.stress + SICK_STRESS_PER_DAY),
+        mood: clampGauge(st.mood - SICK_MOOD_PENALTY_PER_DAY),
+      };
+    }
+    this.shortTerm = st;
+    // Economics: a working weekday pays income (weekends and sick days earn
+    // nothing), while living expenses come out every day. The net over a week is
+    // near-neutral, so financial pressure only builds after a shock (e.g. illness)
+    // or a run of costly choices — a live signal, not a runaway drain.
+    const income = isWeekday(dayNumber) && this.health !== 'sick' ? DAILY_INCOME : 0;
+    this.balance = (this.balance ?? DEFAULT_BALANCE) + income - DAILY_EXPENSES;
+  }
+
+  // Short-term accrual when the agent settles into a schedule step: reset hunger on
+  // a meal (and pay for it) or fatigue on sleep; otherwise fatigue/hunger creep up,
+  // more for a demanding "work" block. `gameMinutesInStep` sizes the hunger creep.
+  // `isOwnWorkplace` marks a shift at the agent's OWN workplace (so a hawker worker
+  // at the 'restaurant' counts as work, never a meal); `fatigueMultiplier` is the
+  // profile-derived reactivity (fit tires slower, frail faster).
+  accrueStepShortTerm(
+    step: ScheduleStep,
+    gameMinutesInStep: number,
+    dayNumber: number,
+    now: number,
+    isOwnWorkplace: boolean,
+    fatigueMultiplier: number,
+  ) {
+    const st = { ...(this.shortTerm ?? defaultShortTerm(now)) };
+    const text = `${step.activity} ${step.description}`.toLowerCase();
+    const isHome = step.locationId === 'home' || step.locationId === 'hdb';
+    const isSleep = /\b(sleep|sleeping|bed|turning in|going to sleep|rest for the night)\b/.test(
+      text,
+    );
+    // A shift at the agent's own workplace is work — never a meal — even if it's the
+    // hawker stall (locationId 'restaurant') or the text mentions food/kopi.
+    const isMeal =
+      !isOwnWorkplace &&
+      /\b(lunch|dinner|breakfast|brunch|supper|eat|eating|meal|makan|hawker|food court|chicken rice|kopi|coffee|tea|prata|noodle|curry|snack)\b/.test(
+        text,
+      );
+    let resetHunger = false;
+    if (isSleep) {
+      st.fatigue = FATIGUE_BASELINE;
+    } else if (isMeal) {
+      // Eating OUT: resets hunger and costs money.
+      st.hunger = HUNGER_BASELINE;
+      resetHunger = true;
+      this.lastMealDay = dayNumber;
+      this.balance = (this.balance ?? DEFAULT_BALANCE) - MEAL_COST;
+    } else if (isHome && !isOwnWorkplace) {
+      // Settling in at home (morning, evening) means eating at home — free, and it
+      // resets hunger. Without this, agents only ever eat at explicitly-detected
+      // meal steps (which the LLM rarely schedules), so hunger saturated at 100.
+      st.hunger = HUNGER_BASELINE;
+      resetHunger = true;
+      this.lastMealDay = dayNumber;
+    } else {
+      const isWork =
+        isOwnWorkplace ||
+        (!isHome &&
+          /\b(work|working|shift|office|lab|counter|kitchen|driving|deadline|meeting)\b/.test(text));
+      const baseGain = isWork ? FATIGUE_PER_WORK_BLOCK : isHome ? 0 : AWAY_STEP_FATIGUE;
+      st.fatigue = clampGauge(st.fatigue + baseGain * fatigueMultiplier);
+    }
+    // Hunger creeps with the in-game time spent this step (skipped right after a meal).
+    if (!resetHunger) {
+      const hours = Math.max(0, gameMinutesInStep) / 60;
+      st.hunger = clampGauge(st.hunger + HUNGER_PER_GAME_HOUR * hours);
+    }
+    st.updatedAt = now;
+    this.shortTerm = st;
   }
 }
 
@@ -1280,6 +1477,27 @@ export const serializedAgent = {
   affinities: v.optional(v.record(v.string(), v.number())),
   // Most recent affinity shift, for the transient map indicator.
   lastAffinityChange: v.optional(v.object({ at: v.number(), net: v.number() })),
+  // --- Short-term memory (see convex/aiTown/shortTerm.ts) ---
+  shortTerm: v.optional(
+    v.object({
+      mood: v.number(),
+      stress: v.number(),
+      fatigue: v.number(),
+      hunger: v.number(),
+      updatedAt: v.number(),
+    }),
+  ),
+  // Savings balance for the economic model (financial pressure is derived).
+  balance: v.optional(v.number()),
+  // Day-scoped guards for once-per-day decay/income and meal-driven hunger reset.
+  shortTermCheckedForDay: v.optional(v.number()),
+  lastMealDay: v.optional(v.number()),
+  // Per-step accrual guard (`${dayNumber}:${currentStepIndex}`).
+  shortTermStepKey: v.optional(v.string()),
+  // Most recent short-term shift, for a transient map indicator.
+  lastShortTermChange: v.optional(v.object({ at: v.number(), net: v.number() })),
+  // Durable self-learned traits promoted from reflection (separate from profile).
+  learnedTraits: v.optional(v.array(v.string())),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 
@@ -1302,6 +1520,9 @@ export async function runAgentOperation(ctx: MutationCtx, operation: string, arg
       break;
     case 'agentExtractScenarioProfile':
       reference = internal.aiTown.agentOperations.agentExtractScenarioProfile;
+      break;
+    case 'agentRememberScenario':
+      reference = internal.aiTown.agentOperations.agentRememberScenario;
       break;
     case 'agentPlanScenarioTasks':
       reference = internal.aiTown.agentOperations.agentPlanScenarioTasks;
@@ -1382,6 +1603,23 @@ export const findConversationCandidate = internalQuery({
       family = desc?.family;
     }
 
+    // Weight distance more heavily when this agent is tired or stressed, so a
+    // worn-out character prefers nearby, low-effort company over trekking across
+    // the map for someone they merely like (spec point 5).
+    const selfSnap = buildShortTermSnapshot({
+      shortTerm: selfAgent?.shortTerm,
+      balance: selfAgent?.balance,
+      health: selfAgent?.health,
+      now,
+    });
+    // Measure weariness ABOVE the resting baseline so a fresh agent behaves exactly
+    // as before (no distance penalty at rest); only genuine tiredness/stress adds one.
+    const weariness = Math.max(
+      0,
+      (selfSnap.fatigue - FATIGUE_BASELINE + (selfSnap.stress - STRESS_BASELINE)) / 2,
+    );
+    const distanceWeight = CANDIDATE_AFFINITY_WEIGHT + CANDIDATE_FATIGUE_DISTANCE_WEIGHT * weariness;
+
     // Pick the candidate with the best affinity-vs-distance score (off cooldown).
     let best: { id: GameId<'players'>; score: number } | undefined;
     for (const otherPlayer of otherFreePlayers) {
@@ -1404,7 +1642,7 @@ export const findConversationCandidate = internalQuery({
         family,
         otherName: otherPlayer.name,
       });
-      const score = affinity - CANDIDATE_AFFINITY_WEIGHT * distance(position, otherPlayer.position);
+      const score = affinity - distanceWeight * distance(position, otherPlayer.position);
       if (!best || score > best.score) {
         best = { id: otherPlayer.id as GameId<'players'>, score };
       }

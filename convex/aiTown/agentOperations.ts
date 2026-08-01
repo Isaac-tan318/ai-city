@@ -2,7 +2,7 @@ import { v } from 'convex/values';
 import { internalAction, internalQuery } from '../_generated/server';
 import { parseTimeOfDay, isWeekday, dayOfWeekName } from './gameTime';
 import { WorldMap, serializedWorldMap } from './worldMap';
-import { rememberConversation } from '../agent/memory';
+import { rememberConversation, rememberScenarioOutcome } from '../agent/memory';
 import { GameId, agentId, conversationId, playerId } from './ids';
 import {
   continueConversationMessage,
@@ -16,10 +16,15 @@ import { assertNever } from '../util/assertNever';
 import { serializedAgent, ScheduleStep, scheduleStep } from './agent';
 import {
   activitiesForName,
+  Activity,
   ACTIVITY_COOLDOWN,
+  ACTIVITY_COST_PRESSURE_WEIGHT,
+  ACTIVITY_ENERGY_FATIGUE_WEIGHT,
   CONVERSATION_COOLDOWN,
   RELATIONSHIP_EVENT_REASON_MAX_CHARS,
 } from '../constants';
+import { buildShortTermSnapshot } from './shortTerm';
+import type { SerializedAgent } from './agent';
 import { api, internal } from '../_generated/api';
 import { sleep } from '../util/sleep';
 import { serializedPlayer } from './player';
@@ -44,6 +49,8 @@ export const agentRememberConversation = internalAction({
   },
   handler: async (ctx, args) => {
     let affinityDeltas: { playerId: string; delta: number }[] = [];
+    let shortTermDeltas: { component: string; delta: number }[] = [];
+    let learnedTrait: string | undefined;
     let affinityReason: string | undefined;
     try {
       const result = await rememberConversation(
@@ -54,6 +61,8 @@ export const agentRememberConversation = internalAction({
         args.conversationId as GameId<'conversations'>,
       );
       affinityDeltas = result?.affinityDeltas ?? [];
+      shortTermDeltas = result?.shortTermDeltas ?? [];
+      learnedTrait = result?.learnedTrait;
       // Distill the memory summary into a short "why" snippet for the
       // relationship-event log: drop the boilerplate prefix, keep the first
       // sentence, cap the length.
@@ -90,6 +99,28 @@ export const agentRememberConversation = internalAction({
         },
       });
     }
+    // Apply any mood/stress shifts the same verdict judged (folded into this same
+    // post-conversation write-back rather than a separate op).
+    if (shortTermDeltas.length > 0) {
+      await ctx.runMutation(api.aiTown.main.sendInput, {
+        worldId: args.worldId,
+        name: 'agentApplyShortTerm',
+        args: {
+          agentId: args.agentId,
+          deltas: shortTermDeltas,
+          reason: affinityReason,
+        },
+      });
+    }
+    // Promote a stable, reflected-on pattern to a durable learned trait (kept
+    // separate from the authored profile so runtime learning never clobbers it).
+    if (learnedTrait) {
+      await ctx.runMutation(api.aiTown.main.sendInput, {
+        worldId: args.worldId,
+        name: 'agentAddLearnedTrait',
+        args: { agentId: args.agentId, trait: learnedTrait },
+      });
+    }
     await ctx.runMutation(api.aiTown.main.sendInput, {
       worldId: args.worldId,
       name: 'finishRememberConversation',
@@ -98,6 +129,61 @@ export const agentRememberConversation = internalAction({
         operationId: args.operationId,
       },
     });
+  },
+});
+
+// Post-scenario write-back (spec point 6): when an automatic scenario ends, each
+// participant forms a lasting memory of the OUTCOME and its residual mood/stress is
+// applied. Scheduled (lock-free) from the scenario manager as the scenario is torn
+// down; the scenario's own fields are passed in since the entry is about to be
+// removed. Mirrors the agentRememberConversation flow.
+export const agentRememberScenario = internalAction({
+  args: {
+    worldId: v.id('worlds'),
+    agentId,
+    playerId,
+    name: v.string(),
+    scenarioName: v.string(),
+    instruction: v.string(),
+    goal: v.optional(v.string()),
+    goalMet: v.boolean(),
+    outcome: v.string(),
+    wasPlanner: v.boolean(),
+    conflict: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    let shortTermDeltas: { component: string; delta: number }[] = [];
+    try {
+      const result = await rememberScenarioOutcome(
+        ctx,
+        args.worldId,
+        args.playerId as GameId<'players'>,
+        {
+          name: args.name,
+          scenarioName: args.scenarioName,
+          instruction: args.instruction,
+          goal: args.goal,
+          goalMet: args.goalMet,
+          outcome: args.outcome,
+          wasPlanner: args.wasPlanner,
+          conflict: args.conflict,
+        },
+      );
+      shortTermDeltas = result.shortTermDeltas;
+    } catch (err) {
+      console.error(`agentRememberScenario failed: ${(err as Error).message}`);
+    }
+    if (shortTermDeltas.length > 0) {
+      await ctx.runMutation(api.aiTown.main.sendInput, {
+        worldId: args.worldId,
+        name: 'agentApplyShortTerm',
+        args: {
+          agentId: args.agentId,
+          deltas: shortTermDeltas,
+          reason: `after ${args.scenarioName}`,
+        },
+      });
+    }
   },
 });
 
@@ -359,7 +445,7 @@ export const agentDoSomething = internalAction({
         return;
       } else {
         const activities = activitiesForName(player.name);
-        const activity = activities[Math.floor(Math.random() * activities.length)];
+        const activity = pickActivity(activities, agent, now);
         await sleep(Math.random() * 1000);
         await ctx.runMutation(api.aiTown.main.sendInput, {
           worldId: args.worldId,
@@ -372,6 +458,7 @@ export const agentDoSomething = internalAction({
               emoji: activity.emoji,
               until: Date.now() + activity.duration,
             },
+            activityCost: activity.cost,
           },
         });
         return;
@@ -401,6 +488,37 @@ export const agentDoSomething = internalAction({
     });
   },
 });
+
+// Choose a free-roam activity by scoring each option against the agent's current
+// short-term state instead of picking uniformly at random (spec point 5): a broke
+// agent avoids costly options, a tired agent avoids high-energy ones. A small
+// random term keeps behaviour varied so the same option isn't always chosen.
+function pickActivity(activities: Activity[], agent: SerializedAgent, now: number): Activity {
+  if (activities.length === 0) {
+    return { description: 'taking a breather', emoji: '😮‍💨', duration: 20_000 };
+  }
+  const snap = buildShortTermSnapshot({
+    shortTerm: agent.shortTerm,
+    balance: agent.balance,
+    health: agent.health,
+    now,
+  });
+  let best: Activity | undefined;
+  let bestScore = -Infinity;
+  for (const activity of activities) {
+    const cost = activity.cost ?? 0;
+    const energy = activity.energy ?? 0;
+    const score =
+      Math.random() * 20 -
+      ACTIVITY_COST_PRESSURE_WEIGHT * cost * (snap.financialPressure / 100) -
+      ACTIVITY_ENERGY_FATIGUE_WEIGHT * energy * (snap.fatigue / 100);
+    if (score > bestScore) {
+      bestScore = score;
+      best = activity;
+    }
+  }
+  return best ?? activities[0];
+}
 
 function wanderDestination(worldMap: WorldMap, anchor?: { x: number; y: number }) {
   // On shift: pick a tile within the leash radius of the workplace so the agent
@@ -558,6 +676,9 @@ export const agentPlanDay = internalAction({
     currentMinutesIntoDay: v.number(),
     existingSchedule: v.optional(v.array(scheduleStep)),
     scenarioInstruction: v.optional(v.string()),
+    // Precomputed short-term self-state note (mood/fatigue/hunger/money worries) so
+    // the plan reflects how the character feels right now.
+    shortTermNote: v.optional(v.string()),
     operationId: v.string(),
   },
   handler: async (ctx, args) => {
@@ -624,6 +745,9 @@ export const agentPlanDay = internalAction({
       `Home: ${homeStr}`,
       workStr,
       `Today is Day ${args.dayNumber} (${dayName}, a ${weekday ? 'weekday' : 'weekend day'}). The current in-game time is ${args.currentTimeStr}.`,
+      args.shortTermNote
+        ? `Your current state: ${args.shortTermNote} Factor this into today's plan — rest or head home earlier if you're exhausted, make time to eat if hungry, and lean toward cheaper options if money is tight.`
+        : '',
       scenarioNote,
       ``,
       `Available locations (use the location_id verbatim):`,

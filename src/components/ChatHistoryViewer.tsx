@@ -190,7 +190,7 @@ export function ChatHistoryViewer({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-2 sm:p-6"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-2 sm:p-6 pointer-events-auto"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div className="bg-brown-800 text-brown-100 w-[96vw] h-[92vh] max-w-[1400px] flex flex-col box overflow-hidden">

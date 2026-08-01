@@ -8,6 +8,11 @@ import * as embeddingsCache from './embeddingsCache';
 import { GameId, conversationId, playerId } from '../aiTown/ids';
 import { FamilyTie, affinityLabel, affinityToward, familyRelation } from '../aiTown/affinity';
 import {
+  buildShortTermSnapshot,
+  shortTermSelfDescription,
+  type ShortTerm,
+} from '../aiTown/shortTerm';
+import {
   NUM_MEMORIES_TO_SEARCH,
   SCENARIO_GOAL_CHECK_MIN_MESSAGES,
   SCENARIO_HISTORY_MESSAGE_COUNT,
@@ -452,6 +457,9 @@ function selfAndOthersPrompt(
     scenarioGoal?: string;
     scenarioConflict?: string;
     health?: string;
+    shortTerm?: ShortTerm;
+    balance?: number;
+    learnedTraits?: string[];
   } | null,
   others: OtherParticipant[],
 ): string[] {
@@ -463,11 +471,39 @@ function selfAndOthersPrompt(
       const lines = Object.entries(agent.profile).map(([k, val]) => `  - ${k}: ${val}`);
       prompt.push([`Your background details:`, ...lines].join('\n'));
     }
+    // Durable traits the character has learned about itself over time (promoted
+    // from reflection); augments — never replaces — the authored background above.
+    if (agent.learnedTraits && agent.learnedTraits.length > 0) {
+      prompt.push(
+        [
+          `Things you've come to realise about yourself over time:`,
+          ...agent.learnedTraits.map((t) => `  - ${t}`),
+        ].join('\n'),
+      );
+    }
   }
   if (agent?.health === 'sick') {
     prompt.push(
       `You're feeling under the weather today — you've come down with a cold. You're low on energy and a little irritable, your replies are shorter and more subdued than usual, and you may mention not feeling well or wanting to head home and rest.`,
     );
+  }
+  // Short-term self-view: let temporary state (mood/stress/fatigue/hunger/money
+  // worries) colour how the character comes across right now, without overriding
+  // their stable personality.
+  if (agent) {
+    const selfState = shortTermSelfDescription(
+      buildShortTermSnapshot({
+        shortTerm: agent.shortTerm,
+        balance: agent.balance,
+        health: agent.health === 'sick' ? 'sick' : 'well',
+        now: Date.now(),
+      }),
+    );
+    if (selfState) {
+      prompt.push(
+        `${selfState} Let this temporary state colour your tone and choices in the moment, but stay in character.`,
+      );
+    }
   }
   for (const o of others) {
     // Others-filtered: during a scenario, show the compact scenario-relevant

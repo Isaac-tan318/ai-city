@@ -64,15 +64,30 @@ export function saysTheSameThing(a: string, b: string): boolean {
   return factOverlap(a, b) >= SAME_FACT_OVERLAP_THRESHOLD;
 }
 
+// One entry is meant to be one fact, but the extractor sometimes crams several
+// into a single string ("wants comfort food; open to something new"). Left alone
+// that defeats the dedupe (a compound never matches its own parts) and makes the
+// entry boundaries unreadable wherever the list is joined for display.
+export function splitCompoundFacts(facts: string[]): string[] {
+  const out: string[] = [];
+  for (const fact of facts) {
+    for (const part of fact.split(';')) {
+      const trimmed = part.trim();
+      if (trimmed) out.push(trimmed);
+    }
+  }
+  return out;
+}
+
 // Union two fact lists, replacing anything restated with its newest wording and
 // capping the total so a long scenario can't grow an unbounded prompt.
 //
-// The existing list is re-deduped against itself rather than trusted, so rows
-// written before this merge existed (or by an earlier, looser rule) clean
-// themselves up on the next write instead of carrying their duplicates forever.
+// The existing list is re-split and re-deduped rather than trusted, so rows
+// written before these rules existed clean themselves up on the next write
+// instead of carrying their duplicates and run-ons forever.
 export function mergeFacts(existing: string[], incoming: string[], max = 8): string[] {
   const out: string[] = [];
-  for (const fact of [...existing, ...incoming]) {
+  for (const fact of splitCompoundFacts([...existing, ...incoming])) {
     const trimmed = fact.trim();
     if (!trimmed) continue;
     const duplicateAt = out.findIndex((f) => saysTheSameThing(f, trimmed));
@@ -83,6 +98,25 @@ export function mergeFacts(existing: string[], incoming: string[], max = 8): str
     out.push(trimmed);
   }
   return out.slice(-max);
+}
+
+// How many of `incoming` say something `existing` doesn't already cover.
+//
+// Must be counted here rather than inferred from how much the merged list grew:
+// mergeFacts caps its output, so for anyone with a full list a genuinely new fact
+// evicts an old one and the length never moves. A length delta would report zero
+// forever, which is the steady state for any long-lived agent.
+export function countNewFacts(existing: string[], incoming: string[]): number {
+  const known = [...existing];
+  let count = 0;
+  for (const fact of incoming) {
+    const trimmed = fact.trim();
+    if (!trimmed) continue;
+    if (known.some((f) => saysTheSameThing(f, trimmed))) continue;
+    known.push(trimmed);
+    count++;
+  }
+  return count;
 }
 
 // Drop anything the extractor reports as now answered. Uses the same fuzzy match,

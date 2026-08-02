@@ -117,6 +117,11 @@ export const serializedWorld = {
   // scopeKey ('universal' | 'local:<locationId>') -> earliest real-ms a new
   // scenario for that scope may start (post-scenario cooldown).
   scenarioCooldowns: v.optional(v.record(v.string(), v.number())),
+  // Real-epoch ms when the manager asked the Decider to invent a scenario
+  // (convex/scenarioGen.ts). Set while that op is in flight so only one is ever
+  // requested; cleared when it lands, or timed out so a failed generation falls
+  // back to the authored catalogue instead of stalling the rotation.
+  scenarioGenRequested: v.optional(v.number()),
   historicalLocations: v.optional(historicalLocations),
   worldStartTime: v.optional(v.number()),
 };
@@ -136,6 +141,7 @@ export class World {
   lastScenarioEval?: number;
   nextScenarioTime?: number;
   scenarioCooldowns?: Record<string, number>;
+  scenarioGenRequested?: number;
   worldStartTime?: number;
 
   constructor(serialized: SerializedWorld) {
@@ -153,6 +159,7 @@ export class World {
     this.lastScenarioEval = serialized.lastScenarioEval;
     this.nextScenarioTime = serialized.nextScenarioTime;
     this.scenarioCooldowns = serialized.scenarioCooldowns;
+    this.scenarioGenRequested = serialized.scenarioGenRequested;
     this.worldStartTime = worldStartTime;
 
     if (historicalLocations) {
@@ -181,6 +188,7 @@ export class World {
       lastScenarioEval: this.lastScenarioEval,
       nextScenarioTime: this.nextScenarioTime,
       scenarioCooldowns: this.scenarioCooldowns,
+      scenarioGenRequested: this.scenarioGenRequested,
       worldStartTime: this.worldStartTime,
       historicalLocations:
         this.historicalLocations &&

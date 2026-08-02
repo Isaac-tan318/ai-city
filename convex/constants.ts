@@ -145,6 +145,23 @@ export const FOCAL_DECIDE_MESSAGE_HEADROOM = 4;
 // deliberation always resolves into something the evaluator can score.
 export const FOCAL_FORCE_DECIDE_MS = 90_000;
 
+// How long the "💡 +N memory" floater and the "❓" question pulse stay on screen
+// after the focal turn that produced them.
+// Long enough to survive the engine-step + client-sync delay between the focal
+// turn writing this and the browser seeing it, and still read as a brief pop.
+export const MEMORY_GAIN_INDICATOR_MS = 6000;
+export const QUESTION_INDICATOR_MS = 20000;
+
+// --- Decider-generated scenarios ---
+// Rather than always drawing from the fixed catalogue in data/scenarios.ts, the
+// manager sometimes asks the Decider to invent a situation from what has actually
+// happened in the town (convex/scenarioGen.ts). Probability that a given automatic
+// scenario is a fresh one rather than a catalogue pick.
+export const SCENARIO_GENERATION_PROBABILITY = 0.5;
+// If a requested generation hasn't come back within this long, give up on it and
+// let the manager fall back to the catalogue.
+export const SCENARIO_GENERATION_TIMEOUT_MS = ACTION_TIMEOUT;
+
 // --- Scenario shared memory (cross-conversation + past scenarios) ---
 // How many recent messages from the REST of the current scenario (its OTHER
 // conversations) to surface to a participant as shared context, so a plan/task

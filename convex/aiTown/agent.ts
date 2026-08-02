@@ -1650,6 +1650,9 @@ export async function runAgentOperation(ctx: MutationCtx, operation: string, arg
     case 'evaluateFinalDecision':
       reference = internal.evaluator.evaluateFinalDecision;
       break;
+    case 'generateAndStartScenario':
+      reference = internal.scenarioGen.generateAndStartScenario;
+      break;
     default:
       throw new Error(`Unknown operation: ${operation}`);
   }

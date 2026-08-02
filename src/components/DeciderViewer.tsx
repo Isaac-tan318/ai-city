@@ -89,29 +89,21 @@ function TraceDetail({ trace, evaluation }: { trace: Trace; evaluation?: Evaluat
           {trace.scenarioName}
         </h3>
         <div className="text-xs text-brown-400 mt-0.5">
-          {trace.participantNames.join(', ') || 'no participants recorded'} ·{' '}
-          {relativeTime(trace.at)}
+          {trace.participantNames.join(', ') || '—'} · {relativeTime(trace.at)}
         </div>
       </div>
 
       <div>
-        <div className="text-xs uppercase tracking-widest text-amber-300/90 mb-1.5">
-          How it framed the choice
-        </div>
+        <div className="text-xs uppercase tracking-widest text-amber-300/90 mb-1.5">Framing</div>
         {trace.reasoning ? (
           <p className="text-sm text-brown-100 leading-relaxed">{trace.reasoning}</p>
         ) : (
-          <p className="text-sm text-brown-300 italic">
-            No reasoning recorded — this framing predates the trace, or generation fell back to the
-            scenario&rsquo;s authored talking points.
-          </p>
+          <p className="text-sm text-brown-300 italic">Not recorded.</p>
         )}
       </div>
 
       <div>
-        <div className="text-xs uppercase tracking-widest text-amber-300/90 mb-2">
-          Options it put on the table
-        </div>
+        <div className="text-xs uppercase tracking-widest text-amber-300/90 mb-2">Options</div>
         <ul className="space-y-3">
           {trace.options.map((option) => {
             const trueScore = scoreFor(option.optionId);
@@ -128,14 +120,12 @@ function TraceDetail({ trace, evaluation }: { trace: Trace; evaluation?: Evaluat
                   <span className="flex-1 text-sm text-brown-100 font-bold">
                     {option.title}
                     {isBest && <span className="text-green-400 font-normal"> ★ best</span>}
-                    {isChosen && (
-                      <span className="text-amber-300/90 font-normal"> · they chose this</span>
-                    )}
+                    {isChosen && <span className="text-amber-300/90 font-normal"> · chosen</span>}
                   </span>
                   {trueScore !== undefined && (
                     <span
                       className="shrink-0 text-xs tabular-nums text-amber-300"
-                      title="True group utility, scored against hidden ground truth"
+                      title="True group utility, from ground truth"
                     >
                       {trueScore}
                     </span>
@@ -144,25 +134,24 @@ function TraceDetail({ trace, evaluation }: { trace: Trace; evaluation?: Evaluat
                 <p className="text-xs text-brown-300 mt-1">{option.details}</p>
                 {option.rationale && (
                   <p className="text-xs text-brown-200 mt-1.5">
-                    <span className="text-brown-400">Why: </span>
+                    <span className="text-brown-400">Why </span>
                     {option.rationale}
                   </p>
                 )}
                 {option.riskNote && (
                   <p className="text-xs text-brown-200 mt-1">
-                    <span className="text-brown-400">Suspected it wouldn&rsquo;t suit: </span>
+                    <span className="text-brown-400">Risk </span>
                     {option.riskNote}
                   </p>
                 )}
                 {warned === true && (
                   <p className="text-xs text-green-400 mt-1.5">
-                    ✓ It named {violatedNames.join(', ')} in advance — and that limit was the one
-                    the group broke.
+                    ✓ Called {violatedNames.join(', ')} — the limit that broke.
                   </p>
                 )}
                 {warned === false && (
                   <p className="text-xs text-red-300 mt-1.5">
-                    ✗ It never flagged {violatedNames.join(', ')}, whose hard limit this broke.
+                    ✗ Missed {violatedNames.join(', ')} — their limit broke.
                   </p>
                 )}
               </li>
@@ -175,31 +164,56 @@ function TraceDetail({ trace, evaluation }: { trace: Trace; evaluation?: Evaluat
         <div className="bg-brown-900 rounded px-3 py-2.5">
           <div className="text-xs uppercase tracking-widest text-amber-300/90 mb-1">Outcome</div>
           <p className="text-sm text-brown-100">
-            {evaluation.focalName} committed to{' '}
-            <span className="font-bold">{evaluation.selectedOptionTitle}</span> after{' '}
+            {evaluation.focalName} chose{' '}
+            <span className="font-bold">{evaluation.selectedOptionTitle}</span> —{' '}
+            <span className="tabular-nums">{evaluation.aggregatedGroupUtility}</span>/100 after{' '}
             {evaluation.questionsAsked} question{evaluation.questionsAsked === 1 ? '' : 's'}
-            {evaluation.forcedDecision ? ' (on the clock)' : ''}, scoring{' '}
-            <span className="tabular-nums">{evaluation.aggregatedGroupUtility}</span>/100.
+            {evaluation.forcedDecision ? ', on the clock' : ''}.
           </p>
           <p className="text-xs text-brown-300 mt-1">
             {evaluation.regret === 0 ? (
-              <span className="text-green-400">
-                That was the best option this framing offered.
-              </span>
+              <span className="text-green-400">Best available.</span>
             ) : (
               <>
-                {evaluation.bestOptionTitle} would have scored{' '}
-                <span className="tabular-nums">{evaluation.bestGroupUtility}</span> — regret{' '}
-                <span className="text-amber-300 tabular-nums">{evaluation.regret}</span>.
+                Regret <span className="text-amber-300 tabular-nums">{evaluation.regret}</span> vs{' '}
+                {evaluation.bestOptionTitle} (
+                <span className="tabular-nums">{evaluation.bestGroupUtility}</span>).
               </>
             )}
           </p>
         </div>
       ) : (
-        <p className="text-sm text-brown-300 italic">
-          Not yet scored — the evaluator runs once the group commits.
-        </p>
+        <p className="text-sm text-brown-300 italic">Not yet scored.</p>
       )}
+    </div>
+  );
+}
+
+// How many facts a belief line shows before collapsing the rest into a count.
+// These lists run to eight and repeat themselves; the panel is for scanning, and
+// the full set is still in the focal agent's prompt where it actually matters.
+const FACTS_SHOWN = 3;
+
+// Separated with "·" rather than ";" because the extractor sometimes returns a
+// compound fact with semicolons inside it, which made entry boundaries unreadable.
+function FactLine({
+  label,
+  facts,
+  muted = false,
+}: {
+  label: string;
+  facts: string[];
+  muted?: boolean;
+}) {
+  const shown = facts.slice(0, FACTS_SHOWN);
+  const extra = facts.length - shown.length;
+  return (
+    <div>
+      <dt className="inline text-brown-400">{label} </dt>
+      <dd className={`inline ${muted ? 'text-brown-200' : 'text-brown-100'}`}>
+        {shown.length ? shown.join(' · ') : '—'}
+        {extra > 0 && <span className="text-brown-400"> +{extra}</span>}
+      </dd>
     </div>
   );
 }
@@ -215,21 +229,21 @@ function BeliefsTab({ worldId }: { worldId: Id<'worlds'> }) {
   }
   if (beliefs.length === 0) {
     return (
-      <div className="py-8 text-center text-brown-300 italic text-sm">
-        Nothing learned yet. Beliefs are built up from what people say during a decision scenario.
-      </div>
+      <div className="py-8 text-center text-brown-300 italic text-sm">Nothing learned yet.</div>
     );
   }
   return (
     <div className="space-y-6">
+      {/* The information rule matters here — an empty list means nobody has
+          mentioned a constraint, not that none exists — so it stays on the page,
+          just compressed to one line. */}
       <p className="text-xs text-brown-400">
-        What each organiser has worked out from conversation alone. They are never shown anyone&rsquo;s
-        real constraints — an empty list means nobody has mentioned one, not that none exists.
+        Inferred from conversation only. Blank means unmentioned, not absent.
       </p>
       {beliefs.map((focal) => (
         <div key={focal.focalPlayerId}>
           <h3 className="font-display uppercase tracking-widest text-sm text-brown-200 mb-2">
-            What {focal.focalName} has figured out
+            {focal.focalName} knows
           </h3>
           <ul className="space-y-2">
             {focal.targets.map((t) => (
@@ -238,9 +252,9 @@ function BeliefsTab({ worldId }: { worldId: Id<'worlds'> }) {
                   <span className="flex-1 text-sm text-brown-100 font-bold">{t.targetName}</span>
                   <span
                     className="shrink-0 text-[11px] text-brown-300 tabular-nums"
-                    title="How well it believes it understands this person"
+                    title="How well it believes it understands them"
                   >
-                    {Math.round(t.confidenceScore * 100)}% sure
+                    {Math.round(t.confidenceScore * 100)}%
                   </span>
                 </div>
                 <div
@@ -257,28 +271,71 @@ function BeliefsTab({ worldId }: { worldId: Id<'worlds'> }) {
                   />
                 </div>
                 <dl className="mt-2 space-y-1 text-xs">
-                  <div>
-                    <dt className="inline text-brown-400">Hard limits it knows of: </dt>
-                    <dd className="inline text-brown-100">
-                      {t.knownTaboos.length ? t.knownTaboos.join('; ') : 'none mentioned'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="inline text-brown-400">What they seem to want: </dt>
-                    <dd className="inline text-brown-100">
-                      {t.knownPreferences.length ? t.knownPreferences.join('; ') : 'nothing yet'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="inline text-brown-400">Still unclear: </dt>
-                    <dd className="inline text-brown-200">
-                      {t.uncertainties.length ? t.uncertainties.join('; ') : 'nothing flagged'}
-                    </dd>
-                  </div>
+                  <FactLine label="Limits" facts={t.knownTaboos} />
+                  <FactLine label="Wants" facts={t.knownPreferences} />
+                  <FactLine label="Unclear" facts={t.uncertainties} muted />
                 </dl>
               </li>
             ))}
           </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Situations the Decider invented rather than drew from the authored catalogue,
+// with the town facts it built each one on.
+function GeneratedTab({ worldId }: { worldId: Id<'worlds'> }) {
+  const generated = useQuery(api.scenarioGen.recentGeneratedScenarios, { worldId, limit: 40 });
+
+  if (!generated) {
+    return <div className="py-8 text-center text-brown-300 italic text-sm">Loading&hellip;</div>;
+  }
+  if (generated.length === 0) {
+    return (
+      <div className="py-8 text-center text-brown-300 italic text-sm">
+        Nothing invented yet. Use ✨ Generate in the scenario creator.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {/* No "From" line means it invented the premise rather than grounding it in
+          something the town actually did — worth being able to spot. */}
+      <p className="text-xs text-brown-400">
+        Staged from town history. No &ldquo;From&rdquo; line means it made the premise up.
+      </p>
+      {generated.map((scenario) => (
+        <div key={scenario._id} className="bg-brown-900 rounded px-3 py-2.5">
+          <div className="flex items-baseline gap-2">
+            <span className="flex-1 text-sm font-bold text-brown-100">
+              {scenario.emoji} {scenario.name}
+            </span>
+            <span className="shrink-0 text-[11px] text-brown-400">
+              {scenario.createdBy === 'auto' ? 'auto' : 'on request'} ·{' '}
+              {scenario.usedAt ? 'played' : 'draft'} · {relativeTime(scenario.at)}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-brown-200">{scenario.instruction}</p>
+          {scenario.reasoning && (
+            <p className="mt-1.5 text-xs text-brown-300">
+              <span className="text-brown-400">Why </span>
+              {scenario.reasoning}
+            </p>
+          )}
+          {scenario.conflict && (
+            <p className="mt-1 text-xs text-brown-300">
+              <span className="text-brown-400">Conflict </span>
+              {scenario.conflict}
+            </p>
+          )}
+          {scenario.groundedIn.length > 0 && (
+            <p className="mt-1 text-xs text-brown-300">
+              <span className="text-brown-400">From </span>
+              {scenario.groundedIn.join('; ')}
+            </p>
+          )}
         </div>
       ))}
     </div>
@@ -292,7 +349,7 @@ export function DeciderViewer({
   worldId: Id<'worlds'>;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<'framings' | 'beliefs'>('framings');
+  const [tab, setTab] = useState<'framings' | 'beliefs' | 'generated'>('framings');
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const traces = useQuery(api.decider.recentDeciderTraces, { worldId, limit: 50 }) as
@@ -373,6 +430,15 @@ export function DeciderViewer({
             <div className="h-full bg-clay-700 flex items-center px-3">Beliefs</div>
           </button>
           <button
+            type="button"
+            onClick={() => setTab('generated')}
+            className={`button text-white shadow-solid text-sm cursor-pointer pointer-events-auto ${
+              tab === 'generated' ? '' : 'opacity-60'
+            }`}
+          >
+            <div className="h-full bg-clay-700 flex items-center px-3">Invented</div>
+          </button>
+          <button
             className="button text-white shadow-solid text-xl cursor-pointer pointer-events-auto"
             onClick={onClose}
             type="button"
@@ -387,23 +453,17 @@ export function DeciderViewer({
         {/* Summary strip */}
         {summary && summary.framings > 0 && (
           <div className="px-4 py-3 flex flex-wrap gap-2 border-b border-brown-700 shrink-0">
-            <SummaryStat label="Decisions framed" value={String(summary.framings)} />
-            <SummaryStat
-              label="Options written"
-              value={String(summary.optionCount)}
-              hint={`across ${summary.framings} framing${summary.framings === 1 ? '' : 's'}`}
-            />
+            <SummaryStat label="Framed" value={String(summary.framings)} />
+            <SummaryStat label="Options" value={String(summary.optionCount)} />
             <SummaryStat
               label="Mean regret"
               value={summary.meanRegret === undefined ? '—' : String(summary.meanRegret)}
               hint={`${summary.scored} scored`}
             />
             <SummaryStat
-              label="Hard limits broken"
-              value={
-                summary.breaks === 0 ? '0' : `${summary.breaksWarned}/${summary.breaks} foreseen`
-              }
-              hint={summary.breaks === 0 ? 'none so far' : 'named before the choice'}
+              label="Limits broken"
+              value={summary.breaks === 0 ? '0' : `${summary.breaksWarned}/${summary.breaks}`}
+              hint={summary.breaks === 0 ? undefined : 'foreseen'}
             />
           </div>
         )}
@@ -413,14 +473,17 @@ export function DeciderViewer({
           <div className="flex-1 overflow-y-auto px-4 py-4">
             <BeliefsTab worldId={worldId} />
           </div>
+        ) : tab === 'generated' ? (
+          <div className="flex-1 overflow-y-auto px-4 py-4">
+            <GeneratedTab worldId={worldId} />
+          </div>
         ) : !traces ? (
           <div className="flex-1 flex items-center justify-center text-brown-300 italic text-sm">
             Loading&hellip;
           </div>
         ) : traces.length === 0 ? (
           <div className="flex-1 flex items-center justify-center px-8 text-center text-brown-300 italic text-sm">
-            No decisions framed yet. The Decider writes the options whenever a scenario with a
-            group decision starts.
+            No decisions framed yet.
           </div>
         ) : (
           <div className="flex-1 flex min-h-0">

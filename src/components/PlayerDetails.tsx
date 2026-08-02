@@ -1,5 +1,5 @@
-import { useQuery } from 'convex/react';
-import { useEffect, useMemo, useState } from 'react';
+import { useAction, useQuery } from 'convex/react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../convex/_generated/api';
 import { Id } from '../../convex/_generated/dataModel';
 import closeImg from '../../assets/close.svg';
@@ -12,6 +12,8 @@ import { useSendInput } from '../hooks/sendInput';
 import { GameId } from '../../convex/aiTown/ids';
 import { ServerGame } from '../hooks/serverGame';
 import { computeGameTime } from '../../convex/aiTown/gameTime';
+import type { GeneratedScenarioDraft } from '../../convex/scenarioGen';
+import type { SerializedGeneratedScenario } from '../../convex/aiTown/generatedScenario';
 import {
   affinityColor,
   affinityEmoji,
@@ -31,6 +33,12 @@ import { ALL_SCENARIOS } from '../../data/scenarios';
 // rather than a separate bespoke list. Work scenarios no longer fire randomly (see
 // convex/aiTown/scenarios.ts) but remain available here for manual injection. A
 // free-form "Custom Scenario" stays at the end.
+// Strip the panel-only fields the engine's input validator doesn't accept.
+function toWireScenario(draft: GeneratedScenarioDraft): SerializedGeneratedScenario {
+  const { reasoning: _reasoning, groundedIn: _groundedIn, ...rest } = draft;
+  return rest;
+}
+
 const scenarioOptions = [
   ...ALL_SCENARIOS.map((s) => ({
     id: s.id,
@@ -212,7 +220,12 @@ export default function PlayerDetails({
       rows.set(tie.name, {
         name: tie.name,
         relation: tie.relation,
-        affinity: affinityToward({ affinities, otherPlayerId: pid ?? '', family, otherName: tie.name }),
+        affinity: affinityToward({
+          affinities,
+          otherPlayerId: pid ?? '',
+          family,
+          otherName: tie.name,
+        }),
         pid,
       });
     }
@@ -237,6 +250,10 @@ export default function PlayerDetails({
   const rejectInvite = useSendInput(engineId, 'rejectInvite');
   const leaveConversation = useSendInput(engineId, 'leaveConversation');
   const startCustomScenario = useSendInput(engineId, 'startCustomScenario');
+  const startGeneratedScenario = useSendInput(engineId, 'startGeneratedScenario');
+  const draftScenario = useAction(api.scenarioGen.draftScenario);
+  const [generatedDraft, setGeneratedDraft] = useState<GeneratedScenarioDraft | null>(null);
+  const [generating, setGenerating] = useState(false);
   const startCatalogScenario = useSendInput(engineId, 'startCatalogScenario');
   const clearScenario = useSendInput(engineId, 'clearScenario');
 
@@ -263,8 +280,32 @@ export default function PlayerDetails({
     }
   };
 
+  // The panel opens below the fold of a short sidebar, so bring it into view.
+  const injectorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!injectorOpen) return;
+    // A frame late, so the panel has its final height before we scroll to it.
+    const frame = requestAnimationFrame(() =>
+      injectorRef.current?.scrollIntoView({ block: 'start' }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [injectorOpen]);
+
+  // Preset and generated instructions run several lines long; grow the box to fit
+  // them (up to a cap) instead of leaving the text hidden behind a scrollbar.
+  const scenarioTextareaRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const node = scenarioTextareaRef.current;
+    if (!node) return;
+    node.style.height = 'auto';
+    node.style.height = `${Math.min(node.scrollHeight, 180)}px`;
+  }, [scenarioText, injectorOpen, selectedScenarioId]);
+
   const onSelectScenario = (scenarioId: string) => {
     const scenario = scenarioOptions.find((entry) => entry.id === scenarioId);
+    // Picking from the catalogue discards a pending generated draft — otherwise
+    // Start would quietly fire the generated one instead of what's selected.
+    setGeneratedDraft(null);
     setSelectedScenarioId(scenarioId);
     setScenarioText(scenario?.text ?? '');
     if (scenario?.requiresTwoAgents) {
@@ -277,13 +318,47 @@ export default function PlayerDetails({
     }
   };
 
-  const onStartScenario = async () => {
-    if (!selectedScenarioId) {
-      toast.error('Select a scenario to start.');
-      return;
+  // Ask the Decider to invent a situation from the town's actual state. It only
+  // drafts — firing it stays a separate, deliberate click, so a bad premise can be
+  // edited or thrown away first.
+  const onGenerateScenario = async () => {
+    if (!worldId) return;
+    setGenerating(true);
+    try {
+      const draft = await draftScenario({ worldId });
+      if (!draft) {
+        toast.error("The Decider couldn't come up with anything usable. Try again.");
+        return;
+      }
+      setGeneratedDraft(draft);
+      setScenarioText(draft.instruction);
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setGenerating(false);
     }
+  };
+
+  const onStartScenario = async () => {
     if (!scenarioText.trim()) {
       toast.error('Write your scenario instructions before starting.');
+      return;
+    }
+    // A generated scenario carries its own topics, conflict and completion goal,
+    // so it runs the full decision pipeline rather than the free-text injector.
+    if (generatedDraft) {
+      await toastOnError(
+        startGeneratedScenario({
+          scenario: { ...toWireScenario(generatedDraft), instruction: scenarioText.trim() },
+          manual: true,
+        }),
+      );
+      setGeneratedDraft(null);
+      setInjectorOpen(false);
+      return;
+    }
+    if (!selectedScenarioId) {
+      toast.error('Select a scenario to start.');
       return;
     }
     const scenario = scenarioOptions.find((entry) => entry.id === selectedScenarioId);
@@ -328,14 +403,20 @@ export default function PlayerDetails({
 
   const scenarioInjector = injectorOpen && (
     <div
+      ref={injectorRef}
       className={
-        'scenario-injector w-full box bg-gradient-to-br from-[#2d2438] to-[#1d1826] ' +
-        'sm:w-[calc(100%+2rem)] sm:-mx-4 ' +
-        (playerId ? 'mt-4' : 'mt-[calc(9rem+75px)] pt-3')
+        'scenario-injector mt-4 flex w-full min-w-0 flex-col overflow-hidden box ' +
+        'bg-gradient-to-br from-[#2d2438] to-[#1d1826] ' +
+        // With no agent selected the panel owns the sidebar, so it fills the space
+        // and scrolls internally — down to a floor, past which the sidebar scrolls
+        // rather than the actions getting clipped. With an agent selected it sits
+        // in the details flow at its natural height (shrink-0, or overflow-hidden
+        // lets flexbox crush it).
+        (playerId ? 'shrink-0' : 'min-h-[22rem] flex-1')
       }
     >
-      <div className="bg-brown-700 p-3 flex items-center justify-between text-lg sm:text-xl font-display tracking-widest">
-        <span className="flex-1 text-center">Scenario Injector</span>
+      <div className="shrink-0 bg-brown-700 p-3 flex items-center gap-2 text-lg sm:text-xl font-display tracking-widest">
+        <span className="min-w-0 flex-1 truncate text-center">Scenario Injector</span>
         <button
           className="button text-white shadow-solid text-2xl cursor-pointer pointer-events-auto"
           type="button"
@@ -347,12 +428,12 @@ export default function PlayerDetails({
           </h2>
         </button>
       </div>
-      <div className="p-4 flex flex-col gap-4 text-sm sm:text-base">
+      <div className="min-h-0 flex-1 overflow-y-auto p-4 flex flex-col gap-4 text-sm sm:text-base">
         <div className="grid gap-2">
           <div className="text-xs uppercase tracking-widest text-amber-200/80">
             Choose a scenario
           </div>
-          <div className="scenario-scroll grid grid-cols-2 auto-rows-auto gap-2 max-h-72 overflow-y-auto pr-1">
+          <div className="scenario-scroll grid grid-cols-2 auto-rows-auto gap-2 max-h-56 overflow-y-auto pr-1">
             {scenarioOptions.map((scenario) => {
               const isActive = scenario.id === selectedScenarioId;
               const isCustom = scenario.id === 'custom';
@@ -376,13 +457,13 @@ export default function PlayerDetails({
                       ✓
                     </span>
                   )}
-                  <div className="flex items-center gap-2">
-                    <span className="text-lg leading-none" aria-hidden>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="shrink-0 text-lg leading-none" aria-hidden>
                       {scenario.emoji}
                     </span>
                     <span
                       className={
-                        'font-display text-sm leading-tight tracking-wide ' +
+                        'min-w-0 break-words font-display text-sm leading-tight tracking-wide ' +
                         (isActive ? 'text-amber-100' : 'text-white/90')
                       }
                     >
@@ -397,10 +478,10 @@ export default function PlayerDetails({
 
         {showTargetSelectors && (
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="flex flex-col gap-1 text-xs uppercase tracking-widest text-amber-200/80">
+            <label className="flex min-w-0 flex-col gap-1 text-xs uppercase tracking-widest text-amber-200/80">
               Agent 1
               <select
-                className="scenario-select rounded bg-black/40 border border-white/20 px-3 py-2 text-sm"
+                className="scenario-select w-full min-w-0 rounded bg-black/40 border border-white/20 px-2 py-2 text-sm"
                 value={targetAgent1}
                 onChange={(event) => {
                   const value = event.target.value as GameId<'players'>;
@@ -418,10 +499,10 @@ export default function PlayerDetails({
                 ))}
               </select>
             </label>
-            <label className="flex flex-col gap-1 text-xs uppercase tracking-widest text-amber-200/80">
+            <label className="flex min-w-0 flex-col gap-1 text-xs uppercase tracking-widest text-amber-200/80">
               Agent 2
               <select
-                className="scenario-select rounded bg-black/40 border border-white/20 px-3 py-2 text-sm"
+                className="scenario-select w-full min-w-0 rounded bg-black/40 border border-white/20 px-2 py-2 text-sm"
                 value={targetAgent2}
                 onChange={(event) => setTargetAgent2(event.target.value as GameId<'players'>)}
               >
@@ -435,6 +516,26 @@ export default function PlayerDetails({
                   ))}
               </select>
             </label>
+          </div>
+        )}
+
+        {/* A scenario the Decider invented from what has actually happened here,
+            staged for review before it fires. */}
+        {generatedDraft && (
+          <div className="rounded-lg border border-amber-300/40 bg-amber-300/10 px-3 py-2">
+            <div className="text-sm font-bold text-amber-100">
+              {generatedDraft.emoji} {generatedDraft.name}
+            </div>
+            {generatedDraft.reasoning && (
+              <p className="mt-1 text-[11px] leading-snug text-white/60">
+                {generatedDraft.reasoning}
+              </p>
+            )}
+            {generatedDraft.groundedIn.length > 0 && (
+              <p className="mt-1 text-[11px] leading-snug text-white/40">
+                Built on: {generatedDraft.groundedIn.join('; ')}
+              </p>
+            )}
           </div>
         )}
 
@@ -452,8 +553,9 @@ export default function PlayerDetails({
           </div>
           <textarea
             id="scenario-instructions"
+            ref={scenarioTextareaRef}
             className={
-              'w-full resize-none rounded-lg border px-3 py-2 text-sm sm:text-base bg-black/40 text-white/90 placeholder:text-white/30 transition outline-none ' +
+              'w-full min-h-[5rem] resize-y rounded-lg border px-3 py-2 text-sm sm:text-base bg-black/40 text-white/90 placeholder:text-white/30 transition outline-none ' +
               'border-amber-200/25 focus:border-amber-300 focus:ring-1 focus:ring-amber-300/50'
             }
             placeholder={
@@ -470,38 +572,62 @@ export default function PlayerDetails({
             Every agent reacts to this in character, then reshapes their day around it.
           </p>
         </div>
+      </div>
 
-        <div className="flex items-stretch gap-3 pt-1">
-          <button
-            className="button text-white shadow-solid text-sm cursor-pointer pointer-events-auto opacity-80 hover:opacity-100"
-            type="button"
-            onClick={onClearScenario}
-            title="Remove any active scenario from all agents"
-          >
-            <div className="h-full flex items-center justify-center whitespace-nowrap bg-clay-700 px-4 py-2">
-              Clear
-            </div>
-          </button>
-          <button
-            className="button flex-1 min-w-0 text-white shadow-solid text-sm sm:text-base cursor-pointer pointer-events-auto disabled:opacity-40 disabled:cursor-not-allowed"
-            type="button"
-            onClick={onStartScenario}
-            disabled={!scenarioText.trim()}
-          >
-            <div className="h-full flex items-center justify-center gap-2 whitespace-nowrap truncate bg-clay-700 px-3 py-2">
-              <span aria-hidden>▶</span> Start scenario
-            </div>
-          </button>
-        </div>
+      {/* Outside the scrolling body so the actions stay reachable, and split over
+          two rows because the sidebar is too narrow for three side by side. */}
+      <div className="shrink-0 grid grid-cols-1 sm:grid-cols-[auto_minmax(0,1fr)] gap-2 border-t border-white/10 p-4">
+        <button
+          className="button min-w-0 text-white shadow-solid text-sm cursor-pointer pointer-events-auto opacity-80 hover:opacity-100"
+          type="button"
+          onClick={onClearScenario}
+          title="Remove any active scenario from all agents"
+        >
+          <div className="h-full flex items-center justify-center truncate bg-clay-700 px-2 py-2">
+            Clear
+          </div>
+        </button>
+        <button
+          className="button min-w-0 text-white shadow-solid text-sm cursor-pointer pointer-events-auto opacity-80 hover:opacity-100 disabled:opacity-40 disabled:cursor-not-allowed"
+          type="button"
+          onClick={onGenerateScenario}
+          disabled={generating}
+          title="Have the Decider invent a new situation from what has happened in town"
+        >
+          <div className="h-full flex items-center justify-center truncate bg-clay-700 px-2 py-2">
+            {generating ? 'Thinking…' : '✨ Generate'}
+          </div>
+        </button>
+        <button
+          className="button col-span-full min-w-0 text-white shadow-solid text-sm sm:text-base cursor-pointer pointer-events-auto disabled:opacity-40 disabled:cursor-not-allowed"
+          type="button"
+          onClick={onStartScenario}
+          disabled={!scenarioText.trim()}
+        >
+          <div className="h-full flex items-center justify-center gap-2 truncate bg-clay-700 px-3 py-2">
+            <span aria-hidden>▶</span> Start scenario
+          </div>
+        </button>
       </div>
     </div>
   );
 
   if (!playerId) {
+    // Only pad vertically: the column already pads horizontally, and doubling it
+    // squeezed the injector panel.
     return (
-      <div className="h-full flex flex-col text-center items-center justify-center p-4 gap-4">
+      <div
+        className={
+          'h-full w-full flex flex-col text-center items-center py-4 gap-4 ' +
+          // Centring a panel taller than the sidebar clips its top out of reach,
+          // so only centre the empty state.
+          (injectorOpen ? 'justify-start' : 'justify-center')
+        }
+      >
         {scenarioButton}
-        <div className="text-xl">Click on an agent on the map to see chat history.</div>
+        {!injectorOpen && (
+          <div className="px-4 text-xl">Click on an agent on the map to see chat history.</div>
+        )}
         {scenarioInjector}
       </div>
     );
@@ -588,16 +714,19 @@ export default function PlayerDetails({
         now: nowMs,
       })
     : undefined;
-  const wellbeingGauges: { key: ShortTermComponent | 'financialPressure'; label: string; value: number }[] =
-    wellbeing
-      ? [
-          { key: 'mood', label: 'Mood', value: wellbeing.mood },
-          { key: 'stress', label: 'Stress', value: wellbeing.stress },
-          { key: 'fatigue', label: 'Fatigue', value: wellbeing.fatigue },
-          { key: 'hunger', label: 'Hunger', value: wellbeing.hunger },
-          { key: 'financialPressure', label: 'Money stress', value: wellbeing.financialPressure },
-        ]
-      : [];
+  const wellbeingGauges: {
+    key: ShortTermComponent | 'financialPressure';
+    label: string;
+    value: number;
+  }[] = wellbeing
+    ? [
+        { key: 'mood', label: 'Mood', value: wellbeing.mood },
+        { key: 'stress', label: 'Stress', value: wellbeing.stress },
+        { key: 'fatigue', label: 'Fatigue', value: wellbeing.fatigue },
+        { key: 'hunger', label: 'Hunger', value: wellbeing.hunger },
+        { key: 'financialPressure', label: 'Money stress', value: wellbeing.financialPressure },
+      ]
+    : [];
   return (
     <>
       <div className="flex gap-4">
@@ -730,9 +859,7 @@ export default function PlayerDetails({
               const events = (r.pid && eventsByTarget.get(r.pid)) || [];
               // Net direction of the last few shifts: is this relationship
               // currently warming or souring?
-              const recentNet = events
-                .slice(0, 3)
-                .reduce((sum, e) => sum + (e.delta ?? 0), 0);
+              const recentNet = events.slice(0, 3).reduce((sum, e) => sum + (e.delta ?? 0), 0);
               const trend = recentNet > 0 ? '↗' : recentNet < 0 ? '↘' : undefined;
               return (
                 <li key={r.name} className="flex flex-col gap-1">
@@ -768,7 +895,10 @@ export default function PlayerDetails({
                   >
                     <div
                       className="h-full rounded transition-all"
-                      style={{ width: `${r.affinity}%`, backgroundColor: affinityColor(r.affinity) }}
+                      style={{
+                        width: `${r.affinity}%`,
+                        backgroundColor: affinityColor(r.affinity),
+                      }}
                     />
                   </div>
                   {events.slice(0, 2).map((e) => (

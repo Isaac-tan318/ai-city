@@ -87,6 +87,10 @@ export type FocalTurnResult = {
   topScore?: TopScoreSnapshot;
   blockedBy: string[];
   askedQuestion: boolean;
+  // Who the question went to, and how many new facts the Decider pulled from the
+  // transcript this turn. Both feed the live cues drawn over the sprites.
+  questionTargetId?: string;
+  factsLearned?: number;
   resolvedOptionId?: string;
   forcedDecision?: boolean;
 };
@@ -254,7 +258,7 @@ export async function takeFocalTurn(
   // 1. Learn from what has been said since the last focal turn. Built from the
   // turn data we already hold rather than re-reading the world, so the dry run
   // can drive this with a synthetic scenario and still exercise the real path.
-  const knowledge = await extractMemoriesFor(
+  const { knowledge, learned } = await extractMemoriesFor(
     ctx,
     worldId,
     {
@@ -329,6 +333,7 @@ export async function takeFocalTurn(
         topScore,
         blockedBy,
         askedQuestion: false,
+        factsLearned: learned,
         resolvedOptionId: top.optionId,
         forcedDecision: forced && !(check.canDecide && scoredEveryOption),
       },
@@ -347,7 +352,14 @@ export async function takeFocalTurn(
     text,
     nextSpeaker: target?.present ? targetId : undefined,
     goalMet: false,
-    focal: { estimates, topScore, blockedBy, askedQuestion: true },
+    focal: {
+      estimates,
+      topScore,
+      blockedBy,
+      askedQuestion: true,
+      questionTargetId: targetId,
+      factsLearned: learned,
+    },
   };
 }
 

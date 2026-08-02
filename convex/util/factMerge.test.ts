@@ -1,5 +1,7 @@
 import {
+  countNewFacts,
   dropResolved,
+  splitCompoundFacts,
   factOverlap,
   mergeFacts,
   normalizeFact,
@@ -124,6 +126,61 @@ describe('mergeFacts', () => {
     expect(merged[7]).toBe('refuses to queue longer than ten minutes');
     // Oldest falls off the front once the cap is reached.
     expect(merged).not.toContain('halal only, no pork');
+  });
+});
+
+describe('splitCompoundFacts', () => {
+  test('splits a run-on entry into separate facts', () => {
+    expect(
+      splitCompoundFacts(['wants comfort food; open to something new', 'has a shellfish allergy']),
+    ).toEqual(['wants comfort food', 'open to something new', 'has a shellfish allergy']);
+  });
+
+  test('leaves atomic facts alone and drops empties', () => {
+    expect(splitCompoundFacts(['likes hawker food', ' ; ', ''])).toEqual(['likes hawker food']);
+  });
+});
+
+describe('mergeFacts compound handling', () => {
+  test('splits a stored run-on and dedupes its parts against what is known', () => {
+    // A legacy row: one entry holding three facts, one already known separately.
+    const stale = ['wants comfort food; wants to treat herself', 'wants to treat herself'];
+    expect(mergeFacts(stale, [])).toEqual(['wants comfort food', 'wants to treat herself']);
+  });
+});
+
+describe('countNewFacts', () => {
+  test('counts only facts that are not already covered', () => {
+    expect(countNewFacts(['likes hawker food'], ['has a shellfish allergy'])).toBe(1);
+    expect(countNewFacts(['likes hawker food'], ['likes hawker food'])).toBe(0);
+    expect(countNewFacts(['prefers iced Milo for drinks'], ['prefers iced Milo'])).toBe(0);
+  });
+
+  test('does not double-count restatements within the same batch', () => {
+    expect(
+      countNewFacts([], ['wants good food beforehand', 'wants to grab good food beforehand']),
+    ).toBe(1);
+  });
+
+  test('still counts new facts when the existing list is at its cap', () => {
+    // The regression this exists for: mergeFacts caps at 8, so a full list stays
+    // length 8 and any growth-based count reports zero forever.
+    const full = [
+      'halal only, no pork',
+      'shellfish allergy',
+      'doctor ordered low salt',
+      'tight student budget',
+      'cannot stand for long',
+      'needs somewhere quiet',
+      'splits the bill exactly',
+      'happy to treat everyone',
+    ];
+    expect(mergeFacts(full, ['refuses to queue longer than ten minutes'])).toHaveLength(8);
+    expect(countNewFacts(full, ['refuses to queue longer than ten minutes'])).toBe(1);
+  });
+
+  test('ignores blanks', () => {
+    expect(countNewFacts([], ['', '  '])).toBe(0);
   });
 });
 

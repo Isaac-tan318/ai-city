@@ -209,6 +209,12 @@ p[contenteditable='true']:empty::before {
   height: 0;
 }
 
+/* The panel lives in a ~24rem column, where the default 1em pixel border eats
+   enough width to clip short button labels. */
+.scenario-injector .button {
+  border-width: 0.75em;
+}
+
 .scenario-card {
   min-height: 48px;
   justify-content: center;

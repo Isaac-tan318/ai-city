@@ -100,6 +100,41 @@ export default defineSchema({
     .index('by_world', ['worldId', 'at'])
     .index('by_scenario', ['worldId', 'scenarioId']),
 
+  // Scenarios the Decider invented rather than drew from data/scenarios.ts, kept
+  // with the town state that prompted them so a good one can be re-run and a bad
+  // one can be traced back to what it misread.
+  generatedScenarios: defineTable({
+    worldId: v.id('worlds'),
+    // Doubles as ScenarioDef.id once fired, so an active scenario instance id
+    // ('<defId>-<startTime>') points back at this row.
+    defId: v.string(),
+    name: v.string(),
+    emoji: v.string(),
+    instruction: v.string(),
+    whatHappens: v.string(),
+    background: v.string(),
+    relationships: v.string(),
+    context: v.string(),
+    goals: v.string(),
+    conflict: v.optional(v.string()),
+    topics: v.array(v.string()),
+    completionGoal: v.string(),
+    minParticipants: v.number(),
+    // Why the Decider thought this situation was worth staging.
+    reasoning: v.string(),
+    // The specific things about the town it drew on — a discovered constraint, a
+    // soured relationship, an unresolved thread. Lets you check whether it built
+    // on something real or invented a premise out of nothing.
+    groundedIn: v.array(v.string()),
+    createdBy: v.union(v.literal('auto'), v.literal('manual')),
+    // Set when this scenario actually started, so the panel can distinguish
+    // drafts from ones the town really played out.
+    usedAt: v.optional(v.number()),
+    at: v.number(),
+  })
+    .index('by_world', ['worldId', 'at'])
+    .index('by_defId', ['worldId', 'defId']),
+
   evaluations: defineTable({
     worldId: v.id('worlds'),
     // The active-scenario INSTANCE id ('defId-startTime'), which messages are
@@ -134,6 +169,9 @@ export default defineSchema({
         name: v.string(),
         hardTabooViolated: v.boolean(),
         violatedTaboo: v.optional(v.string()),
+        // The evaluator's one-line account of what drove this person's score,
+        // shown beside them in the end-of-scenario scorecard.
+        reason: v.optional(v.string()),
         dimensionFactors: v.object({
           essentialNeeds: v.number(),
           preferenceMatch: v.number(),

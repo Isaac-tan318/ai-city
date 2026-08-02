@@ -57,6 +57,13 @@ export const serializedDeliberation = v.object({
   forcedDecision: v.optional(v.boolean()),
   // Set once the evaluation op has been scheduled, so it fires exactly once.
   evaluationRequested: v.optional(v.boolean()),
+  // --- Live cues for the map (see src/components/Character.tsx) ---
+  // Who the focal agent last put a question to, and when. Drives the pulsing "?"
+  // over that resident's head while they are on the spot.
+  lastQuestion: v.optional(v.object({ targetPlayerId: playerId, at: v.number() })),
+  // How many genuinely new facts the Decider pulled out of the transcript on the
+  // last focal turn, and when — drives the "💡 +N" floater over the focal agent.
+  lastExtraction: v.optional(v.object({ count: v.number(), at: v.number() })),
 });
 export type SerializedDeliberation = Infer<typeof serializedDeliberation>;
 
@@ -68,6 +75,10 @@ export const focalTurnDelta = v.object({
   topScore: v.optional(v.object({ optionId: v.string(), groupUtility: v.number() })),
   blockedBy: v.array(v.string()),
   askedQuestion: v.boolean(),
+  // Who the question was put to, when one was asked.
+  questionTargetId: v.optional(playerId),
+  // Net-new facts the Decider extracted from the transcript this turn.
+  factsLearned: v.optional(v.number()),
   resolvedOptionId: v.optional(v.string()),
   forcedDecision: v.optional(v.boolean()),
 });
@@ -89,6 +100,12 @@ export function applyFocalTurn(
   }
   if (delta.askedQuestion) {
     deliberation.questionsAsked = (deliberation.questionsAsked ?? 0) + 1;
+    if (delta.questionTargetId) {
+      deliberation.lastQuestion = { targetPlayerId: delta.questionTargetId, at: now };
+    }
+  }
+  if (delta.factsLearned && delta.factsLearned > 0) {
+    deliberation.lastExtraction = { count: delta.factsLearned, at: now };
   }
   if (delta.resolvedOptionId && !deliberation.resolvedOptionId) {
     deliberation.resolvedOptionId = delta.resolvedOptionId;

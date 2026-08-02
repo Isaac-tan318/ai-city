@@ -38,6 +38,8 @@ import {
   SCENARIO_INTERVAL_MIN_MS,
   SCENARIO_RETRY_MS,
   SCENARIO_TASK_PLAN_TIMEOUT_MS,
+  SCENARIO_GENERATION_PROBABILITY,
+  SCENARIO_GENERATION_TIMEOUT_MS,
 } from '../constants';
 
 // locationId -> the character names that work there (drives local participants).
@@ -117,21 +119,45 @@ export function tickScenarios(game: Game, now: number): void {
     }
   }
 
+  // A requested generation that never came back must not stall the rotation.
+  if (
+    world.scenarioGenRequested !== undefined &&
+    now > world.scenarioGenRequested + SCENARIO_GENERATION_TIMEOUT_MS
+  ) {
+    delete world.scenarioGenRequested;
+  }
+
   // 2) When the countdown reaches zero, start one eligible scenario and schedule
   // the next start. If nothing is eligible yet, retry again shortly.
-  if (now >= world.nextScenarioTime) {
-    const def = pickEligibleScenario(game, now, stillActive, cooldowns);
-    let started = false;
-    if (def) {
-      const inst = startScenario(game, now, def);
-      if (inst) {
-        stillActive.push(inst);
-        started = true;
+  if (now >= world.nextScenarioTime && world.scenarioGenRequested === undefined) {
+    // Sometimes ask the Decider to invent a fresh situation from what has actually
+    // happened here instead of replaying the catalogue. Generation needs an LLM,
+    // which the engine can't call, so this only *requests* it — the op comes back
+    // through the startGeneratedScenario input a few seconds later.
+    const universalSlotFree =
+      !stillActive.some((s) => s.scope === 'universal') &&
+      (cooldowns['universal'] ?? 0) <= now &&
+      hourOfDay(game, now) >= 6;
+    if (universalSlotFree && Math.random() < SCENARIO_GENERATION_PROBABILITY) {
+      world.scenarioGenRequested = now;
+      game.scheduleOperation('generateAndStartScenario', { worldId: game.worldId });
+      // Hold the countdown while the Decider writes it. The input handler sets the
+      // real next-scenario time once it lands (or on failure, so we retry).
+      world.nextScenarioTime = now + SCENARIO_GENERATION_TIMEOUT_MS;
+    } else {
+      const def = pickEligibleScenario(game, now, stillActive, cooldowns);
+      let started = false;
+      if (def) {
+        const inst = startScenario(game, now, def);
+        if (inst) {
+          stillActive.push(inst);
+          started = true;
+        }
       }
+      world.nextScenarioTime = started
+        ? now + randBetween(SCENARIO_INTERVAL_MIN_MS, SCENARIO_INTERVAL_MAX_MS)
+        : now + SCENARIO_RETRY_MS;
     }
-    world.nextScenarioTime = started
-      ? now + randBetween(SCENARIO_INTERVAL_MIN_MS, SCENARIO_INTERVAL_MAX_MS)
-      : now + SCENARIO_RETRY_MS;
   }
 
   world.activeScenarios = stillActive.length > 0 ? stillActive : undefined;
@@ -142,6 +168,12 @@ function randBetween(min: number, max: number): number {
   return min + Math.floor(Math.random() * (max - min));
 }
 
+// In-game hour, defaulting to midday for a world with no recorded start.
+function hourOfDay(game: Game, now: number): number {
+  const startTime = game.world.worldStartTime;
+  return startTime !== undefined ? computeGameTime(now, startTime).hour : 12;
+}
+
 // Gather the scenarios that may start right now (time-gated, off cooldown, not
 // already running for that scope/location) and pick one at random, or undefined.
 function pickEligibleScenario(
@@ -150,9 +182,7 @@ function pickEligibleScenario(
   active: SerializedActiveScenario[],
   cooldowns: Record<string, number>,
 ): ScenarioDef | undefined {
-  const world = game.world;
-  const hour =
-    world.worldStartTime !== undefined ? computeGameTime(now, world.worldStartTime).hour : 12;
+  const hour = hourOfDay(game, now);
   const occupied = new Set(active.map((s) => scopeKeyFor(s.scope, s.locationId)));
   const universalCount = active.filter((s) => s.scope === 'universal').length;
 

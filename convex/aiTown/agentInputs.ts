@@ -12,12 +12,13 @@ import { affinityToward, clampAffinity } from './affinity';
 import { applyFocalTurn, focalTurnDelta, serializedDecisionOption } from './deliberation';
 import { applyShortTermDeltas, shortTermSensitivity, type ShortTermDelta } from './shortTerm';
 import { DEFAULT_BALANCE, MAX_LEARNED_TRAITS } from '../constants';
-import { injectCatalogScenario } from './scenarios';
+import { injectCatalogScenario, startScenario } from './scenarios';
+import { serializedGeneratedScenario, toScenarioDef } from './generatedScenario';
 import { scenarioById } from '../../data/scenarios';
 import { CITY_LOCATIONS, homeFor } from '../../data/cityLocations';
 import { mergeFixedObligations } from '../../data/routines';
 import { CYCLE_MS } from './gameTime';
-import { SCENARIO_WORK_MAX_MS } from '../constants';
+import { SCENARIO_WORK_MAX_MS, SCENARIO_INTERVAL_MIN_MS, SCENARIO_RETRY_MS } from '../constants';
 import type { SerializedActiveScenario } from './world';
 import type { Game } from './game';
 
@@ -684,6 +685,49 @@ export const agentInputs = {
           args.background ??
           'A custom scenario you injected. It overrides everyone’s normal routine for the rest of the in-game day.',
       });
+      return null;
+    },
+  }),
+  // Start a scenario the Decider invented (convex/scenarioGen.ts) rather than one
+  // from the authored catalogue. Same pipeline either way — a generated scenario is
+  // just a ScenarioDef built at runtime — so it enlists participants, runs its
+  // deliberation and gets scored for regret exactly like a catalogue one.
+  //
+  // Always clears `scenarioGenRequested`, including when generation failed and
+  // `scenario` is absent, so a bad LLM response falls back to the catalogue on the
+  // next tick instead of stalling the rotation.
+  startGeneratedScenario: inputHandler({
+    args: {
+      scenario: v.optional(serializedGeneratedScenario),
+      // True for the scenario creator's button: override whatever is running and
+      // gather the right people, exactly like manually picking from the catalogue.
+      manual: v.optional(v.boolean()),
+    },
+    handler: (game, now, args) => {
+      const world = game.world;
+      delete world.scenarioGenRequested;
+      if (!args.scenario) {
+        // Generation failed. Retry shortly through the ordinary path.
+        world.nextScenarioTime = now + SCENARIO_RETRY_MS;
+        return null;
+      }
+      const def = toScenarioDef(args.scenario);
+      if (args.manual) {
+        if (!injectCatalogScenario(game, now, def)) {
+          throw new Error(
+            `Couldn't start "${def.name}" — not enough people are free right now.`,
+          );
+        }
+        return null;
+      }
+      const inst = startScenario(game, now, def);
+      if (!inst) {
+        // Too few free agents. Try again on the normal retry cadence.
+        world.nextScenarioTime = now + SCENARIO_RETRY_MS;
+        return null;
+      }
+      world.activeScenarios = [...(world.activeScenarios ?? []), inst];
+      world.nextScenarioTime = now + SCENARIO_INTERVAL_MIN_MS;
       return null;
     },
   }),

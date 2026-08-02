@@ -32,7 +32,7 @@ import { playerId } from './aiTown/ids';
 import { MAX_DECISION_OPTIONS } from './constants';
 import { chatCompletion } from './util/llm';
 import { parseLLMJson } from './util/llmJson';
-import { dropResolved, mergeFacts } from './util/factMerge';
+import { countNewFacts, dropResolved, mergeFacts } from './util/factMerge';
 import { CITY_LOCATIONS } from '../data/cityLocations';
 
 const selfInternal = internal.decider;
@@ -163,7 +163,9 @@ export const upsertPerceivedKnowledge = internalMutation({
       }),
     ),
   },
-  handler: async (ctx, args) => {
+  // Returns the number of genuinely new facts written, for the map's extraction cue.
+  handler: async (ctx, args): Promise<number> => {
+    let learned = 0;
     for (const update of args.updates) {
       const existing = await ctx.db
         .query('perceivedKnowledge')
@@ -196,12 +198,20 @@ export const upsertPerceivedKnowledge = internalMutation({
         confidenceScore: update.confidenceScore,
         updatedAt: Date.now(),
       };
+      // Count only facts that say something not already known — a restatement is
+      // not a new thing learned, and the "💡 +N" cue would be lying if it counted
+      // those. Counted against the pre-merge list rather than inferred from list
+      // growth, which reports nothing once a list hits its cap.
+      learned += countNewFacts(existing?.knownTaboos ?? [], update.newTaboos);
+      learned += countNewFacts(existing?.knownPreferences ?? [], update.newPreferences);
+
       if (existing) {
         await ctx.db.patch(existing._id, row);
       } else {
         await ctx.db.insert('perceivedKnowledge', row);
       }
     }
+    return learned;
   },
 });
 
@@ -342,10 +352,10 @@ export async function generateOptionsFor(
     `- At least one option should quietly be a poor fit for someone with a dietary, medical, religious or budget constraint — whichever of those this kind of decision can even run into — without flagging it in the option text.`,
     `- 'details' is one sentence: roughly what it costs per person, how much effort or travel it takes, and what it actually involves.`,
     ``,
-    `Also explain your thinking:`,
-    `- "reasoning": two or three sentences on what axes this set spans and what you are forcing the group to trade off against each other.`,
-    `- "rationale" per option: why this one is worth putting on the table.`,
-    `- "riskNote" per option: who among ${names.join(', ')} you suspect this would quietly not suit, and why. Say "no one obvious" if you genuinely can't name anyone. This is a guess from what is publicly known — you are not being told anyone's private constraints.`,
+    `Also explain your thinking. Keep all three TERSE — these are read at a glance, so write fragments, not sentences, and never open with filler like "This option..." or "This set...":`,
+    `- "reasoning": at most 25 words on what this set makes the group trade off.`,
+    `- "rationale" per option: at most 12 words on why it is on the table. e.g. "Cheap, familiar, hard to object to."`,
+    `- "riskNote" per option: at most 12 words naming who among ${names.join(', ')} you suspect it would quietly not suit, and why. e.g. "Rahman — mostly pork stalls." Say "no one obvious" if you can't name anyone. A guess from what is publicly known; you are not told anyone's private constraints.`,
     ``,
     `Reply with ONLY strict JSON, no prose:`,
     `{"reasoning":"...","options":[{"title":"...","details":"...","rationale":"...","riskNote":"..."}]}`,
@@ -399,6 +409,10 @@ function fallbackOptions(topics: string[], scenarioName: string): GeneratedOptio
 
 // --- Memory extraction --------------------------------------------------------
 
+// What one extraction pass produced: the merged beliefs, plus how many facts were
+// genuinely new (which the map shows as a "💡 +N" over the focal agent).
+export type ExtractionResult = { knowledge: PerceivedKnowledgeRow[]; learned: number };
+
 // Read the scenario's transcript and update what the focal agent believes about
 // everyone else. Returns the merged rows so the caller doesn't re-query.
 export async function extractMemoriesFromTranscript(
@@ -408,9 +422,9 @@ export async function extractMemoriesFromTranscript(
   focalPlayerId: string,
   // Supplied by the dry run so it can drive the pipeline without a live chat.
   transcriptOverride?: { authorName: string; text: string }[],
-): Promise<PerceivedKnowledgeRow[]> {
+): Promise<ExtractionResult> {
   const data = await ctx.runQuery(selfInternal.loadDeliberationContext, { worldId, scenarioId });
-  if (!data) return [];
+  if (!data) return { knowledge: [], learned: 0 };
   return await extractMemoriesFor(ctx, worldId, data, focalPlayerId, transcriptOverride);
 }
 
@@ -420,7 +434,7 @@ export async function extractMemoriesFor(
   data: DeliberationContext,
   focalPlayerId: string,
   transcriptOverride?: { authorName: string; text: string }[],
-): Promise<PerceivedKnowledgeRow[]> {
+): Promise<ExtractionResult> {
   const transcript =
     transcriptOverride ??
     (await ctx.runQuery(internal.agent.conversation.loadScenarioMessages, {
@@ -431,12 +445,15 @@ export async function extractMemoriesFor(
 
   const focal = data.participants.find((p) => p.playerId === focalPlayerId);
   const others = data.participants.filter((p) => p.playerId !== focalPlayerId);
-  if (others.length === 0) return [];
+  if (others.length === 0) return { knowledge: [], learned: 0 };
 
   // Nothing said yet — no beliefs to update, but the caller still wants whatever
   // is already on record.
   if (transcript.length === 0) {
-    return await readKnowledge(ctx, worldId, focalPlayerId, data.participants);
+    return {
+      knowledge: await readKnowledge(ctx, worldId, focalPlayerId, data.participants),
+      learned: 0,
+    };
   }
 
   const existing = await readKnowledge(ctx, worldId, focalPlayerId, data.participants);
@@ -466,6 +483,7 @@ export async function extractMemoriesFor(
     `- "confidenceScore": 0 to 1, how well ${focal?.name ?? 'the organiser'} now understands what this person needs.`,
     `- Omit anyone who revealed nothing new.`,
     `- Use each person's EXACT name as "targetName".`,
+    `- ONE fact per array entry, at most 10 words each. Never join several into one string with semicolons or "and" — "wants comfort food; open to something new" must be two entries.`,
     ``,
     `Reply with ONLY strict JSON, no prose:`,
     `{"extractedFacts":[{"targetName":"...","newTaboos":[],"newPreferences":[],"resolvedUncertainties":[],"openQuestions":[],"confidenceScore":0.5}]}`,
@@ -488,7 +506,7 @@ export async function extractMemoriesFor(
     // Beliefs simply don't advance this turn. The focal agent keeps deliberating
     // with what it already had, which will read as an unresolved uncertainty and
     // keep it asking — a safe failure direction.
-    return existing;
+    return { knowledge: existing, learned: 0 };
   }
 
   const byName = new Map(others.map((o) => [o.name.toLowerCase(), o.playerId]));
@@ -505,14 +523,18 @@ export async function extractMemoriesFor(
       confidenceScore: fact.confidenceScore,
     });
   }
+  let learned = 0;
   if (updates.length > 0) {
-    await ctx.runMutation(selfInternal.upsertPerceivedKnowledge, {
+    learned = await ctx.runMutation(selfInternal.upsertPerceivedKnowledge, {
       worldId,
       focalPlayerId,
       updates,
     });
   }
-  return await readKnowledge(ctx, worldId, focalPlayerId, data.participants);
+  return {
+    knowledge: await readKnowledge(ctx, worldId, focalPlayerId, data.participants),
+    learned,
+  };
 }
 
 // Current beliefs, one row per other participant (including people nothing is

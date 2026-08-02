@@ -16,6 +16,8 @@ import { TimeControls } from './TimeControls.tsx';
 import { MiniMap } from './MiniMap.tsx';
 import { ScenariosPanel, ScenarioDetail } from './Scenarios.tsx';
 import { TensionsFeed } from './TensionsFeed.tsx';
+import { ScorecardModal } from './ScorecardModal.tsx';
+import { useNewEvaluation } from '../hooks/useNewEvaluation.ts';
 import type { Viewport } from 'pixi-viewport';
 
 export const SHOW_DEBUG_UI = !!import.meta.env.VITE_SHOW_DEBUG_UI;
@@ -40,6 +42,8 @@ export default function Game() {
 
   const worldState = useQuery(api.world.worldState, worldId ? { worldId } : 'skip');
   const { historicalTime, timeManager } = useHistoricalTime(worldState?.engine);
+
+  const { evaluation: newEvaluation, dismiss: dismissEvaluation } = useNewEvaluation(worldId);
 
   const scrollViewRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<Viewport | undefined>();
@@ -123,6 +127,14 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
           />
         ) : null;
       })()}
+      {/* Pops the moment the Evaluator finishes scoring a decision. */}
+      {newEvaluation && (
+        <ScorecardModal
+          worldId={worldId}
+          evaluation={newEvaluation}
+          onClose={dismissEvaluation}
+        />
+      )}
       <MiniMap game={game} viewportRef={viewportRef} />
     </>
   );

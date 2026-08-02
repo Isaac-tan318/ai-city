@@ -1,7 +1,8 @@
 import { BaseTexture, ISpritesheetData, Spritesheet } from 'pixi.js';
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { AnimatedSprite, Container, Graphics, Text } from '@pixi/react';
+import { AnimatedSprite, Container, Graphics, Text, useTick } from '@pixi/react';
 import * as PIXI from 'pixi.js';
+import { MEMORY_GAIN_INDICATOR_MS } from '../../convex/constants';
 
 export const Character = ({
   textureUrl,
@@ -14,6 +15,9 @@ export const Character = ({
   isSpeaking = false,
   affinityChange,
   inConflict = false,
+  isFocalAgent = false,
+  isBeingAsked = false,
+  memoryGain,
   emoji = '',
   isViewer = false,
   speed = 0.1,
@@ -37,6 +41,16 @@ export const Character = ({
   // Persistent 💢 while the character is mid-conflict (arguing a scenario
   // disagreement, or conversing with someone they're hostile toward).
   inConflict?: boolean;
+  // --- Decision-pipeline roles (convex/focal.ts, convex/decider.ts) ---
+  // This resident is running the current decision: they ask the questions and
+  // make the final call. Marked with a crown and a glow at their feet.
+  isFocalAgent?: boolean;
+  // The focal agent has just put a question to this resident and is waiting on
+  // the answer — a pulsing "?" while they're on the spot.
+  isBeingAsked?: boolean;
+  // The Decider just pulled new facts out of the conversation. Floats a
+  // "💡 +N memory" above the focal agent, then fades.
+  memoryGain?: { count: number; at: number };
   emoji?: string;
   // Highlights the player.
   isViewer?: boolean;
@@ -92,6 +106,8 @@ export const Character = ({
 
   return (
     <Container x={x} y={y} interactive={true} pointerdown={onClick} cursor="pointer">
+      {/* Drawn before the sprite so the glow sits under the character's feet. */}
+      {isFocalAgent && <FocalAura />}
       {isThinking && (
         // TODO: We'll eventually have separate assets for thinking and speech animations.
         <Text x={-20} y={-10} scale={{ x: -0.8, y: 0.8 }} text={'💭'} anchor={{ x: 0.5, y: 0.5 }} />
@@ -123,9 +139,82 @@ export const Character = ({
       {inConflict && (
         <Text x={-16} y={-40} scale={0.7} text={'💢'} anchor={{ x: 0.5, y: 0.5 }} />
       )}
+      {isFocalAgent && (
+        <Text x={16} y={-30} scale={0.65} text={'👑'} anchor={{ x: 0.5, y: 0.5 }} />
+      )}
+      {isBeingAsked && <QuestionPulse />}
+      {memoryGain && <MemoryGainFloater key={memoryGain.at} count={memoryGain.count} at={memoryGain.at} />}
     </Container>
   );
 };
+
+// A soft gold glow at the focal agent's feet. Pulses slowly so it reads as a
+// standing state rather than a momentary event.
+function FocalAura() {
+  const [phase, setPhase] = useState(0);
+  useTick((delta) => setPhase((prev) => prev + delta * 0.05));
+  const pulse = 0.5 + 0.5 * Math.sin(phase);
+  const draw = useCallback(
+    (g: PIXI.Graphics) => {
+      g.clear();
+      g.beginFill(0xffc93c, 0.12 + 0.13 * pulse);
+      g.drawEllipse(0, 16, 20 + 3 * pulse, 8 + 1.5 * pulse);
+      g.endFill();
+      g.lineStyle(1.5, 0xffc93c, 0.35 + 0.3 * pulse);
+      g.drawEllipse(0, 16, 20 + 3 * pulse, 8 + 1.5 * pulse);
+      g.lineStyle(0);
+    },
+    [pulse],
+  );
+  return <Graphics draw={draw} />;
+}
+
+// A "?" over whoever the focal agent just questioned, pulsing until they answer.
+function QuestionPulse() {
+  const [phase, setPhase] = useState(0);
+  useTick((delta) => setPhase((prev) => prev + delta * 0.11));
+  const pulse = 0.5 + 0.5 * Math.sin(phase);
+  return (
+    <Text
+      x={0}
+      y={-38 - 2 * pulse}
+      scale={0.75 + 0.14 * pulse}
+      alpha={0.65 + 0.35 * pulse}
+      text={'❓'}
+      anchor={{ x: 0.5, y: 0.5 }}
+    />
+  );
+}
+
+// "💡 +N memory" drifting up from the focal agent's head as the Decider banks
+// what it just learned. Self-expiring: once the animation is past its window the
+// component renders nothing, so a stale timestamp in the world doc can't leave a
+// permanent floater on the map.
+function MemoryGainFloater({ count, at }: { count: number; at: number }) {
+  const [elapsed, setElapsed] = useState(() => Date.now() - at);
+  useTick(() => setElapsed(Date.now() - at));
+  const progress = elapsed / MEMORY_GAIN_INDICATOR_MS;
+  if (progress >= 1 || progress < 0) return null;
+  return (
+    <Text
+      x={0}
+      y={-32 - 26 * progress}
+      scale={0.42}
+      alpha={Math.min(1, (1 - progress) * 2.5)}
+      text={`💡 +${count} memory`}
+      anchor={{ x: 0.5, y: 0.5 }}
+      style={
+        new PIXI.TextStyle({
+          fontSize: 24,
+          fill: '#ffe8a3',
+          stroke: '#181425',
+          strokeThickness: 5,
+          fontWeight: 'bold',
+        })
+      }
+    />
+  );
+}
 
 function ViewerIndicator() {
   const draw = useCallback((g: PIXI.Graphics) => {

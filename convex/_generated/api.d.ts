@@ -26,6 +26,7 @@ import type * as aiTown_conversationMembership from "../aiTown/conversationMembe
 import type * as aiTown_deliberation from "../aiTown/deliberation.js";
 import type * as aiTown_game from "../aiTown/game.js";
 import type * as aiTown_gameTime from "../aiTown/gameTime.js";
+import type * as aiTown_generatedScenario from "../aiTown/generatedScenario.js";
 import type * as aiTown_ids from "../aiTown/ids.js";
 import type * as aiTown_inputHandler from "../aiTown/inputHandler.js";
 import type * as aiTown_inputs from "../aiTown/inputs.js";
@@ -54,6 +55,7 @@ import type * as http from "../http.js";
 import type * as init from "../init.js";
 import type * as messages from "../messages.js";
 import type * as music from "../music.js";
+import type * as scenarioGen from "../scenarioGen.js";
 import type * as scoring from "../scoring.js";
 import type * as testing from "../testing.js";
 import type * as util_assertNever from "../util/assertNever.js";
@@ -94,6 +96,7 @@ declare const fullApi: ApiFromModules<{
   "aiTown/deliberation": typeof aiTown_deliberation;
   "aiTown/game": typeof aiTown_game;
   "aiTown/gameTime": typeof aiTown_gameTime;
+  "aiTown/generatedScenario": typeof aiTown_generatedScenario;
   "aiTown/ids": typeof aiTown_ids;
   "aiTown/inputHandler": typeof aiTown_inputHandler;
   "aiTown/inputs": typeof aiTown_inputs;
@@ -122,6 +125,7 @@ declare const fullApi: ApiFromModules<{
   init: typeof init;
   messages: typeof messages;
   music: typeof music;
+  scenarioGen: typeof scenarioGen;
   scoring: typeof scoring;
   testing: typeof testing;
   "util/assertNever": typeof util_assertNever;

@@ -51,6 +51,9 @@ export const EvaluatorOutputSchema = z.object({
       name: z.string(),
       hardTabooViolated: z.boolean(),
       violatedTaboo: z.string().nullable().default(null),
+      // One short line on why this person landed where they did — the human
+      // reading of the six numbers, shown beside them in the scorecard.
+      reason: z.string().default(''),
       dimensionFactors: z.object({
         essentialNeeds: z.number(),
         preferenceMatch: z.number(),
@@ -69,6 +72,8 @@ export type EvaluatedAgentScore = {
   name: string;
   hardTabooViolated: boolean;
   violatedTaboo?: string;
+  // The evaluator's one-line account of why this person landed here.
+  reason?: string;
   dimensionFactors: DimensionFactors;
   totalIndividualUtility: number;
 };
@@ -98,6 +103,7 @@ export type EvaluationRow = {
     name: string;
     hardTabooViolated: boolean;
     violatedTaboo?: string;
+    reason?: string;
     dimensionFactors: DimensionFactors;
     totalIndividualUtility: number;
   }[];
@@ -179,11 +185,12 @@ async function scoreOption(
     `  fairness — are they carrying a proportionate share of the cost and hassle?`,
     `  socialComfort — will they feel at ease there?`,
     `  relationshipImpact — will this leave them on better terms with the others?`,
+    `- "reason": ONE short clause, at most 12 words, naming what drove their score — the specific need met or missed, not a restatement of the numbers. Write "Highly matched preference; low cost burden" or "Met dietary need, but a long trip", never "scored 0.75 on preference".`,
     `Score honestly from the private information, NOT from what they said out loud. Someone who politely agreed to something that does not suit them still scores low.`,
     `Include every person listed, using their EXACT name.`,
     ``,
     `Reply with ONLY strict JSON, no prose:`,
-    `{"agentScores":[{"name":"...","hardTabooViolated":false,"violatedTaboo":null,"dimensionFactors":{"essentialNeeds":1,"preferenceMatch":0.75,"costTimeBurden":0.5,"fairness":1,"socialComfort":0.75,"relationshipImpact":1}}],"analyticalCommentary":"one or two sentences on who this option serves well and who it fails"}`,
+    `{"agentScores":[{"name":"...","hardTabooViolated":false,"violatedTaboo":null,"reason":"...","dimensionFactors":{"essentialNeeds":1,"preferenceMatch":0.75,"costTimeBurden":0.5,"fairness":1,"socialComfort":0.75,"relationshipImpact":1}}],"analyticalCommentary":"one or two sentences on who this option serves well and who it fails"}`,
   ]
     .filter(Boolean)
     .join('\n');
@@ -208,6 +215,7 @@ async function scoreOption(
       name: profile.name,
       hardTabooViolated: entry.hardTabooViolated,
       violatedTaboo: entry.violatedTaboo ?? undefined,
+      reason: entry.reason.trim() || undefined,
       dimensionFactors: factors,
       totalIndividualUtility: individualUtility(factors, entry.hardTabooViolated),
     });
@@ -349,6 +357,7 @@ export async function evaluateDecision(
       name: s.name,
       hardTabooViolated: s.hardTabooViolated,
       violatedTaboo: s.violatedTaboo,
+      reason: s.reason,
       dimensionFactors: s.dimensionFactors,
       totalIndividualUtility: s.totalIndividualUtility,
     })),

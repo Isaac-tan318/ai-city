@@ -9,6 +9,7 @@ import { Descriptions } from '../../data/characters';
 import { AgentDescription } from './agentDescription';
 import { Agent, scheduleStep } from './agent';
 import { affinityToward, clampAffinity } from './affinity';
+import { applyFocalTurn, focalTurnDelta, serializedDecisionOption } from './deliberation';
 import { applyShortTermDeltas, shortTermSensitivity, type ShortTermDelta } from './shortTerm';
 import { DEFAULT_BALANCE, MAX_LEARNED_TRAITS } from '../constants';
 import { injectCatalogScenario } from './scenarios';
@@ -221,6 +222,8 @@ export const agentInputs = {
       nextSpeaker: v.optional(playerId),
       goalMet: v.optional(v.boolean()),
       coveredTopics: v.optional(v.array(v.number())),
+      // Present only for a focal agent's deliberation turn (convex/focal.ts).
+      focal: v.optional(focalTurnDelta),
     },
     handler: (game, now, args) => {
       const agentId = parseGameId('agents', args.agentId);
@@ -289,9 +292,43 @@ export const agentInputs = {
           }
         }
       }
+      // Record the focal agent's deliberation turn: its fresh estimates, which
+      // stopping criteria are still blocking, and — if it committed — the option
+      // the group has landed on. tickScenarios picks the resolution up from here
+      // and schedules the evaluation.
+      if (args.focal && agent.scenarioId) {
+        const sc = (game.world.activeScenarios ?? []).find((s) => s.id === agent.scenarioId);
+        if (sc?.deliberation) {
+          applyFocalTurn(sc.deliberation, args.focal, now);
+        }
+      }
       if (args.leaveConversation) {
         conversation.leave(game, now, player);
       }
+      return null;
+    },
+  }),
+  // Result of the Decider's option-generation op: the concrete candidates the
+  // group will choose between. Fired once per decision scenario, lock-free — so
+  // there is no operation lock to release here.
+  finishGenerateDecisionOptions: inputHandler({
+    args: {
+      scenarioId: v.string(),
+      options: v.array(serializedDecisionOption),
+    },
+    handler: (game, _now, args) => {
+      const sc = (game.world.activeScenarios ?? []).find((s) => s.id === args.scenarioId);
+      if (!sc?.deliberation || sc.deliberation.options.length > 0) {
+        return null;
+      }
+      if (args.options.length < 2) {
+        // Nothing usable came back. Clear the guard so a later tick can retry;
+        // meanwhile maybeTakeFocalTurn stays dormant and the scenario runs as an
+        // ordinary conversation rather than stalling.
+        delete sc.deliberation.optionsRequested;
+        return null;
+      }
+      sc.deliberation.options = args.options;
       return null;
     },
   }),
@@ -472,6 +509,65 @@ export const agentInputs = {
       // in a group may cancel).
       if (net !== 0) {
         agent.lastAffinityChange = { at: now, net };
+      }
+      return null;
+    },
+  }),
+  // Write-back for the decision evaluator (convex/evaluator.ts): once a group's
+  // choice has been scored against everyone's hidden ground truth, each
+  // participant's feeling toward the FOCAL agent — the person who made the call —
+  // moves according to how well that choice actually served them.
+  //
+  // Affinity only, and only toward the focal agent. Mood and stress are left
+  // entirely to the existing post-scenario memory pass (agentRememberScenario), and
+  // peer-to-peer affinity to the post-conversation pass (agentRememberConversation),
+  // so nothing here double-counts what those already do.
+  applyEvaluationOutcome: inputHandler({
+    args: {
+      focalPlayerId: playerId,
+      scenarioId: v.string(),
+      scenarioName: v.string(),
+      deltas: v.array(
+        v.object({
+          playerId,
+          delta: v.number(),
+          reason: v.string(),
+        }),
+      ),
+    },
+    handler: (game, now, args) => {
+      const focalPlayerId = parseGameId('players', args.focalPlayerId);
+      for (const { playerId: subjectId, delta, reason } of args.deltas) {
+        // The focal agent doesn't form an opinion of itself over its own call.
+        if (subjectId === args.focalPlayerId || delta === 0) continue;
+        const agent = [...game.world.agents.values()].find((a) => a.playerId === subjectId);
+        if (!agent) continue;
+
+        const family = game.agentDescriptions.get(agent.id)?.family;
+        const affinities: Record<string, number> = { ...(agent.affinities ?? {}) };
+        const focalName = game.playerDescriptions.get(focalPlayerId)?.name;
+        const current = affinityToward({
+          affinities,
+          otherPlayerId: focalPlayerId,
+          family,
+          otherName: focalName,
+        });
+        const updated = clampAffinity(current + delta);
+        if (updated === current) continue; // Clamped at 0/100 — nothing happened.
+        affinities[focalPlayerId] = updated;
+        agent.affinities = affinities;
+        agent.lastAffinityChange = { at: now, net: updated - current };
+        game.emitRelationshipEvent({
+          at: now,
+          kind: 'decisionOutcome',
+          actor: agent.playerId,
+          target: focalPlayerId,
+          delta: updated - current,
+          affinityAfter: updated,
+          reason,
+          scenarioId: args.scenarioId,
+          scenarioName: args.scenarioName,
+        });
       }
       return null;
     },

@@ -8,6 +8,7 @@ import { Id } from './_generated/dataModel';
 import { createEngine } from './aiTown/main';
 import { ENGINE_ACTION_DURATION } from './constants';
 import { detectMismatchedLLMProvider } from './util/llm';
+import { seedGroundTruthProfiles } from './groundTruth';
 
 const init = mutation({
   args: {
@@ -35,6 +36,11 @@ const init = mutation({
         });
       }
     }
+    // Seed the decision engine's hidden ground truth. Agents are created through
+    // queued engine inputs, so on a fresh world there are no playerDescriptions
+    // to key against yet and this is a no-op — it lands on the next `init` run,
+    // and ensureGroundTruth covers the lazy path in the meantime.
+    await seedGroundTruthProfiles(ctx, worldStatus.worldId);
   },
 });
 export default init;

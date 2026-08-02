@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from 'convex/react';
 import { api } from '../../convex/_generated/api';
+import { Id } from '../../convex/_generated/dataModel';
 import { CharacterIcon } from './CharacterIcon';
 import { affinityColor, affinityEmoji, affinityLabel } from '../../convex/aiTown/affinity';
 
@@ -64,7 +65,84 @@ export default function AnalysisPage() {
           <SidePanel nodes={graph.nodes} links={graph.links} hovered={hovered} />
         </div>
       )}
+      {worldId && <DecisionsPanel worldId={worldId} />}
     </main>
+  );
+}
+
+// Every group decision the town has made, scored after the fact against the
+// hidden ground truth (see convex/evaluator.ts). This is the durable record —
+// the live deliberation panel disappears with the scenario, these rows do not.
+function DecisionsPanel({ worldId }: { worldId: Id<'worlds'> }) {
+  const evaluations = useQuery(api.world.recentEvaluations, { worldId, limit: 25 });
+  if (!evaluations || evaluations.length === 0) return null;
+
+  const meanRegret =
+    Math.round(
+      (evaluations.reduce((acc, e) => acc + e.regret, 0) / evaluations.length) * 100,
+    ) / 100;
+  const optimal = evaluations.filter((e) => e.regret === 0).length;
+
+  return (
+    <div className="px-6 pb-8">
+      <div className="bg-brown-800 box p-4">
+        <div className="flex items-baseline justify-between gap-4 mb-1">
+          <h2 className="font-display uppercase tracking-widest text-sm text-brown-200">
+            Decisions
+          </h2>
+          <span className="text-xs text-brown-300 tabular-nums">
+            {optimal}/{evaluations.length} optimal · mean regret {meanRegret}
+          </span>
+        </div>
+        <p className="text-xs text-brown-400 mb-3">
+          What each group actually chose, scored against constraints they never all shared out
+          loud. Regret is how much better the best available option would have been.
+        </p>
+        <ul className="divide-y divide-brown-700">
+          {evaluations.map((e) => {
+            const violations = e.agentScores.filter((a) => a.hardTabooViolated);
+            return (
+              <li key={e._id} className="py-2.5">
+                <div className="flex items-baseline gap-2">
+                  <span className="flex-1 text-sm text-brown-100">
+                    {e.scenarioName}
+                    <span className="text-brown-300"> — {e.selectedOptionTitle}</span>
+                  </span>
+                  <span
+                    className={`shrink-0 text-sm font-bold tabular-nums ${
+                      e.regret === 0 ? 'text-green-400' : 'text-amber-300'
+                    }`}
+                    title="Regret: best available group utility minus what they chose"
+                  >
+                    {e.regret === 0 ? 'optimal' : `−${e.regret}`}
+                  </span>
+                </div>
+                <div className="text-[11px] text-brown-400 mt-0.5">
+                  {e.focalName} decided after {e.questionsAsked} question
+                  {e.questionsAsked === 1 ? '' : 's'}
+                  {e.forcedDecision ? ' (on the clock)' : ''} · scored{' '}
+                  <span className="text-brown-300 tabular-nums">{e.aggregatedGroupUtility}</span>
+                  /100
+                  {e.regret > 0 && (
+                    <>
+                      {' '}
+                      · best was{' '}
+                      <span className="text-brown-300">{e.bestOptionTitle}</span> at{' '}
+                      <span className="tabular-nums">{e.bestGroupUtility}</span>
+                    </>
+                  )}
+                </div>
+                {violations.length > 0 && (
+                  <div className="text-[11px] text-red-300 mt-0.5">
+                    ⛔ overrode a hard limit for {violations.map((v) => v.name).join(', ')}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </div>
   );
 }
 

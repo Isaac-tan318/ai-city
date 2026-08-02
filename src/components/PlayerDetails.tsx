@@ -75,6 +75,8 @@ function eventFallbackText(kind: string): string {
       return 'brushed off an invite';
     case 'groupExit':
       return 'left their group early';
+    case 'decisionOutcome':
+      return 'after how a group decision went';
     default:
       return 'after a conversation';
   }

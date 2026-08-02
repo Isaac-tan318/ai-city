@@ -666,7 +666,9 @@ function pastScenariosPrompt(memories: memory.Memory[]): string[] {
   return prompt;
 }
 
-async function previousMessages(
+// Exported for convex/focal.ts, which builds its own prompt but wants the chat
+// history in exactly the same shape the ordinary message generators use.
+export async function previousMessages(
   ctx: ActionCtx,
   worldId: Id<'worlds'>,
   conversationId: GameId<'conversations'>,

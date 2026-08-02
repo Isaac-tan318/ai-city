@@ -1,8 +1,9 @@
 import { ObjectType, v } from 'convex/values';
 import { GameId, parseGameId } from './ids';
 import { agentId, conversationId, playerId } from './ids';
-import { serializedPlayer } from './player';
+import { Player, serializedPlayer } from './player';
 import { Conversation } from './conversation';
+import { focalTurnDelta } from './deliberation';
 import { Game } from './game';
 // Type-only (erased at runtime) — world.ts imports agent.ts, so a value import
 // here would be a circular dependency.
@@ -24,7 +25,8 @@ import {
   MIDPOINT_THRESHOLD,
   PLAYER_CONVERSATION_COOLDOWN,
 } from '../constants';
-import { FunctionArgs } from 'convex/server';
+import { FunctionArgs, FunctionReference } from 'convex/server';
+import type { Id } from '../_generated/dataModel';
 import { MutationCtx, internalMutation, internalQuery } from '../_generated/server';
 import { distance, pointsEqual } from '../util/geometry';
 import { internal } from '../_generated/api';
@@ -338,6 +340,10 @@ export class Agent {
     // designated planner fires ONE op to turn the agreed plan into concrete,
     // delegated tasks (which flips the scenario into its "working" phase).
     this.maybeRequestScenarioTasks(game, now);
+    // Decision-scenario deliberation: the focal participant asks the Decider for
+    // the candidate options. Lock-free and placed before the in-flight-op guard
+    // so it can be requested while this agent is busy doing something else.
+    this.maybeRequestDecisionOptions(game);
     if (this.inProgressOperation) {
       if (now < this.inProgressOperation.started + ACTION_TIMEOUT) {
         // Wait on the operation to finish.
@@ -706,6 +712,13 @@ export class Agent {
           });
           return;
         }
+        // Decision scenario: if this agent is the focal one, its turns run the
+        // deliberation (estimate the options, then ask or commit) instead of
+        // producing an ordinary reply. Everyone else talks normally, so their
+        // answers to its questions come back through the usual path.
+        if (this.maybeTakeFocalTurn(game, now, conversation, player)) {
+          return;
+        }
         // --- Multi-party turn-taking, governed by the dialogue orchestrator. ---
         // After each agent message, the orchestrator sets `nextSpeaker`. We only
         // speak when it's our turn, with two safety valves so the conversation
@@ -810,6 +823,73 @@ export class Agent {
       playerId: this.playerId,
       scenarioId: sc.id,
     });
+  }
+
+  // Ask the Decider to generate the candidate options for a decision scenario.
+  // Fired once per scenario by the focal participant, LOCK-FREE (via
+  // game.scheduleOperation rather than startOperation) so the group's
+  // conversation starts and runs normally while the options are being written.
+  // Until they land, maybeTakeFocalTurn stays dormant and the scenario behaves
+  // exactly as it did before the decision engine existed.
+  maybeRequestDecisionOptions(game: Game): void {
+    const sc = this.activeScenario(game);
+    if (!sc || (sc.outcome ?? 'tasks') !== 'decision') return;
+    if (sc.phase && sc.phase !== 'active') return;
+    const deliberation = sc.deliberation;
+    if (!deliberation) return;
+    if (deliberation.optionsRequested || deliberation.options.length > 0) return;
+    if (this.playerId !== deliberation.focalPlayerId) return;
+    deliberation.optionsRequested = true;
+    game.scheduleOperation('generateDecisionOptions', {
+      worldId: game.worldId,
+      scenarioId: sc.id,
+    });
+  }
+
+  // The focal agent's deliberation turn. Returns true if it took the turn, so the
+  // caller skips the ordinary message path.
+  //
+  // Gated by the same turn rules as a normal reply (designated speaker or open
+  // floor, not replying to itself, past the read cooldown) so the focal agent
+  // doesn't get to talk out of turn just because it has a job to do.
+  maybeTakeFocalTurn(
+    game: Game,
+    now: number,
+    conversation: Conversation,
+    player: Player,
+  ): boolean {
+    const sc = this.activeScenario(game);
+    if (!sc || (sc.outcome ?? 'tasks') !== 'decision') return false;
+    const deliberation = sc.deliberation;
+    if (!deliberation) return false;
+    if (this.playerId !== deliberation.focalPlayerId) return false;
+    // Options not generated yet, or already committed — nothing to deliberate.
+    if (deliberation.options.length < 2 || deliberation.resolvedOptionId) return false;
+    if (!this.isInScenarioConversation(game, conversation)) return false;
+    if (!conversation.lastMessage) return false;
+
+    const justSpoke = conversation.lastMessage.author === player.id;
+    const stalled = now > conversation.lastMessage.timestamp + AWKWARD_CONVERSATION_TIMEOUT;
+    const myTurn = conversation.nextSpeaker
+      ? conversation.nextSpeaker === player.id || (stalled && !justSpoke)
+      : !justSpoke;
+    if (!myTurn) return false;
+    if (justSpoke && !stalled) return false;
+    if (now < conversation.lastMessage.timestamp + MESSAGE_COOLDOWN) return false;
+
+    console.log(`${player.id} taking a focal turn in ${conversation.id}.`);
+    const messageUuid = crypto.randomUUID();
+    conversation.setIsTyping(now, player, messageUuid);
+    this.startOperation(game, now, 'runFocalAgentTurn', {
+      worldId: game.worldId,
+      playerId: player.id,
+      agentId: this.id,
+      conversationId: conversation.id,
+      messageUuid,
+      gameTimeMs: now,
+      scenarioId: sc.id,
+    });
+    return true;
   }
 
   // This agent's current affinity (0–100) toward another player: the stored value
@@ -1501,7 +1581,37 @@ export const serializedAgent = {
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 
-type AgentOperations = typeof internal.aiTown.agentOperations;
+// Operations an agent can start under its `inProgressOperation` lock. Mostly the
+// agentOperations module, plus the focal turn, which lives in convex/focal.ts
+// because it belongs to the decision engine rather than to generic agent
+// behaviour. The lock-free decision ops (generateDecisionOptions,
+// evaluateFinalDecision) go through game.scheduleOperation directly and so don't
+// need to appear here.
+//
+// The focal entry spells its args out rather than writing
+// `typeof internal.focal.runFocalAgentTurn`. Referring to another module's api
+// type from inside a generic constraint makes the api type graph circular
+// (focal.ts -> agent/conversation.ts -> ... -> agent.ts), at which point
+// TypeScript quietly degrades half the repo's inferred query types to `any`.
+// This is the same circular-import hazard the `import type` on
+// SerializedActiveScenario above exists to avoid.
+type FocalTurnOperation = FunctionReference<
+  'action',
+  'internal',
+  {
+    worldId: Id<'worlds'>;
+    agentId: string;
+    playerId: string;
+    conversationId: string;
+    operationId: string;
+    messageUuid: string;
+    gameTimeMs: number;
+    scenarioId: string;
+  }
+>;
+type AgentOperations = typeof internal.aiTown.agentOperations & {
+  runFocalAgentTurn: FocalTurnOperation;
+};
 
 export async function runAgentOperation(ctx: MutationCtx, operation: string, args: any) {
   let reference;
@@ -1526,6 +1636,19 @@ export async function runAgentOperation(ctx: MutationCtx, operation: string, arg
       break;
     case 'agentPlanScenarioTasks':
       reference = internal.aiTown.agentOperations.agentPlanScenarioTasks;
+      break;
+    // Decision-scenario engine (convex/decider.ts, focal.ts, evaluator.ts). These
+    // live outside aiTown/ because they are self-contained modules rather than
+    // agent behaviours; this switch is just a name -> reference map, so it doesn't
+    // care where they are.
+    case 'generateDecisionOptions':
+      reference = internal.decider.generateDecisionOptions;
+      break;
+    case 'runFocalAgentTurn':
+      reference = internal.focal.runFocalAgentTurn;
+      break;
+    case 'evaluateFinalDecision':
+      reference = internal.evaluator.evaluateFinalDecision;
       break;
     default:
       throw new Error(`Unknown operation: ${operation}`);
@@ -1555,6 +1678,9 @@ export const agentSendMessage = internalMutation({
     // the 0-based indices of scenario topics it judged substantively covered.
     goalMet: v.optional(v.boolean()),
     coveredTopics: v.optional(v.array(v.number())),
+    // Present only for a focal agent's deliberation turn (convex/focal.ts): the
+    // estimates it just produced and whether it committed to an option.
+    focal: v.optional(focalTurnDelta),
   },
   handler: async (ctx, args) => {
     await ctx.db.insert('messages', {
@@ -1575,6 +1701,7 @@ export const agentSendMessage = internalMutation({
       nextSpeaker: args.nextSpeaker,
       goalMet: args.goalMet,
       coveredTopics: args.coveredTopics,
+      focal: args.focal,
     });
   },
 });

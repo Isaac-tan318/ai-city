@@ -126,6 +126,25 @@ export const SCENARIO_GOAL_CHECK_MIN_MESSAGES = 6;
 // the goal was never judged met.
 export const SCENARIO_MAX_CONVO_DURATION = 15 * 60_000;
 
+// --- Decision scenarios (Decider / Focal / Evaluator) ---
+// A scenario with outcome === 'decision' runs a deliberation: one designated
+// "focal" participant estimates a utility for each candidate option and either
+// asks a clarifying question or commits. See convex/scoring.ts for the maths and
+// convex/focal.ts for the turn itself.
+// How many candidate options the Decider generates for a decision scenario.
+export const MAX_DECISION_OPTIONS = 4;
+// Question budget. The stopping criteria decide WHETHER the focal agent may
+// commit; this decides when it must anyway. Without it a group that keeps
+// revealing new constraints would deliberate until the conversation cap and
+// never actually choose anything.
+export const MAX_FOCAL_QUESTIONS = 4;
+// Force a decision once the conversation is this close to SCENARIO_CONVO_MAX_MESSAGES,
+// leaving room for the decision message plus the goal summary and goodbyes.
+export const FOCAL_DECIDE_MESSAGE_HEADROOM = 4;
+// Force a decision once the scenario is within this long of expiring, so a
+// deliberation always resolves into something the evaluator can score.
+export const FOCAL_FORCE_DECIDE_MS = 90_000;
+
 // --- Scenario shared memory (cross-conversation + past scenarios) ---
 // How many recent messages from the REST of the current scenario (its OTHER
 // conversations) to surface to a participant as shared context, so a plan/task

@@ -76,6 +76,7 @@ export function tickScenarios(game: Game, now: number): void {
       continue;
     }
     if (sc.endTime <= now) {
+      maybeScheduleEvaluation(game, sc, true);
       rememberScenarioForParticipants(game, sc);
       clearScenarioParticipants(game, sc.id);
       cooldowns[scopeKeyFor(sc.scope, sc.locationId)] = now + SCENARIO_COOLDOWN_MS;
@@ -84,6 +85,10 @@ export function tickScenarios(game: Game, now: number): void {
       // (or the gather deadline passes), so the content window runs from the real
       // start rather than being eaten by travel time.
       maybePromoteScenario(game, now, sc);
+      // Decision scenario: the focal agent has committed to an option, so score
+      // the outcome against everyone's hidden ground truth. Fired here rather
+      // than from the input handler so the expiry path below shares the code.
+      maybeScheduleEvaluation(game, sc, false);
       // Plan-timeout fallback: if the task-planning op was requested but never came
       // back, release the guard so participants aren't held forever on a stuck op —
       // the scenario then wraps up normally.
@@ -102,6 +107,7 @@ export function tickScenarios(game: Game, now: number): void {
       }
       // Re-check expiry — working completion above can retire the scenario early.
       if (sc.endTime <= now) {
+        maybeScheduleEvaluation(game, sc, true);
         rememberScenarioForParticipants(game, sc);
         clearScenarioParticipants(game, sc.id);
         cooldowns[scopeKeyFor(sc.scope, sc.locationId)] = now + SCENARIO_COOLDOWN_MS;
@@ -267,6 +273,19 @@ export function startScenario(
     goalMet: false,
     participantIds: participants.map((a) => a.playerId) as GameId<'players'>[],
     participantNames,
+    // A decision scenario runs a deliberation: one focal participant estimates
+    // the options and decides when the group may commit (convex/focal.ts). The
+    // focal agent is the lowest-sorting participant id — the same deterministic
+    // rule the task planner uses, so every agent independently agrees on who it
+    // is and two of them can never both act as focal.
+    deliberation:
+      outcome === 'decision'
+        ? {
+            focalPlayerId: [...participants.map((a) => a.playerId)].sort()[0] as GameId<'players'>,
+            options: [],
+            questionsAsked: 0,
+          }
+        : undefined,
     startTime: now,
     contentStartTime,
     phase,
@@ -430,6 +449,55 @@ function maybePromoteScenario(game: Game, now: number, sc: SerializedActiveScena
     delete agent.scenarioTarget;
     delete agent.scenarioArrivalTime;
   }
+}
+
+// Score a decision scenario's outcome against the participants' hidden ground
+// truth (convex/evaluator.ts). Scheduled LOCK-FREE, and with the whole
+// deliberation passed in as op args rather than read back later, because the
+// active-scenario entry is about to be deleted from the world doc.
+//
+// `onExpiry` covers the case where the focal agent never committed — the
+// conversation died, it wandered off, its LLM calls kept failing. We still score
+// its leading estimate so a deliberation always produces a data point, flagged as
+// forced so the analysis can tell a real decision from a defaulted one.
+function maybeScheduleEvaluation(
+  game: Game,
+  sc: SerializedActiveScenario,
+  onExpiry: boolean,
+): void {
+  const deliberation = sc.deliberation;
+  if (!deliberation || deliberation.evaluationRequested) return;
+  if (deliberation.options.length < 2) return;
+  // Never scored a single option — there is nothing to evaluate.
+  if (sc.phase === 'gathering') return;
+
+  let selectedOptionId = deliberation.resolvedOptionId;
+  let forced = !!deliberation.forcedDecision;
+  if (!selectedOptionId) {
+    if (!onExpiry) return; // Still deliberating — come back next tick.
+    const ranked = [...(deliberation.estimates ?? [])].sort(
+      (a, b) => b.estimatedScore - a.estimatedScore,
+    );
+    if (ranked.length === 0) return; // Never got as far as an estimate.
+    selectedOptionId = ranked[0].optionId;
+    forced = true;
+  }
+
+  deliberation.evaluationRequested = true;
+  game.scheduleOperation('evaluateFinalDecision', {
+    worldId: game.worldId,
+    scenarioId: sc.id,
+    scenarioName: sc.name,
+    focalPlayerId: deliberation.focalPlayerId,
+    focalName:
+      game.playerDescriptions.get(parseGameId('players', deliberation.focalPlayerId))?.name ??
+      'Someone',
+    options: deliberation.options,
+    selectedOptionId,
+    participantIds: sc.participantIds,
+    questionsAsked: deliberation.questionsAsked ?? 0,
+    forcedDecision: forced,
+  });
 }
 
 // Schedule a lock-free post-scenario memory op for each participant BEFORE the

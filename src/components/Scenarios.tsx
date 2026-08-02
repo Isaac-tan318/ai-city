@@ -1,8 +1,16 @@
 import { useEffect, useState } from 'react';
+import { useQuery } from 'convex/react';
 import { SerializedActiveScenario } from '../../convex/aiTown/world';
 import { getLocationById } from '../../data/cityLocations';
 import { ServerGame } from '../hooks/serverGame';
 import { GameId } from '../../convex/aiTown/ids';
+import { api } from '../../convex/_generated/api';
+import { Id } from '../../convex/_generated/dataModel';
+// convex/scoring.ts is pure maths with no Convex imports, so the panel evaluates
+// the stopping criteria exactly the way the engine does rather than reimplementing
+// the thresholds here and letting the two drift apart.
+import { checkStoppingCriteria, describeBlockers, DimensionFactors } from '../../convex/scoring';
+import { MAX_FOCAL_QUESTIONS } from '../../convex/constants';
 import closeImg from '../../assets/close.svg';
 
 // Find a currently-participating member of the scenario's live conversation, so a
@@ -355,15 +363,242 @@ function TasksAndGoalSection({ scenario }: { scenario: SerializedActiveScenario 
   );
 }
 
+// --- Decision scenarios: live deliberation + post-hoc scorecard ---------------
+
+// The focal agent's live view: the options on the table, what it currently thinks
+// each is worth, and which stopping criterion is still keeping it from committing.
+// Reads straight from the world doc via `scenario.deliberation` — no extra query.
+function DeliberationSection({ scenario }: { scenario: SerializedActiveScenario }) {
+  const deliberation = scenario.deliberation;
+  if (!deliberation || deliberation.options.length === 0) return null;
+
+  const nameFor = (playerId: string) => {
+    const i = scenario.participantIds.indexOf(playerId);
+    return i >= 0 ? scenario.participantNames[i] : undefined;
+  };
+  const focalName = nameFor(deliberation.focalPlayerId) ?? 'Someone';
+  const estimates = deliberation.estimates ?? [];
+  const byOption = new Map(estimates.map((e) => [e.optionId, e]));
+  const check = checkStoppingCriteria(estimates, deliberation.topScoreHistory ?? []);
+  const resolvedId = deliberation.resolvedOptionId;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="text-xs uppercase tracking-widest text-amber-300/90">Deliberation</div>
+        <div className="text-[11px] text-brown-300 tabular-nums">
+          {focalName} · {deliberation.questionsAsked ?? 0}/{MAX_FOCAL_QUESTIONS} questions
+        </div>
+      </div>
+
+      <ul className="space-y-2">
+        {deliberation.options.map((option) => {
+          const estimate = byOption.get(option.optionId);
+          const score = estimate?.estimatedScore;
+          const isLeader = !resolvedId && check.top?.optionId === option.optionId;
+          const isChosen = resolvedId === option.optionId;
+          const riskyNames = (estimate?.riskyForPlayerIds ?? [])
+            .map(nameFor)
+            .filter((n): n is string => !!n);
+          const atRisk = !!estimate?.tabooRisk || riskyNames.length > 0;
+          return (
+            <li key={option.optionId} className="text-sm">
+              <div className="flex items-baseline gap-2">
+                <span
+                  className={`flex-1 ${isChosen || isLeader ? 'text-brown-100' : 'text-brown-300'}`}
+                >
+                  {isChosen && <span aria-hidden>✓ </span>}
+                  {option.title}
+                </span>
+                <span className="shrink-0 text-[11px] text-amber-300/90 tabular-nums">
+                  {score === undefined ? '—' : score}
+                </span>
+              </div>
+              <div className="mt-1 h-2 w-full rounded overflow-hidden bg-black/30">
+                <div
+                  className={`h-full rounded transition-all ${
+                    isChosen ? 'bg-green-500' : atRisk ? 'bg-red-500/70' : 'bg-amber-400'
+                  }`}
+                  style={{ width: `${Math.max(0, Math.min(100, score ?? 0))}%` }}
+                />
+              </div>
+              {atRisk && (
+                <div className="mt-1 text-[11px] text-red-300">
+                  ⚠ may break a hard limit
+                  {riskyNames.length > 0 ? ` for ${riskyNames.join(', ')}` : ''}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+
+      <div className="text-[11px] text-brown-300">
+        {resolvedId ? (
+          <>
+            Committed{deliberation.forcedDecision ? ' (ran out of time to keep asking)' : ''}.
+          </>
+        ) : estimates.length === 0 ? (
+          <>Waiting on {focalName}&rsquo;s first read of the options.</>
+        ) : (
+          <>
+            <span className="text-amber-300/90">Still deciding:</span> {describeBlockers(check)}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const DIMENSION_LABELS: { key: keyof DimensionFactors; label: string }[] = [
+  { key: 'essentialNeeds', label: 'Need' },
+  { key: 'preferenceMatch', label: 'Pref' },
+  { key: 'costTimeBurden', label: 'Cost' },
+  { key: 'fairness', label: 'Fair' },
+  { key: 'socialComfort', label: 'Ease' },
+  { key: 'relationshipImpact', label: 'Rel' },
+];
+
+// What the choice was actually worth, scored against the hidden ground truth
+// nobody in the conversation could see. Appears a few seconds after the group
+// commits, once the evaluator has finished.
+function ScorecardSection({
+  worldId,
+  scenario,
+}: {
+  worldId: Id<'worlds'>;
+  scenario: SerializedActiveScenario;
+}) {
+  const evaluation = useQuery(api.world.evaluationForScenario, {
+    worldId,
+    scenarioId: scenario.id,
+  });
+  const resolved = !!scenario.deliberation?.resolvedOptionId;
+  if (!resolved && !evaluation) return null;
+
+  if (!evaluation) {
+    return (
+      <div>
+        <div className="text-xs uppercase tracking-widest text-amber-300/90 mb-1.5">
+          Ground truth
+        </div>
+        <p className="text-brown-300 text-sm italic">Scoring the outcome&hellip;</p>
+      </div>
+    );
+  }
+
+  const perfect = evaluation.regret === 0;
+  return (
+    <div className="space-y-3">
+      <div className="text-xs uppercase tracking-widest text-amber-300/90">Ground truth</div>
+
+      {/* The headline: how much better they could have done. */}
+      <div className={`rounded px-3 py-2 ${perfect ? 'bg-green-900/40' : 'bg-black/30'}`}>
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-sm text-brown-100">
+            {perfect ? 'Best available option' : 'Regret'}
+          </span>
+          <span className="text-lg font-bold tabular-nums text-amber-300">
+            {perfect ? '0' : `−${evaluation.regret}`}
+          </span>
+        </div>
+        <div className="text-[11px] text-brown-300 mt-0.5">
+          Chose {evaluation.selectedOptionTitle} at {evaluation.aggregatedGroupUtility}/100
+          {perfect ? '' : `; ${evaluation.bestOptionTitle} would have scored ${evaluation.bestGroupUtility}`}
+          {evaluation.forcedDecision ? ' · decided on the clock' : ''}
+        </div>
+      </div>
+
+      {/* True group utility per option. */}
+      <ul className="space-y-1.5">
+        {evaluation.optionScores.map((option) => {
+          const isChosen = option.optionId === evaluation.selectedOptionId;
+          const isBest = option.optionId === evaluation.bestOptionId;
+          return (
+            <li key={option.optionId} className="text-sm">
+              <div className="flex items-baseline gap-2">
+                <span className={`flex-1 ${isChosen ? 'text-brown-100' : 'text-brown-300'}`}>
+                  {option.title}
+                  {isBest && <span className="text-green-400"> ★</span>}
+                  {isChosen && <span className="text-amber-300/90"> (chosen)</span>}
+                </span>
+                <span className="shrink-0 text-[11px] tabular-nums text-amber-300/90">
+                  {option.groupUtility}
+                </span>
+              </div>
+              <div className="mt-1 h-1.5 w-full rounded overflow-hidden bg-black/30">
+                <div
+                  className={`h-full rounded ${isBest ? 'bg-green-500' : 'bg-amber-400/60'}`}
+                  style={{ width: `${Math.max(0, Math.min(100, option.groupUtility))}%` }}
+                />
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+
+      {/* Per-person breakdown for the option they actually took. */}
+      <div>
+        <div className="text-[11px] text-brown-300 mb-1.5">
+          How {evaluation.selectedOptionTitle} scored for each of them:
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11px] tabular-nums">
+            <thead>
+              <tr className="text-brown-300">
+                <th className="text-left font-normal pb-1">Who</th>
+                <th className="text-right font-normal pb-1 pr-2">U</th>
+                {DIMENSION_LABELS.map((d) => (
+                  <th key={d.key} className="text-right font-normal pb-1 pl-1.5">
+                    {d.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {evaluation.agentScores.map((agent) => (
+                <tr
+                  key={agent.playerId}
+                  className={agent.hardTabooViolated ? 'text-red-300' : 'text-brown-100'}
+                >
+                  <td className="text-left py-0.5">
+                    {agent.name}
+                    {agent.hardTabooViolated && <span aria-hidden> ⛔</span>}
+                  </td>
+                  <td className="text-right pr-2">{agent.totalIndividualUtility}</td>
+                  {DIMENSION_LABELS.map((d) => (
+                    <td key={d.key} className="text-right pl-1.5 text-brown-300">
+                      {agent.dimensionFactors[d.key]}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {evaluation.agentScores
+          .filter((a) => a.hardTabooViolated)
+          .map((a) => (
+            <div key={a.playerId} className="mt-1.5 text-[11px] text-red-300">
+              ⛔ {a.name}: {a.violatedTaboo ?? 'a hard limit was overridden'}
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
 // Full detail modal for one active scenario.
 export function ScenarioDetail({
   scenario,
   game,
+  worldId,
   onClose,
   onViewConversation,
 }: {
   scenario: SerializedActiveScenario;
   game: ServerGame;
+  worldId: Id<'worlds'>;
   onClose: () => void;
   onViewConversation: (playerId: GameId<'players'>) => void;
 }) {
@@ -445,6 +680,8 @@ export function ScenarioDetail({
           )}
 
           <TasksAndGoalSection scenario={scenario} />
+          <DeliberationSection scenario={scenario} />
+          <ScorecardSection worldId={worldId} scenario={scenario} />
           {scenario.conflict && (
             <DetailSection title="Where they disagree" body={scenario.conflict} />
           )}

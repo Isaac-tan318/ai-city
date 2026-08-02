@@ -114,6 +114,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
           <ScenarioDetail
             scenario={selected}
             game={game}
+            worldId={worldId}
             onClose={() => setSelectedScenarioId(null)}
             onViewConversation={(playerId) => {
               setSelectedElement({ kind: 'player', id: playerId });

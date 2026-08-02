@@ -42,7 +42,10 @@ export function TensionsFeed({
         Tensions
       </div>
       {recent.map((e) => {
-        const negative = e.kind !== 'affinityShift' || (e.delta ?? 0) < 0;
+        // Judge by the sign of the applied change wherever there is one, so a
+        // positive shift never renders as a tension. Kinds that carry no delta
+        // (groupExit) are negative by definition.
+        const negative = e.delta !== undefined ? e.delta < 0 : true;
         const actorName = nameOf(e.actor);
         const targetName = e.target ? nameOf(e.target) : undefined;
         const headline =
@@ -53,7 +56,11 @@ export function TensionsFeed({
               : actorName;
         const subLabel =
           e.reason ??
-          (e.kind === 'inviteDeclined' ? 'invite turned down' : e.scenarioName ?? 'a conversation');
+          (e.kind === 'inviteDeclined'
+            ? 'invite turned down'
+            : e.kind === 'decisionOutcome'
+              ? `how ${e.scenarioName ?? 'the decision'} went`
+              : e.scenarioName ?? 'a conversation');
         return (
           <button
             key={e._id}

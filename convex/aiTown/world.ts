@@ -5,6 +5,7 @@ import { Agent, serializedAgent } from './agent';
 import { GameId, parseGameId, playerId } from './ids';
 import { parseMap } from '../util/object';
 import { point } from '../util/types';
+import { serializedDeliberation } from './deliberation';
 
 export const historicalLocations = v.array(
   v.object({
@@ -87,6 +88,9 @@ export const serializedActiveScenario = v.object({
   // Set true once the (single) task-planning op has been requested for this
   // scenario, so only one participant fires it. Cleared implies not yet delegated.
   taskPlanRequested: v.optional(v.boolean()),
+  // Decision-scenario deliberation state (outcome === 'decision' only). Absent for
+  // 'tasks' scenarios and for worlds serialized before the decision engine existed.
+  deliberation: v.optional(serializedDeliberation),
   endTime: v.number(),
 });
 export type SerializedActiveScenario = Infer<typeof serializedActiveScenario>;

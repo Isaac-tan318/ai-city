@@ -14,6 +14,7 @@ import MusicButton from './components/buttons/MusicButton.tsx';
 import Button from './components/buttons/Button.tsx';
 import InteractButton from './components/buttons/InteractButton.tsx';
 import ChatHistoryButton from './components/buttons/ChatHistoryButton.tsx';
+import DeciderButton from './components/buttons/DeciderButton.tsx';
 import FreezeButton from './components/FreezeButton.tsx';
 import { MAX_HUMAN_PLAYERS } from '../convex/constants.ts';
 
@@ -89,6 +90,7 @@ export default function Home() {
               Help
             </Button>
             <ChatHistoryButton />
+            <DeciderButton />
             <Link
               to="/analysis"
               className="button text-white shadow-solid text-xl pointer-events-auto"

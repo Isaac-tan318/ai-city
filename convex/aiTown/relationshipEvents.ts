@@ -15,6 +15,10 @@ export const relationshipEventKind = v.union(
   // An agent drifted out of a group conversation early because they disliked
   // the company.
   v.literal('groupExit'),
+  // A decision scenario was scored against everyone's hidden ground truth and
+  // the outcome changed how a participant feels about whoever made the call
+  // (see convex/evaluator.ts).
+  v.literal('decisionOutcome'),
 );
 export type RelationshipEventKind = Infer<typeof relationshipEventKind>;
 

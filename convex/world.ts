@@ -288,3 +288,38 @@ export const relationshipEventsForPlayer = query({
       .take(PLAYER_RELATIONSHIP_EVENTS_LIMIT);
   },
 });
+
+// The ground-truth scorecard for one decision scenario, for the scenario detail
+// panel. Null until the evaluator has finished (a few seconds after the group
+// commits) — the live deliberation state comes from the world doc instead.
+export const evaluationForScenario = query({
+  args: {
+    worldId: v.id('worlds'),
+    scenarioId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query('evaluations')
+      .withIndex('by_scenario', (q) =>
+        q.eq('worldId', args.worldId).eq('scenarioId', args.scenarioId),
+      )
+      .order('desc')
+      .first();
+  },
+});
+
+// Every scored decision, newest first. Survives scenario teardown, so this is the
+// durable record the analysis page reads.
+export const recentEvaluations = query({
+  args: {
+    worldId: v.id('worlds'),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query('evaluations')
+      .withIndex('by_world', (q) => q.eq('worldId', args.worldId))
+      .order('desc')
+      .take(Math.min(args.limit ?? 25, 100));
+  },
+});

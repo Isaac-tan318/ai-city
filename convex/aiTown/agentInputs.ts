@@ -10,9 +10,14 @@ import { AgentDescription } from './agentDescription';
 import { Agent, scheduleStep } from './agent';
 import { affinityToward, clampAffinity } from './affinity';
 import { applyFocalTurn, focalTurnDelta, serializedDecisionOption } from './deliberation';
-import { applyShortTermDeltas, shortTermSensitivity, type ShortTermDelta } from './shortTerm';
-import { DEFAULT_BALANCE, MAX_LEARNED_TRAITS } from '../constants';
-import { injectCatalogScenario, startScenario } from './scenarios';
+import {
+  applyShortTermDeltas,
+  shortTermSensitivity,
+  spend,
+  type ShortTermDelta,
+} from './shortTerm';
+import { MAX_LEARNED_TRAITS, SCENARIO_CUSTOM_MIN_PARTICIPANTS } from '../constants';
+import { injectCatalogScenario, pickScenarioParticipants, startScenario } from './scenarios';
 import { serializedGeneratedScenario, toScenarioDef } from './generatedScenario';
 import { scenarioById } from '../../data/scenarios';
 import { CITY_LOCATIONS, homeFor } from '../../data/cityLocations';
@@ -22,14 +27,25 @@ import { SCENARIO_WORK_MAX_MS, SCENARIO_INTERVAL_MIN_MS, SCENARIO_RETRY_MS } fro
 import type { SerializedActiveScenario } from './world';
 import type { Game } from './game';
 
-// Inject a town-wide scenario: set the global directive, force every agent to
-// re-plan around it (which naturally walks them to wherever it calls them — no
-// special movement code), and surface it in the on-screen scenarios panel. Shared
-// by the custom-scenario injector and the "meet at the park" button.
+// Inject a custom scenario: enlist a group, force them to re-plan around it (which
+// naturally walks them to wherever it calls them — no special movement code), and
+// surface it in the on-screen scenarios panel. Shared by the custom-scenario
+// injector and the "meet at the park" button.
+//
+// `everyone` opts out of the group selection for scenarios that genuinely are
+// town-wide (the meet-at-the-park gathering). By default a custom scenario picks a
+// cast the same way an automatic one does, so it happens to some residents rather
+// than sweeping in all eight every time.
 function injectScenario(
   game: Game,
   now: number,
-  opts: { instruction: string; name: string; emoji: string; background: string },
+  opts: {
+    instruction: string;
+    name: string;
+    emoji: string;
+    background: string;
+    everyone?: boolean;
+  },
 ) {
   game.world.scenarioInstruction = opts.instruction;
   game.world.scenarioStartTime = now;
@@ -37,11 +53,12 @@ function injectScenario(
   for (const conversation of [...game.world.conversations.values()]) {
     conversation.stop(game, now);
   }
-  for (const agent of game.world.agents.values()) {
-    // Fully clear any AUTOMATIC scenario this agent was enlisted in before taking
-    // over with the town-wide directive. Without this, an agent mid local scenario
-    // keeps its scenarioId/scenarioTarget, so the gather branch in Agent.tick keeps
-    // walking it back to the old workplace and it never reacts to the new scenario.
+  const allAgents = [...game.world.agents.values()];
+  // Clear EVERY agent's automatic-scenario state first: we replace
+  // `activeScenarios` below, so leaving a non-participant pointed at a removed
+  // entry would strand them (Agent.tick's gather branch keeps walking them back to
+  // a workplace for a scenario that no longer exists).
+  for (const agent of allAgents) {
     delete agent.scenarioId;
     delete agent.scenarioName;
     delete agent.scenarioTopics;
@@ -49,14 +66,21 @@ function injectScenario(
     delete agent.scenarioConflict;
     delete agent.scenarioTarget;
     delete agent.scenarioArrivalTime;
-    agent.scenarioInstruction = opts.instruction;
+    delete agent.scenarioInstruction;
     // Drop any stale scenario-relevant background; the next tick re-extracts.
     delete agent.scenarioProfile;
     delete agent.scenarioProfileFor;
     delete agent.toRemember;
     delete agent.inProgressOperation;
+  }
+
+  const cast = opts.everyone
+    ? allAgents
+    : pickScenarioParticipants(game, allAgents, SCENARIO_CUSTOM_MIN_PARTICIPANTS);
+  for (const agent of cast) {
+    agent.scenarioInstruction = opts.instruction;
     // Force an immediate re-plan that incorporates the scenario (bypassing the
-    // plan cooldown/stagger) so every agent reacts at once.
+    // plan cooldown/stagger) so every participant reacts at once.
     agent.scheduleNeedsRefresh = true;
     agent.forcePlan = true;
     delete agent.lastPlanAttempt;
@@ -69,7 +93,13 @@ function injectScenario(
 
   // Surface it in the scenarios panel (the automatic manager skips 'manual'
   // entries — they live and die with the global scenarioInstruction above).
-  const participantIds = [...game.world.agents.values()].map((a) => a.playerId);
+  const participantIds = cast.map((a) => a.playerId);
+  // Agents adopt the global directive by checking this list, so the scenario stays
+  // with its cast instead of spreading to the whole town on the next tick.
+  game.world.scenarioParticipantIds = participantIds;
+  const participantNames = participantIds.map(
+    (pid) => game.playerDescriptions.get(pid)?.name ?? 'Someone',
+  );
   const manualEntry: SerializedActiveScenario = {
     id: `manual-${now}`,
     defId: 'manual',
@@ -79,16 +109,18 @@ function injectScenario(
     instruction: opts.instruction,
     whatHappens: opts.instruction,
     background: opts.background,
-    relationships: 'Everyone in town is caught up in it.',
-    context: 'Happening right now, town-wide.',
+    relationships: opts.everyone
+      ? 'Everyone in town is caught up in it.'
+      : `The people caught up in it: ${participantNames.join(', ')}.`,
+    context: opts.everyone
+      ? 'Happening right now, town-wide.'
+      : `Happening right now to ${participantNames.join(', ')}.`,
     goals: 'React to the situation in character and let it reshape the rest of your day.',
     participantIds,
-    participantNames: participantIds.map(
-      (pid) => game.playerDescriptions.get(pid)?.name ?? 'Someone',
-    ),
+    participantNames,
     startTime: now,
-    // Manual scenarios have no gathering phase — they take over the whole town
-    // immediately and end with the global scenarioInstruction.
+    // Manual scenarios have no gathering phase — the cast reacts wherever they are
+    // and it ends with the global scenarioInstruction.
     contentStartTime: now,
     phase: 'active',
     endTime: now + CYCLE_MS,
@@ -206,7 +238,10 @@ export const agentInputs = {
       if (args.activity) {
         player.activity = args.activity;
         if (args.activityCost && args.activityCost > 0) {
-          agent.balance = (agent.balance ?? DEFAULT_BALANCE) - args.activityCost;
+          // pickActivity already filters out options the agent can't cover, but
+          // debit through `spend` regardless so the balance can never go negative
+          // if the balance moved between choosing and committing.
+          agent.balance = spend(agent.balance, args.activityCost).balance;
         }
       }
       return null;
@@ -432,7 +467,11 @@ export const agentInputs = {
           toRemember: undefined,
           scenarioTarget: game.world.scenarioTarget,
           scenarioName: game.world.scenarioName,
-          scenarioInstruction: game.world.scenarioInstruction,
+          // Only inherit a live custom scenario when it's an everyone-scenario;
+          // an agent created after a group scenario started isn't in its cast.
+          scenarioInstruction: game.world.scenarioParticipantIds
+            ? undefined
+            : game.world.scenarioInstruction,
           home,
         }),
       );
@@ -763,6 +802,7 @@ export const agentInputs = {
       // is running, however it was started.
       delete game.world.scenarioInstruction;
       delete game.world.scenarioStartTime;
+      delete game.world.scenarioParticipantIds;
       delete game.world.scenarioTarget;
       delete game.world.scenarioName;
       for (const agent of game.world.agents.values()) {
@@ -794,6 +834,8 @@ export const agentInputs = {
         emoji: '🌳',
         background:
           'A spontaneous town-wide get-together at Gardens by the Bay — everyone heads to the park to mingle.',
+        // This one genuinely is the whole town — that's the point of the button.
+        everyone: true,
       });
       return null;
     },

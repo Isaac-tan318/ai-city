@@ -30,7 +30,7 @@ import type { Id } from '../_generated/dataModel';
 import { MutationCtx, internalMutation, internalQuery } from '../_generated/server';
 import { distance, pointsEqual } from '../util/geometry';
 import { internal } from '../_generated/api';
-import { movePlayer, stopPlayer } from './movement';
+import { movePlayer, pickParkWaypoint, stopPlayer } from './movement';
 import { insertInput } from './insertInput';
 import { point, Point } from '../util/types';
 import { computeGameTime, CYCLE_MS, isWeekday } from './gameTime';
@@ -62,11 +62,13 @@ import {
 import { affinityToward, clampAffinity, FamilyTie } from './affinity';
 import {
   buildShortTermSnapshot,
+  canAfford,
   clampGauge,
   decayTowardBaseline,
   defaultShortTerm,
   shortTermSelfDescription,
   shortTermSensitivity,
+  spend,
   type ShortTerm,
 } from './shortTerm';
 import {
@@ -84,9 +86,12 @@ import {
   STRESS_BASELINE,
   HUNGER_BASELINE,
   CANDIDATE_FATIGUE_DISTANCE_WEIGHT,
+  STEP_WANDER_RADIUS,
+  STEP_SETTLED_RADIUS,
+  STEP_WANDER_INTERVAL_MS,
 } from '../constants';
 import { getLocationById, homeFor, workLeashAnchor } from '../../data/cityLocations';
-import { pickContextualEvent, buildSickSchedule } from '../../data/routines';
+import { pickContextualEvent, buildSickSchedule, isSleepStep } from '../../data/routines';
 
 export type ScheduleStep = {
   startMinute: number;
@@ -97,12 +102,16 @@ export type ScheduleStep = {
   description: string;
 };
 
+
 export class Agent {
   id: GameId<'agents'>;
   playerId: GameId<'players'>;
   toRemember?: GameId<'conversations'>;
   lastConversation?: number;
   lastInviteAttempt?: number;
+  // When this agent last drifted to a new tile around their schedule spot, so the
+  // milling-about wander fires on an interval rather than every tick.
+  lastWanderAt?: number;
   inProgressOperation?: {
     name: string;
     operationId: string;
@@ -199,6 +208,7 @@ export class Agent {
       id,
       lastConversation,
       lastInviteAttempt,
+      lastWanderAt,
       inProgressOperation,
       scenarioTarget,
       scenarioName,
@@ -241,6 +251,7 @@ export class Agent {
         : undefined;
     this.lastConversation = lastConversation;
     this.lastInviteAttempt = lastInviteAttempt;
+    this.lastWanderAt = lastWanderAt;
     this.inProgressOperation = inProgressOperation;
     this.scenarioTarget = scenarioTarget;
     this.scenarioName = scenarioName;
@@ -296,6 +307,7 @@ export class Agent {
       } else if (now - game.world.scenarioStartTime >= CYCLE_MS) {
         delete game.world.scenarioInstruction;
         delete game.world.scenarioStartTime;
+        delete game.world.scenarioParticipantIds;
         for (const agent of game.world.agents.values()) {
           // Skip agents enlisted in an automatic scenario — those are owned by
           // the scenario manager (convex/aiTown/scenarios.ts), not the manual
@@ -312,8 +324,16 @@ export class Agent {
         game.world.activeScenarios = remaining.length > 0 ? remaining : undefined;
       }
     }
+    // Adopt the live custom scenario, but only if we're one of its cast. A custom
+    // scenario enlists a group (see injectScenario); without this check every agent
+    // would pick the directive up off the world doc on their next tick and the
+    // scenario would silently become town-wide again. A missing participant list
+    // means the legacy broadcast — everyone.
     if (this.scenarioInstruction === undefined && game.world.scenarioInstruction) {
-      this.scenarioInstruction = game.world.scenarioInstruction;
+      const cast = game.world.scenarioParticipantIds;
+      if (!cast || cast.includes(this.playerId)) {
+        this.scenarioInstruction = game.world.scenarioInstruction;
+      }
     }
     // When a scenario is active, extract this character's scenario-relevant
     // background once (the compact view others see). We schedule the extraction
@@ -406,7 +426,11 @@ export class Agent {
     const recentlyAttemptedInvite =
       this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN;
     const doingActivity = player.activity && player.activity.until > now;
-    if (doingActivity && (conversation || player.pathfinding)) {
+    // Only a free-roam activity is abandoned when the agent starts moving or
+    // talking. A scheduled (ambient) one keeps running: it's what they're doing
+    // with this whole block, so it should follow them around the workplace and be
+    // something they can mention in conversation.
+    if (doingActivity && !player.activity!.ambient && (conversation || player.pathfinding)) {
       player.activity!.until = now;
     }
     // If we're not in a conversation, do something.
@@ -472,7 +496,17 @@ export class Agent {
           this.schedule && this.currentStepIndex !== undefined
             ? this.schedule[this.currentStepIndex]
             : undefined;
-        const onShiftAnchor = workLeashAnchor(player.name, shiftStep);
+        // A fellow participant of our own scenario is never "off post" — the
+        // scenario is the point, and declining them is how a decision scenario
+        // ends up with a focal agent who never joins the conversation.
+        const inviterAgent = inviter
+          ? [...game.world.agents.values()].find((a) => a.playerId === inviter.id)
+          : undefined;
+        const sameScenario =
+          !!this.scenarioId && !!inviterAgent && inviterAgent.scenarioId === this.scenarioId;
+        const onShiftAnchor = sameScenario
+          ? undefined
+          : workLeashAnchor(player.name, shiftStep);
         const pullsOffPost =
           !!onShiftAnchor &&
           !!inviter &&
@@ -502,9 +536,6 @@ export class Agent {
           // decliner drops a little, so repeated brush-offs build into a grudge.
           // Only for affinity-driven declines — the work-leash decline above
           // isn't personal. (This branch implies a non-human inviter.)
-          const inviterAgent = [...game.world.agents.values()].find(
-            (a) => a.playerId === inviter.id,
-          );
           if (inviterAgent) {
             const current = inviterAgent.affinityFor(game, player.id);
             const updated = clampAffinity(current - REJECTED_INVITE_AFFINITY_PENALTY);
@@ -1008,6 +1039,11 @@ export class Agent {
     const gt = computeGameTime(now, game.world.worldStartTime);
     const conversation = game.world.playerConversation(player);
     const doingActivity = player.activity && player.activity.until > now;
+    // An ambient (schedule-driven) activity now runs for the whole block and
+    // survives conversations, so it must NOT hold off a re-plan — otherwise
+    // `scheduleNeedsRefresh`, set after every conversation, could never be acted
+    // on. Only a one-off free-roam activity defers planning.
+    const busyWithOneOffActivity = doingActivity && !player.activity!.ambient;
 
     // --- Stage 3: probabilistic health ---
     // Catch the illness from a sick conversation partner (rolled once per convo).
@@ -1088,19 +1124,35 @@ export class Agent {
     }
 
     let disrupted = false;
-    if (this.schedule && this.currentStepIndex !== undefined && !noSchedule && !dayChanged) {
+    // Being away from the schedule's spot BECAUSE a scenario is holding the agent
+    // somewhere else isn't a disruption — it's the point. Re-planning here would
+    // just churn the LLM for the length of every scenario.
+    const inScenarioMeeting = !!this.scenarioMeetingPoint(game);
+    if (
+      this.schedule &&
+      this.currentStepIndex !== undefined &&
+      !noSchedule &&
+      !dayChanged &&
+      !inScenarioMeeting
+    ) {
       const step = this.schedule[this.currentStepIndex];
       if (step) {
         const overdueMinutes = gt.minutesIntoDay - step.startMinute;
-        const atDest = distance(player.position, step.destination) < ARRIVAL_RADIUS;
-        if (overdueMinutes > SCHEDULE_DISRUPTION_MINUTES && !atDest) {
+        // Measured against the milling-about radius, not the strict arrival one:
+        // an agent drifting around their workplace has reached the step, and
+        // flagging that as a disruption would fire a re-plan on every wander.
+        const reached = distance(player.position, step.destination) < STEP_SETTLED_RADIUS;
+        if (overdueMinutes > SCHEDULE_DISRUPTION_MINUTES && !reached) {
           disrupted = true;
         }
       }
     }
 
     const conversationRefresh = !!this.scheduleNeedsRefresh;
-    const wantsPlan = (noSchedule || dayChanged || disrupted || conversationRefresh) && !conversation && !doingActivity;
+    const wantsPlan =
+      (noSchedule || dayChanged || disrupted || conversationRefresh) &&
+      !conversation &&
+      !busyWithOneOffActivity;
     if (wantsPlan) {
       // Hard cooldown: never re-fire agentPlanDay more than once per 5 minutes
       // real time per agent. Protects against ACTION_TIMEOUT re-fires and any
@@ -1115,7 +1167,7 @@ export class Agent {
       const offset = Math.abs(idHash) % STAGGER_WINDOW_MS;
       // Anchor offset to the start of the current game-day so agents stagger
       // each day, not just at world boot.
-      const dayStart = (game.world.worldStartTime ?? now) + (gt.dayNumber - 1) * (10 * 60 * 1000);
+      const dayStart = (game.world.worldStartTime ?? now) + (gt.dayNumber - 1) * CYCLE_MS;
       const beforeStagger = now < dayStart + offset;
       // A custom-scenario injection sets `forcePlan` to demand an IMMEDIATE
       // re-plan. Bypass both throttles in that case so every agent reacts to the
@@ -1177,7 +1229,9 @@ export class Agent {
     // destination + activity. An agent freed up in this window (e.g. right after a
     // scenario ends at 6am) would then walk off to a random tile across the map and
     // look "stuck" far from anywhere it should be.
-    if (gt.minutesIntoDay < step.startMinute) {
+    // A running scenario outranks the pre-dawn "wait at home" hold, or the cast
+    // would be walked home out from under a scenario that's still going.
+    if (gt.minutesIntoDay < step.startMinute && !inScenarioMeeting) {
       if (conversation) return false;
       const atStart = distance(player.position, step.destination) < ARRIVAL_RADIUS;
       if (!atStart) {
@@ -1200,7 +1254,23 @@ export class Agent {
     // Don't yank the agent out of an active conversation. The schedule can wait.
     if (conversation) return false;
 
-    const atDest = distance(player.position, step.destination) < ARRIVAL_RADIUS;
+    // While a scenario is running, its meeting spot REPLACES the schedule's
+    // destination. The gathering phase walks everyone here, but promotion clears
+    // `scenarioTarget` (it has to — the gather branch returns before the logic that
+    // starts conversations), and without this the schedule immediately marched
+    // everyone back off to their own plans before anyone got a word out. Anchoring
+    // here keeps the group in one place long enough to actually talk, while the
+    // milling-about wander below stops them looking frozen.
+    const scenarioAnchor = this.scenarioMeetingPoint(game);
+    const destination = scenarioAnchor ?? step.destination;
+    const distanceToStep = distance(player.position, destination);
+    // Two tiers. `atDest` is the strict "have I actually arrived" gate that stops
+    // the walk-to-the-spot logic. `settled` is the looser "I'm here, just milling
+    // about" test — an agent drifting within STEP_WANDER_RADIUS of the spot is
+    // still at work, so they keep the settled invite reach rather than snapping
+    // back to the narrow in-transit one every time they take a step.
+    const atDest = distanceToStep < ARRIVAL_RADIUS;
+    const settled = distanceToStep < STEP_SETTLED_RADIUS;
 
     // Opportunistic conversations. The reach depends on whether we're still
     // walking to the scheduled spot or already settled there:
@@ -1225,10 +1295,14 @@ export class Agent {
           ![...game.world.conversations.values()].some((c) => c.participants.has(p.id)),
       );
       // On shift we keep social reach close to the workplace so a worker doesn't
-      // trek across the map to chat and abandon their post.
-      const leashAnchor = workLeashAnchor(player.name, step);
+      // trek across the map to chat and abandon their post. An agent enlisted in a
+      // scenario is exempt: a universal scenario has no gathering spot, so leashed
+      // participants would never reach each other. A lone worker (James at Marina
+      // Bay Sands, the only person who works there) has a permanently empty pool
+      // and would sit out the scenario entirely.
+      const leashAnchor = this.scenarioId ? undefined : workLeashAnchor(player.name, step);
       let pool: typeof freePlayers;
-      if (!atDest) {
+      if (!settled) {
         // In transit: only greet someone we physically pass.
         pool = freePlayers.filter(
           (p) => distance(p.position, player.position) < SCHEDULE_CHAT_RADIUS,
@@ -1240,6 +1314,14 @@ export class Agent {
         // Settled off-shift: reach map-wide so emergent conversations still form.
         pool = freePlayers;
       }
+      // Don't cross scenario boundaries — the same rule tick() applies to the
+      // free-roam invite. A participant should be talking to the rest of its cast,
+      // not striking up an unrelated chat with whoever wanders past the spot (and
+      // an outsider mustn't be pulled into the scenario's conversation).
+      pool = pool.filter((p) => {
+        const other = [...game.world.agents.values()].find((a) => a.playerId === p.id);
+        return this.scenarioId ? other?.scenarioId === this.scenarioId : !other?.scenarioId;
+      });
       if (pool.length > 0) {
         // Optimistically record the attempt so we don't re-fire every tick when
         // no candidate can actually be invited (e.g. all on the pair cooldown).
@@ -1256,14 +1338,14 @@ export class Agent {
       }
     }
 
-    if (!atDest) {
-      // Walk to the scheduled location.
-      if (
-        !player.pathfinding ||
-        !pointsEqual(player.pathfinding.destination, step.destination)
-      ) {
+    // Still travelling to the spot — but only re-target if we've drifted out of the
+    // milling-about zone entirely. Using the strict `atDest` here would fight the
+    // wander below, dragging the agent back to the exact tile after every step.
+    if (!settled) {
+      // Walk to the scheduled location (or the scenario's meeting spot).
+      if (!player.pathfinding || !pointsEqual(player.pathfinding.destination, destination)) {
         try {
-          movePlayer(game, now, player, step.destination);
+          movePlayer(game, now, player, destination);
         } catch (err) {
           // Movement can throw if in a conversation; ignore and re-try next tick.
           console.warn(`Schedule move failed for ${player.id}: ${(err as Error).message}`);
@@ -1301,7 +1383,7 @@ export class Agent {
         );
       }
       // Game-minute → real-ms: each in-game minute lasts CYCLE_MS / (24*60).
-      const realMsPerGameMinute = (10 * 60 * 1000) / (24 * 60);
+      const realMsPerGameMinute = CYCLE_MS / (24 * 60);
       // Stage 2: sometimes swap in a short contextual micro-event tied to the
       // current block (office events during work hours, flexible ones
       // otherwise), then fall back to the block's base activity afterwards.
@@ -1315,16 +1397,63 @@ export class Agent {
           description: event.description,
           emoji: event.emoji,
           until: now + eventMinutes * realMsPerGameMinute,
+          ambient: true,
         };
       } else {
         player.activity = {
           description: step.activity,
           emoji: step.emoji ?? '💭',
           until: now + minutesLeft * realMsPerGameMinute,
+          ambient: true,
         };
       }
     }
+
+    // Mill about rather than standing on one tile for the whole block. Without
+    // this the map froze solid the moment everyone reached their schedule spot.
+    // The activity keeps running throughout (it's flagged ambient above), so the
+    // agent is still visibly "wiping down the counter" while they cross the shop.
+    this.maybeWanderAtStep(game, now, player, step, destination);
     return true;
+  }
+
+  // The spot this agent's running scenario meets at, while it's actually running.
+  // Acts as a temporary stand-in for the schedule's destination so the cast stays
+  // together for the length of the scenario instead of dispersing the instant the
+  // gathering phase ends. Undefined once the scenario is over, freeing them to
+  // resume their day.
+  scenarioMeetingPoint(game: Game): Point | undefined {
+    const sc = this.activeScenario(game);
+    if (!sc || sc.phase !== 'active') return undefined;
+    if (sc.gatherX === undefined || sc.gatherY === undefined) return undefined;
+    return { x: sc.gatherX, y: sc.gatherY };
+  }
+
+  // Pick a fresh tile near where the agent is meant to be every so often, so a
+  // settled agent drifts around their workplace (or the scenario's meeting spot)
+  // instead of freezing. Deliberately does nothing while asleep (staying in bed is
+  // correct), while already walking, or while a scenario is holding them in place.
+  maybeWanderAtStep(
+    game: Game,
+    now: number,
+    player: import('./player').Player,
+    step: ScheduleStep,
+    center: Point,
+  ): void {
+    if (player.pathfinding) return;
+    if (this.isHeldByScenario(game)) return;
+    if (game.world.playerConversation(player)) return;
+    if (isSleepStep(step)) return;
+    if (this.lastWanderAt && now < this.lastWanderAt + STEP_WANDER_INTERVAL_MS) return;
+    // Jitter the next one so a room full of agents doesn't step in lockstep.
+    this.lastWanderAt = now + Math.floor(Math.random() * STEP_WANDER_INTERVAL_MS);
+    const waypoint = pickParkWaypoint(center, STEP_WANDER_RADIUS, game.worldMap);
+    if (!waypoint || pointsEqual(waypoint, player.position)) return;
+    try {
+      movePlayer(game, now, player, waypoint);
+    } catch (err) {
+      console.warn(`Wander move failed for ${player.id}: ${(err as Error).message}`);
+    }
   }
 
   startOperation<Name extends keyof AgentOperations>(
@@ -1355,6 +1484,7 @@ export class Agent {
       toRemember: this.toRemember,
       lastConversation: this.lastConversation,
       lastInviteAttempt: this.lastInviteAttempt,
+      lastWanderAt: this.lastWanderAt,
       inProgressOperation: this.inProgressOperation,
       scenarioTarget: this.scenarioTarget,
       scenarioName: this.scenarioName,
@@ -1444,8 +1574,14 @@ export class Agent {
     // nothing), while living expenses come out every day. The net over a week is
     // near-neutral, so financial pressure only builds after a shock (e.g. illness)
     // or a run of costly choices — a live signal, not a runaway drain.
+    //
+    // Pay lands FIRST, then expenses are drawn through `spend`, which floors the
+    // balance at zero. Clamping the stored balance up front also heals worlds that
+    // were already running when the ledger was insolvent, so an existing save
+    // recovers on its next day rollover instead of needing a wipe.
     const income = isWeekday(dayNumber) && this.health !== 'sick' ? DAILY_INCOME : 0;
-    this.balance = (this.balance ?? DEFAULT_BALANCE) + income - DAILY_EXPENSES;
+    const afterPay = Math.max(0, this.balance ?? DEFAULT_BALANCE) + income;
+    this.balance = spend(afterPay, DAILY_EXPENSES).balance;
   }
 
   // Short-term accrual when the agent settles into a schedule step: reset hunger on
@@ -1465,9 +1601,7 @@ export class Agent {
     const st = { ...(this.shortTerm ?? defaultShortTerm(now)) };
     const text = `${step.activity} ${step.description}`.toLowerCase();
     const isHome = step.locationId === 'home' || step.locationId === 'hdb';
-    const isSleep = /\b(sleep|sleeping|bed|turning in|going to sleep|rest for the night)\b/.test(
-      text,
-    );
+    const isSleep = isSleepStep(step);
     // A shift at the agent's own workplace is work — never a meal — even if it's the
     // hawker stall (locationId 'restaurant') or the text mentions food/kopi.
     const isMeal =
@@ -1479,11 +1613,16 @@ export class Agent {
     if (isSleep) {
       st.fatigue = FATIGUE_BASELINE;
     } else if (isMeal) {
-      // Eating OUT: resets hunger and costs money.
+      // Eating OUT: resets hunger and costs money — but only if they can actually
+      // cover it. An agent who can't afford the stall eats at home instead: hunger
+      // still resets (they aren't left starving on top of being broke) and nothing
+      // is charged, rather than driving the balance further down.
       st.hunger = HUNGER_BASELINE;
       resetHunger = true;
       this.lastMealDay = dayNumber;
-      this.balance = (this.balance ?? DEFAULT_BALANCE) - MEAL_COST;
+      if (canAfford(this.balance, MEAL_COST)) {
+        this.balance = spend(this.balance, MEAL_COST).balance;
+      }
     } else if (isHome && !isOwnWorkplace) {
       // Settling in at home (morning, evening) means eating at home — free, and it
       // resets hunger. Without this, agents only ever eat at explicitly-detected
@@ -1524,6 +1663,8 @@ export const serializedAgent = {
   toRemember: v.optional(conversationId),
   lastConversation: v.optional(v.number()),
   lastInviteAttempt: v.optional(v.number()),
+  // Throttle for the milling-about wander around a schedule spot.
+  lastWanderAt: v.optional(v.number()),
   inProgressOperation: v.optional(
     v.object({
       name: v.string(),

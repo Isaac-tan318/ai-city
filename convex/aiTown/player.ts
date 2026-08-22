@@ -43,6 +43,14 @@ export const activity = v.object({
   // When set, the activity is a timed task and the UI renders a progress bar that
   // fills from `startedAt` to `until` (used by local-scenario "working" tasks).
   startedAt: v.optional(v.number()),
+  // Ambient activities are what the agent is doing as part of their schedule block
+  // (working their shift, running an errand) rather than a one-off idle beat. They
+  // survive walking around and talking to someone — an agent wiping down the
+  // counter is still wiping down the counter while they cross the cafe or chat to a
+  // regular — so the town keeps moving and conversations can refer to them. A
+  // non-ambient (free-roam) activity is still cancelled the moment the agent moves
+  // or starts a conversation, as before.
+  ambient: v.optional(v.boolean()),
 });
 export type Activity = Infer<typeof activity>;
 

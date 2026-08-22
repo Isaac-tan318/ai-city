@@ -23,7 +23,7 @@ import {
   CONVERSATION_COOLDOWN,
   RELATIONSHIP_EVENT_REASON_MAX_CHARS,
 } from '../constants';
-import { buildShortTermSnapshot } from './shortTerm';
+import { buildShortTermSnapshot, canAfford } from './shortTerm';
 import type { SerializedAgent } from './agent';
 import { api, internal } from '../_generated/api';
 import { sleep } from '../util/sleep';
@@ -421,7 +421,12 @@ export const agentDoSomething = internalAction({
       agent.schedule && agent.currentStepIndex !== undefined
         ? agent.schedule[agent.currentStepIndex]
         : undefined;
-    const leashAnchor = workLeashAnchor(player.name, currentStep);
+    // Scenario participants are exempt from the work leash — see the matching
+    // exemption in Agent.tickSchedule. A leashed participant can never reach the
+    // rest of a universal scenario, which have no gathering spot.
+    const leashAnchor = agent.scenarioId
+      ? undefined
+      : workLeashAnchor(player.name, currentStep);
     // Don't try to start a new conversation if we were just in one.
     const justLeftConversation =
       agent.lastConversation && now < agent.lastConversation + CONVERSATION_COOLDOWN;
@@ -503,9 +508,20 @@ function pickActivity(activities: Activity[], agent: SerializedAgent, now: numbe
     health: agent.health,
     now,
   });
+  // Hard affordability gate before the soft scoring below. The cost penalty alone
+  // is small next to the randomness term, so a broke agent would still sometimes
+  // pick the priciest option and drive their balance down; they simply can't.
+  // Every character in CHARACTER_ACTIVITIES has free options, so the fallback to
+  // zero-cost entries always has something to offer.
+  const affordable = activities.filter((a) => canAfford(agent.balance, a.cost));
+  const choosable =
+    affordable.length > 0 ? affordable : activities.filter((a) => (a.cost ?? 0) === 0);
+  if (choosable.length === 0) {
+    return { description: 'taking a breather', emoji: '😮‍💨', duration: 20_000 };
+  }
   let best: Activity | undefined;
   let bestScore = -Infinity;
-  for (const activity of activities) {
+  for (const activity of choosable) {
     const cost = activity.cost ?? 0;
     const energy = activity.energy ?? 0;
     const score =
@@ -517,7 +533,7 @@ function pickActivity(activities: Activity[], agent: SerializedAgent, now: numbe
       best = activity;
     }
   }
-  return best ?? activities[0];
+  return best ?? choosable[0];
 }
 
 function wanderDestination(worldMap: WorldMap, anchor?: { x: number; y: number }) {

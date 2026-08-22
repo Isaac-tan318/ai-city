@@ -1,19 +1,17 @@
-import { useAction, useQuery } from 'convex/react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useQuery } from 'convex/react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../../convex/_generated/api';
 import { Id } from '../../convex/_generated/dataModel';
 import closeImg from '../../assets/close.svg';
 import interactImg from '../../assets/interact.svg';
 import { SelectElement } from './Player';
 import { Messages } from './Messages';
-import { toast } from 'react-toastify';
+import { ScenarioCreator } from './ScenarioCreator';
 import { toastOnError } from '../toasts';
 import { useSendInput } from '../hooks/sendInput';
 import { GameId } from '../../convex/aiTown/ids';
 import { ServerGame } from '../hooks/serverGame';
 import { computeGameTime } from '../../convex/aiTown/gameTime';
-import type { GeneratedScenarioDraft } from '../../convex/scenarioGen';
-import type { SerializedGeneratedScenario } from '../../convex/aiTown/generatedScenario';
 import {
   affinityColor,
   affinityEmoji,
@@ -26,45 +24,6 @@ import {
   SHORT_TERM_EMOJI,
   type ShortTermComponent,
 } from '../../convex/aiTown/shortTerm';
-import { ALL_SCENARIOS } from '../../data/scenarios';
-
-// The scenario generator offers the same catalogue the automatic system draws
-// from (data/scenarios.ts) — universal town-wide events plus the work/local ones —
-// rather than a separate bespoke list. Work scenarios no longer fire randomly (see
-// convex/aiTown/scenarios.ts) but remain available here for manual injection. A
-// free-form "Custom Scenario" stays at the end.
-// Strip the panel-only fields the engine's input validator doesn't accept.
-function toWireScenario(draft: GeneratedScenarioDraft): SerializedGeneratedScenario {
-  const { reasoning: _reasoning, groundedIn: _groundedIn, ...rest } = draft;
-  return rest;
-}
-
-const scenarioOptions = [
-  ...ALL_SCENARIOS.map((s) => ({
-    id: s.id,
-    emoji: s.emoji,
-    title: s.name,
-    text: s.instruction,
-    name: s.name,
-    background: s.background,
-    // Local/workplace scenarios run through the automatic pipeline (correct
-    // workers + gathering phase); universal ones use the town-wide injector.
-    scope: s.scope as 'universal' | 'local' | undefined,
-    requiresTwoAgents: false,
-  })),
-  {
-    id: 'custom',
-    emoji: '✏️',
-    title: 'Custom Scenario',
-    text: '',
-    name: 'Custom Scenario',
-    background:
-      'A custom scenario you injected. It overrides everyone’s normal routine for the rest of the in-game day.',
-    scope: undefined as 'universal' | 'local' | undefined,
-    requiresTwoAgents: false,
-  },
-];
-
 // Compact "how long ago" label for relationship-event sub-lines.
 function relativeTime(at: number, now: number): string {
   const s = Math.max(0, Math.floor((now - at) / 1000));
@@ -140,29 +99,9 @@ export default function PlayerDetails({
   const player = playerId && game.world.players.get(playerId);
   const playerConversation = player && game.world.playerConversation(player);
 
+  // All the scenario-picking state now lives inside ScenarioCreator; this only
+  // owns whether the modal is open.
   const [injectorOpen, setInjectorOpen] = useState(false);
-  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(
-    scenarioOptions[0]?.id ?? null,
-  );
-  const [scenarioText, setScenarioText] = useState(scenarioOptions[0]?.text ?? '');
-  const [targetAgent1, setTargetAgent1] = useState<GameId<'players'> | ''>('');
-  const [targetAgent2, setTargetAgent2] = useState<GameId<'players'> | ''>('');
-
-  const activeScenario = useMemo(
-    () => scenarioOptions.find((scenario) => scenario.id === selectedScenarioId) ?? null,
-    [selectedScenarioId],
-  );
-  const showTargetSelectors = activeScenario?.requiresTwoAgents ?? false;
-
-  useEffect(() => {
-    if (playerId) {
-      setTargetAgent1(playerId);
-      if (targetAgent2 === playerId) {
-        const nextAgent = players.find((p) => p.id !== playerId)?.id ?? '';
-        setTargetAgent2(nextAgent);
-      }
-    }
-  }, [playerId, game, targetAgent2, players]);
 
   const previousConversation = useQuery(
     api.world.previousConversation,
@@ -249,149 +188,11 @@ export default function PlayerDetails({
   const acceptInvite = useSendInput(engineId, 'acceptInvite');
   const rejectInvite = useSendInput(engineId, 'rejectInvite');
   const leaveConversation = useSendInput(engineId, 'leaveConversation');
-  const startCustomScenario = useSendInput(engineId, 'startCustomScenario');
-  const startGeneratedScenario = useSendInput(engineId, 'startGeneratedScenario');
-  const draftScenario = useAction(api.scenarioGen.draftScenario);
-  const [generatedDraft, setGeneratedDraft] = useState<GeneratedScenarioDraft | null>(null);
-  const [generating, setGenerating] = useState(false);
-  const startCatalogScenario = useSendInput(engineId, 'startCatalogScenario');
-  const clearScenario = useSendInput(engineId, 'clearScenario');
-
-  const setDefaultSecondTarget = (primaryTarget: GameId<'players'> | '') => {
-    if (!primaryTarget) {
-      setTargetAgent2('');
-      return;
-    }
-    const nextAgent = players.find((p) => p.id !== primaryTarget)?.id ?? '';
-    setTargetAgent2(nextAgent);
-  };
-
-  const onOpenInjector = (primaryTarget?: GameId<'players'>) => {
-    setInjectorOpen(true);
-    if (!selectedScenarioId && scenarioOptions[0]) {
-      setSelectedScenarioId(scenarioOptions[0].id);
-      setScenarioText(scenarioOptions[0].text ?? '');
-    }
-    if (primaryTarget) {
-      setTargetAgent1(primaryTarget);
-      if (targetAgent2 === primaryTarget || !targetAgent2) {
-        setDefaultSecondTarget(primaryTarget);
-      }
-    }
-  };
-
-  // The panel opens below the fold of a short sidebar, so bring it into view.
-  const injectorRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!injectorOpen) return;
-    // A frame late, so the panel has its final height before we scroll to it.
-    const frame = requestAnimationFrame(() =>
-      injectorRef.current?.scrollIntoView({ block: 'start' }),
-    );
-    return () => cancelAnimationFrame(frame);
-  }, [injectorOpen]);
-
-  // Preset and generated instructions run several lines long; grow the box to fit
-  // them (up to a cap) instead of leaving the text hidden behind a scrollbar.
-  const scenarioTextareaRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => {
-    const node = scenarioTextareaRef.current;
-    if (!node) return;
-    node.style.height = 'auto';
-    node.style.height = `${Math.min(node.scrollHeight, 180)}px`;
-  }, [scenarioText, injectorOpen, selectedScenarioId]);
-
-  const onSelectScenario = (scenarioId: string) => {
-    const scenario = scenarioOptions.find((entry) => entry.id === scenarioId);
-    // Picking from the catalogue discards a pending generated draft — otherwise
-    // Start would quietly fire the generated one instead of what's selected.
-    setGeneratedDraft(null);
-    setSelectedScenarioId(scenarioId);
-    setScenarioText(scenario?.text ?? '');
-    if (scenario?.requiresTwoAgents) {
-      const primaryTarget = targetAgent1 || (player?.id ?? '');
-      if (primaryTarget) {
-        if (!targetAgent2 || targetAgent2 === primaryTarget) {
-          setDefaultSecondTarget(primaryTarget);
-        }
-      }
-    }
-  };
-
-  // Ask the Decider to invent a situation from the town's actual state. It only
-  // drafts — firing it stays a separate, deliberate click, so a bad premise can be
-  // edited or thrown away first.
-  const onGenerateScenario = async () => {
-    if (!worldId) return;
-    setGenerating(true);
-    try {
-      const draft = await draftScenario({ worldId });
-      if (!draft) {
-        toast.error("The Decider couldn't come up with anything usable. Try again.");
-        return;
-      }
-      setGeneratedDraft(draft);
-      setScenarioText(draft.instruction);
-    } catch (err) {
-      toast.error((err as Error).message);
-    } finally {
-      setGenerating(false);
-    }
-  };
-
-  const onStartScenario = async () => {
-    if (!scenarioText.trim()) {
-      toast.error('Write your scenario instructions before starting.');
-      return;
-    }
-    // A generated scenario carries its own topics, conflict and completion goal,
-    // so it runs the full decision pipeline rather than the free-text injector.
-    if (generatedDraft) {
-      await toastOnError(
-        startGeneratedScenario({
-          scenario: { ...toWireScenario(generatedDraft), instruction: scenarioText.trim() },
-          manual: true,
-        }),
-      );
-      setGeneratedDraft(null);
-      setInjectorOpen(false);
-      return;
-    }
-    if (!selectedScenarioId) {
-      toast.error('Select a scenario to start.');
-      return;
-    }
-    const scenario = scenarioOptions.find((entry) => entry.id === selectedScenarioId);
-    if (scenario?.scope === 'local') {
-      // Workplace scenarios run the real pipeline: only the workplace's workers
-      // take part and they gather there first, just like a randomly-fired one.
-      await toastOnError(
-        startCatalogScenario({ scenarioId: scenario.id, instruction: scenarioText.trim() }),
-      );
-    } else {
-      // Universal and free-form custom scenarios use the town-wide injector,
-      // carrying the scenario's name/emoji/background so the panel reflects it.
-      await toastOnError(
-        startCustomScenario({
-          instruction: scenarioText.trim(),
-          name: scenario?.name,
-          emoji: scenario?.emoji,
-          background: scenario?.background,
-        }),
-      );
-    }
-    setInjectorOpen(false);
-  };
-
-  const onClearScenario = async () => {
-    await toastOnError(clearScenario({}));
-    toast.success('Scenario cleared — agents will resume normal behaviour.');
-  };
 
   const scenarioButton = (
     <button
       className="button text-white shadow-solid text-xl cursor-pointer pointer-events-auto"
-      onClick={() => onOpenInjector(player?.id)}
+      onClick={() => setInjectorOpen(true)}
       type="button"
     >
       <div className="h-full bg-clay-700 flex items-center gap-2 px-3">
@@ -401,216 +202,17 @@ export default function PlayerDetails({
     </button>
   );
 
+  // The creator is a full-screen modal (src/components/ScenarioCreator.tsx) rather
+  // than an inline panel: the sidebar is ~24rem wide, which left the catalogue as a
+  // cramped grid of truncated titles with nowhere to show what each scenario is.
   const scenarioInjector = injectorOpen && (
-    <div
-      ref={injectorRef}
-      className={
-        'scenario-injector mt-4 flex w-full min-w-0 flex-col overflow-hidden box ' +
-        'bg-gradient-to-br from-[#2d2438] to-[#1d1826] ' +
-        // With no agent selected the panel owns the sidebar, so it fills the space
-        // and scrolls internally — down to a floor, past which the sidebar scrolls
-        // rather than the actions getting clipped. With an agent selected it sits
-        // in the details flow at its natural height (shrink-0, or overflow-hidden
-        // lets flexbox crush it).
-        (playerId ? 'shrink-0' : 'min-h-[22rem] flex-1')
-      }
-    >
-      <div className="shrink-0 bg-brown-700 p-3 flex items-center gap-2 text-lg sm:text-xl font-display tracking-widest">
-        <span className="min-w-0 flex-1 truncate text-center">Scenario Injector</span>
-        <button
-          className="button text-white shadow-solid text-2xl cursor-pointer pointer-events-auto"
-          type="button"
-          onClick={() => setInjectorOpen(false)}
-          aria-label="Close scenario injector"
-        >
-          <h2 className="h-full bg-clay-700">
-            <img className="w-4 h-4 sm:w-5 sm:h-5" src={closeImg} alt="" />
-          </h2>
-        </button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-4 flex flex-col gap-4 text-sm sm:text-base">
-        <div className="grid gap-2">
-          <div className="text-xs uppercase tracking-widest text-amber-200/80">
-            Choose a scenario
-          </div>
-          <div className="scenario-scroll grid grid-cols-2 auto-rows-auto gap-2 max-h-56 overflow-y-auto pr-1">
-            {scenarioOptions.map((scenario) => {
-              const isActive = scenario.id === selectedScenarioId;
-              const isCustom = scenario.id === 'custom';
-              return (
-                <button
-                  key={scenario.id}
-                  className={
-                    'scenario-card group relative flex h-full flex-col gap-1 rounded-lg border p-3 text-left transition ' +
-                    (isActive
-                      ? 'border-amber-300 bg-amber-300/15 ring-1 ring-amber-300/60 shadow-[0_0_12px_-2px_rgba(252,211,77,0.5)]'
-                      : isCustom
-                        ? 'border-dashed border-amber-200/40 bg-white/5 hover:border-amber-300/70 hover:bg-amber-300/5'
-                        : 'border-white/10 bg-white/5 hover:border-white/40 hover:bg-white/10')
-                  }
-                  type="button"
-                  onClick={() => onSelectScenario(scenario.id)}
-                  aria-pressed={isActive}
-                >
-                  {isActive && (
-                    <span className="absolute right-2 top-2 text-amber-300" aria-hidden>
-                      ✓
-                    </span>
-                  )}
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="shrink-0 text-lg leading-none" aria-hidden>
-                      {scenario.emoji}
-                    </span>
-                    <span
-                      className={
-                        'min-w-0 break-words font-display text-sm leading-tight tracking-wide ' +
-                        (isActive ? 'text-amber-100' : 'text-white/90')
-                      }
-                    >
-                      {scenario.title}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {showTargetSelectors && (
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="flex min-w-0 flex-col gap-1 text-xs uppercase tracking-widest text-amber-200/80">
-              Agent 1
-              <select
-                className="scenario-select w-full min-w-0 rounded bg-black/40 border border-white/20 px-2 py-2 text-sm"
-                value={targetAgent1}
-                onChange={(event) => {
-                  const value = event.target.value as GameId<'players'>;
-                  setTargetAgent1(value);
-                  if (value === targetAgent2) {
-                    setDefaultSecondTarget(value);
-                  }
-                }}
-              >
-                <option value="">Select agent</option>
-                {players.map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {getPlayerLabel(agent)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="flex min-w-0 flex-col gap-1 text-xs uppercase tracking-widest text-amber-200/80">
-              Agent 2
-              <select
-                className="scenario-select w-full min-w-0 rounded bg-black/40 border border-white/20 px-2 py-2 text-sm"
-                value={targetAgent2}
-                onChange={(event) => setTargetAgent2(event.target.value as GameId<'players'>)}
-              >
-                <option value="">Select agent</option>
-                {players
-                  .filter((agent) => !targetAgent1 || agent.id !== targetAgent1)
-                  .map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {getPlayerLabel(agent)}
-                    </option>
-                  ))}
-              </select>
-            </label>
-          </div>
-        )}
-
-        {/* A scenario the Decider invented from what has actually happened here,
-            staged for review before it fires. */}
-        {generatedDraft && (
-          <div className="rounded-lg border border-amber-300/40 bg-amber-300/10 px-3 py-2">
-            <div className="text-sm font-bold text-amber-100">
-              {generatedDraft.emoji} {generatedDraft.name}
-            </div>
-            {generatedDraft.reasoning && (
-              <p className="mt-1 text-[11px] leading-snug text-white/60">
-                {generatedDraft.reasoning}
-              </p>
-            )}
-            {generatedDraft.groundedIn.length > 0 && (
-              <p className="mt-1 text-[11px] leading-snug text-white/40">
-                Built on: {generatedDraft.groundedIn.join('; ')}
-              </p>
-            )}
-          </div>
-        )}
-
-        <div className="grid gap-2">
-          <div className="flex items-center justify-between">
-            <label
-              htmlFor="scenario-instructions"
-              className="text-xs uppercase tracking-widest text-amber-200/80"
-            >
-              {selectedScenarioId === 'custom' ? 'Your instructions' : 'What gets injected'}
-            </label>
-            <span className="text-[10px] uppercase tracking-widest text-white/35">
-              {scenarioText.trim().length} chars
-            </span>
-          </div>
-          <textarea
-            id="scenario-instructions"
-            ref={scenarioTextareaRef}
-            className={
-              'w-full min-h-[5rem] resize-y rounded-lg border px-3 py-2 text-sm sm:text-base bg-black/40 text-white/90 placeholder:text-white/30 transition outline-none ' +
-              'border-amber-200/25 focus:border-amber-300 focus:ring-1 focus:ring-amber-300/50'
-            }
-            placeholder={
-              selectedScenarioId === 'custom'
-                ? 'e.g. "Everyone is secretly a spy who must not reveal their identity"'
-                : 'Describe the scenario you want to inject...'
-            }
-            rows={4}
-            autoFocus={selectedScenarioId === 'custom'}
-            value={scenarioText}
-            onChange={(event) => setScenarioText(event.target.value)}
-          />
-          <p className="text-[11px] leading-snug text-white/40">
-            Every agent reacts to this in character, then reshapes their day around it.
-          </p>
-        </div>
-      </div>
-
-      {/* Outside the scrolling body so the actions stay reachable, and split over
-          two rows because the sidebar is too narrow for three side by side. */}
-      <div className="shrink-0 grid grid-cols-1 sm:grid-cols-[auto_minmax(0,1fr)] gap-2 border-t border-white/10 p-4">
-        <button
-          className="button min-w-0 text-white shadow-solid text-sm cursor-pointer pointer-events-auto opacity-80 hover:opacity-100"
-          type="button"
-          onClick={onClearScenario}
-          title="Remove any active scenario from all agents"
-        >
-          <div className="h-full flex items-center justify-center truncate bg-clay-700 px-2 py-2">
-            Clear
-          </div>
-        </button>
-        <button
-          className="button min-w-0 text-white shadow-solid text-sm cursor-pointer pointer-events-auto opacity-80 hover:opacity-100 disabled:opacity-40 disabled:cursor-not-allowed"
-          type="button"
-          onClick={onGenerateScenario}
-          disabled={generating}
-          title="Have the Decider invent a new situation from what has happened in town"
-        >
-          <div className="h-full flex items-center justify-center truncate bg-clay-700 px-2 py-2">
-            {generating ? 'Thinking…' : '✨ Generate'}
-          </div>
-        </button>
-        <button
-          className="button col-span-full min-w-0 text-white shadow-solid text-sm sm:text-base cursor-pointer pointer-events-auto disabled:opacity-40 disabled:cursor-not-allowed"
-          type="button"
-          onClick={onStartScenario}
-          disabled={!scenarioText.trim()}
-        >
-          <div className="h-full flex items-center justify-center gap-2 truncate bg-clay-700 px-3 py-2">
-            <span aria-hidden>▶</span> Start scenario
-          </div>
-        </button>
-      </div>
-    </div>
+    <ScenarioCreator
+      worldId={worldId}
+      engineId={engineId}
+      onClose={() => setInjectorOpen(false)}
+    />
   );
+
 
   if (!playerId) {
     // Only pad vertically: the column already pads horizontally, and doubling it

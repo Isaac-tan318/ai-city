@@ -65,6 +65,12 @@ export const SCENARIO_GATHER_TIMEOUT = 5 * 60_000;
 export const SCENARIO_EVAL_INTERVAL = 3_000;
 // Default lifetime of an active scenario (real ms) unless its def overrides it.
 export const SCENARIO_DEFAULT_DURATION_MS = 4 * 60_000;
+// Lifetime of a scenario the user started by hand from the scenario creator. The
+// automatic default is sized for a scenario that fires while everyone is already
+// going about their day; a manual one has to cover participants converging AND a
+// full deliberation, and a decision scenario that expires mid-deliberation scores
+// nothing at all. Longer, but still bounded.
+export const SCENARIO_MANUAL_DURATION_MS = 10 * 60_000;
 // Cooldown (real ms) before the same scope/location can host another scenario.
 export const SCENARIO_COOLDOWN_MS = 3 * 60_000;
 // The next scenario starts on a timer — a random gap in this range after the
@@ -78,6 +84,37 @@ export const SCENARIO_RETRY_MS = 20_000;
 export const SCENARIO_FIRST_DELAY_MS = 30_000;
 // Cap on how many universal (town-wide) scenarios can run at once.
 export const MAX_UNIVERSAL_SCENARIOS = 1;
+// Largest cast a town-wide (or custom) scenario will enlist. Universal scenarios
+// used to sweep in every free agent, so every situation involved the whole town —
+// which reads like an announcement rather than something happening to a group, and
+// gives a decision scenario eight sets of hidden constraints to reconcile. The
+// actual size is drawn randomly between the scenario's minParticipants and this,
+// so the cast varies run to run. Matches MAX_CONVERSATION_PARTICIPANTS so the
+// whole group can hold a single conversation.
+export const SCENARIO_PARTICIPANT_MAX = 5;
+// Floor on the cast of a free-form custom scenario. Catalogue scenarios carry
+// their own `minParticipants`; a custom one has no def, and a scenario needs at
+// least two people for anything to actually happen between them.
+export const SCENARIO_CUSTOM_MIN_PARTICIPANTS = 2;
+
+// --- Who ends up in a scenario together (see togethernessScore) ---
+// Affinity (0–100) says who LIKES whom, which on its own picks casts scattered
+// across the map. These bonuses add the reasons two residents would actually be
+// caught up in the same situation, on the same 0–100 scale so they read as
+// "worth this much affinity".
+// Related — the strongest standing reason to be doing something together.
+export const SCENARIO_FAMILY_BONUS = 45;
+// Colleagues share a workplace, so they're together most of the working day.
+export const SCENARIO_WORKPLACE_BONUS = 35;
+// Neighbours in the same block run into each other constantly.
+export const SCENARIO_NEIGHBOUR_BONUS = 20;
+// Standing near each other right now: full bonus when adjacent, tapering to zero
+// at the falloff distance. This is what stops a scenario reaching across the map.
+export const SCENARIO_PROXIMITY_BONUS = 60;
+export const SCENARIO_PROXIMITY_FALLOFF_TILES = 25;
+// Randomness in the draw, sized against the terms above so the same clique doesn't
+// assemble every single time while the reasons above still dominate.
+export const SCENARIO_PICK_NOISE = 55;
 
 // --- Local-scenario gathering (travel-time arrival) ---
 // Slack (real ms) added to the slowest participant's estimated travel time when
@@ -87,6 +124,17 @@ export const SCENARIO_GATHER_BUFFER_MS = 8_000;
 // Hard cap (real ms) on the gathering phase. If a participant is blocked or
 // can't reach the spot, the scenario promotes to active anyway so it never stalls.
 export const SCENARIO_GATHER_MAX_MS = 90_000;
+// A scenario whose cast is asleep or on shift queues in the 'waiting' phase and
+// starts as soon as enough of them come free. This caps that wait: past it the
+// scenario starts anyway, so a cast whose schedules never line up can't queue
+// forever. Roughly a third of an in-game day, long enough to cover a work shift
+// ending or a night passing.
+export const SCENARIO_WAIT_MAX_MS = 6 * 60_000;
+// What fraction of the cast must be free before a queued scenario starts. A clear
+// majority, not a bare quorum: firing the moment two of five are off shift means
+// the other three get pulled out of work to attend, which is what waiting exists
+// to prevent.
+export const SCENARIO_READY_FRACTION = 2 / 3;
 
 // Leave a conversation after participating too long.
 export const MAX_CONVERSATION_DURATION = 10 * 60_000; // more time locally
@@ -144,6 +192,13 @@ export const FOCAL_DECIDE_MESSAGE_HEADROOM = 4;
 // Force a decision once the scenario is within this long of expiring, so a
 // deliberation always resolves into something the evaluator can score.
 export const FOCAL_FORCE_DECIDE_MS = 90_000;
+// The focal agent only ever acts from inside a scenario conversation, so a focal
+// agent who never joins one (stuck alone at a distant workplace, leashed on shift,
+// off on a schedule step nobody else shares) stalls the whole deliberation for the
+// scenario's entire life. If the focal agent still isn't in a conversation with a
+// fellow participant this long after the content window opened, the scenario
+// manager hands the role to a participant who is. See maybeReassignFocalAgent.
+export const FOCAL_REASSIGN_MS = 45_000;
 
 // How long the "💡 +N memory" floater and the "❓" question pulse stay on screen
 // after the focal turn that produced them.
@@ -346,6 +401,23 @@ export const DEFAULT_NAME = 'Me';
 // Tile distance at which an agent counts as "arrived" at a scheduled location.
 export const ARRIVAL_RADIUS = 1.5;
 
+// --- Milling about at a scheduled location ---
+// Having arrived, an agent used to stand on one tile for the entire schedule block,
+// which made every workplace look frozen. Instead they drift between tiles within
+// this radius of the spot, keeping their activity running the whole time. The
+// radius is well inside WORK_LEASH_RADIUS, so a wandering worker still reads as
+// being "at" their workplace and their invite pool doesn't change.
+export const STEP_WANDER_RADIUS = 4;
+// How far from the spot an agent still counts as "settled there, just milling
+// about". Strictly wider than STEP_WANDER_RADIUS because pickParkWaypoint rounds
+// its candidate to a tile and can land a fraction past the radius — without the
+// margin, a legitimate wander would read as "left the destination" and the agent
+// would be marched straight back, oscillating instead of drifting.
+export const STEP_SETTLED_RADIUS = STEP_WANDER_RADIUS + 1;
+// How often (real ms) a settled agent picks a new nearby tile to drift to. Jittered
+// per move so a room full of agents doesn't step in lockstep.
+export const STEP_WANDER_INTERVAL_MS = 12_000;
+
 // If an agent's current schedule step has been overdue for this many game-minutes
 // AND they still haven't reached the location, trigger a re-plan.
 export const SCHEDULE_DISRUPTION_MINUTES = 60;
@@ -382,7 +454,7 @@ export const SICK_MAX_PROBABILITY = 0.5;
 export const SICK_DURATION_DAYS = 2;
 // Chance a well agent catches the illness from a sick partner during a single
 // conversation (rolled once per conversation).
-export const CONTAGION_PROBABILITY = 0.25;
+export const CONTAGION_PROBABILITY = 0.0625;
 
 // --- Short-term memory (dynamic per-agent affective/physiological state) ---
 // Four gauges on a 0–100 scale, distinct from the durable `profile`. Unlike
@@ -420,13 +492,22 @@ export const MAX_LEARNED_TRAITS = 6;
 // 0–100 gauge derived from how far the balance sits below the comfort threshold.
 export const DEFAULT_BALANCE = 400;
 // Credited to a working agent at each weekday rollover (a day's pay).
-export const DAILY_INCOME = 120;
+export const DAILY_INCOME = 150;
 // Living costs (rent, transport, utilities) deducted EVERY day, weekends included.
-// Tuned so weekday pay roughly covers a full week of expenses + meals, leaving the
-// balance near-neutral in the long run but dipping into pressure after a shock
-// (e.g. a sick spell with no income) or a spendy stretch — so financial pressure
-// is a live, situational signal rather than always 0 or a runaway death spiral.
-export const DAILY_EXPENSES = 85;
+//
+// The week has to balance across FOUR flows, not two — the earlier tuning counted
+// only income and expenses and left everyone insolvent within a fortnight:
+//   + income     5 weekdays x DAILY_INCOME            = +750
+//   - sick days  ~0.75 lost weekdays/wk (burnout roll) ≈ -113
+//   - expenses   7 days x DAILY_EXPENSES              = -525
+//   - meals      ~2 meal steps/day x MEAL_COST        ≈ -112
+// A healthy week nets roughly +113 and a week with a sick spell nets roughly -187,
+// so the balance drifts near-neutral overall while still dipping into real pressure
+// after a shock or a spendy stretch. Financial pressure stays a live, situational
+// signal rather than pinning at 100 forever. Spending is additionally floored at
+// zero (see `spend` in convex/aiTown/shortTerm.ts) so an agent can be broke but
+// never in debt.
+export const DAILY_EXPENSES = 75;
 // At/above this balance financial pressure is 0; at 0 it is 100 (linear between).
 export const FINANCIAL_COMFORT_THRESHOLD = 300;
 // Default cost of an activity when its Activity def omits `cost` (most are free).

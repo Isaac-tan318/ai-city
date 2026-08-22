@@ -21,13 +21,28 @@ import {
   type ScenarioDef,
   type ScenarioScope,
 } from '../../data/scenarios';
-import { CHARACTER_WORKPLACES, getLocationById } from '../../data/cityLocations';
+import {
+  CHARACTER_HOMES,
+  CHARACTER_WORKPLACES,
+  CITY_LOCATIONS,
+  getLocationById,
+  workLeashAnchor,
+} from '../../data/cityLocations';
 import { computeGameTime } from './gameTime';
+import { isSleepStep } from '../../data/routines';
 import { estimateTravelTimeMs, stopPlayer } from './movement';
 import { distance } from '../util/geometry';
 import {
+  FOCAL_REASSIGN_MS,
   MAX_UNIVERSAL_SCENARIOS,
   SCENARIO_ARRIVAL_RADIUS,
+  SCENARIO_FAMILY_BONUS,
+  SCENARIO_NEIGHBOUR_BONUS,
+  SCENARIO_PARTICIPANT_MAX,
+  SCENARIO_PICK_NOISE,
+  SCENARIO_PROXIMITY_BONUS,
+  SCENARIO_PROXIMITY_FALLOFF_TILES,
+  SCENARIO_WORKPLACE_BONUS,
   SCENARIO_COOLDOWN_MS,
   SCENARIO_DEFAULT_DURATION_MS,
   SCENARIO_EVAL_INTERVAL,
@@ -36,7 +51,10 @@ import {
   SCENARIO_GATHER_MAX_MS,
   SCENARIO_INTERVAL_MAX_MS,
   SCENARIO_INTERVAL_MIN_MS,
+  SCENARIO_MANUAL_DURATION_MS,
+  SCENARIO_READY_FRACTION,
   SCENARIO_RETRY_MS,
+  SCENARIO_WAIT_MAX_MS,
   SCENARIO_TASK_PLAN_TIMEOUT_MS,
   SCENARIO_GENERATION_PROBABILITY,
   SCENARIO_GENERATION_TIMEOUT_MS,
@@ -83,10 +101,16 @@ export function tickScenarios(game: Game, now: number): void {
       clearScenarioParticipants(game, sc.id);
       cooldowns[scopeKeyFor(sc.scope, sc.locationId)] = now + SCENARIO_COOLDOWN_MS;
     } else {
+      // Queued because the cast was asleep or on shift: start it the moment enough
+      // of them are free (or when the wait deadline runs out).
+      maybeBeginWaitingScenario(game, now, sc);
       // While gathering, promote to active once everyone has arrived at the spot
       // (or the gather deadline passes), so the content window runs from the real
       // start rather than being eaten by travel time.
       maybePromoteScenario(game, now, sc);
+      // Decision scenario: hand the focal role to someone who is actually in the
+      // room if the designated focal agent never turned up.
+      maybeReassignFocalAgent(game, now, sc);
       // Decision scenario: the focal agent has committed to an option, so score
       // the outcome against everyone's hidden ground truth. Fired here rather
       // than from the input handler so the expiry path below shares the code.
@@ -205,6 +229,196 @@ function nameOf(game: Game, agent: Agent): string | undefined {
   return game.playerDescriptions.get(agent.playerId)?.name;
 }
 
+// How plausible it is that these two would end up doing something together right
+// now. Affinity says who LIKES whom; on its own that produces casts scattered
+// across the map with no reason to have run into each other. These extra terms are
+// the reasons two residents actually share a situation: they're related, they work
+// the same place, they live in the same block, or they're simply standing near
+// each other at this moment.
+function togethernessScore(game: Game, a: Agent, b: Agent): number {
+  let score = a.affinityFor(game, b.playerId); // 0..100
+
+  const aName = nameOf(game, a);
+  const bName = nameOf(game, b);
+
+  // Family: the strongest standing reason to be doing something together.
+  const family = game.agentDescriptions.get(a.id)?.family;
+  if (bName && family?.some((tie) => tie.name === bName)) {
+    score += SCENARIO_FAMILY_BONUS;
+  }
+  if (aName && bName) {
+    // Colleagues share a workplace, so they're together most of the working day.
+    const aWork = CHARACTER_WORKPLACES[aName]?.locationId;
+    const bWork = CHARACTER_WORKPLACES[bName]?.locationId;
+    if (aWork && bWork && aWork === bWork) score += SCENARIO_WORKPLACE_BONUS;
+    // Neighbours run into each other at the void deck and on the stairs.
+    const aHome = CHARACTER_HOMES[aName]?.locationId;
+    const bHome = CHARACTER_HOMES[bName]?.locationId;
+    if (aHome && bHome && aHome === bHome) score += SCENARIO_NEIGHBOUR_BONUS;
+  }
+
+  // Physical proximity right now, tapering to nothing at the falloff distance.
+  // This is what stops a scenario pulling someone from the far side of the map.
+  const aPlayer = game.world.players.get(a.playerId);
+  const bPlayer = game.world.players.get(b.playerId);
+  if (aPlayer && bPlayer) {
+    const tiles = distance(aPlayer.position, bPlayer.position);
+    const closeness = Math.max(0, 1 - tiles / SCENARIO_PROXIMITY_FALLOFF_TILES);
+    score += SCENARIO_PROXIMITY_BONUS * closeness;
+  }
+  return score;
+}
+
+// Choose who actually takes part in a town-wide scenario.
+//
+// Universal scenarios used to enlist EVERY free agent, so every dinner argument,
+// movie-night pick and downpour involved all eight residents at once. That reads
+// as a town-wide announcement rather than something happening to some people, and
+// it makes deliberations unwieldy (eight sets of hidden constraints to satisfy).
+//
+// Instead: a random group size in [min, SCENARIO_PARTICIPANT_MAX], seeded on a
+// random candidate and grown by repeatedly adding whoever the group has the most
+// reason to be with (see togethernessScore) — with enough noise that the same
+// clique doesn't form every time.
+export function pickScenarioParticipants(
+  game: Game,
+  candidates: Agent[],
+  minParticipants: number,
+): Agent[] {
+  const min = Math.max(1, minParticipants);
+  const max = Math.max(min, Math.min(candidates.length, SCENARIO_PARTICIPANT_MAX));
+  if (candidates.length <= min) return candidates;
+  const targetSize = min + Math.floor(Math.random() * (max - min + 1));
+
+  const pool = [...candidates];
+  const chosen: Agent[] = [];
+  // Seed uniformly so the group isn't always anchored on the same sociable agent.
+  chosen.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+
+  while (chosen.length < targetSize && pool.length > 0) {
+    let bestIndex = 0;
+    let bestScore = -Infinity;
+    for (let i = 0; i < pool.length; i++) {
+      const candidate = pool[i];
+      // Averaged over the group so we grow a cluster rather than a chain of
+      // pairwise-closest strangers.
+      let sum = 0;
+      for (const member of chosen) {
+        sum += togethernessScore(game, member, candidate);
+      }
+      const score = sum / chosen.length + Math.random() * SCENARIO_PICK_NOISE;
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = i;
+      }
+    }
+    chosen.push(pool.splice(bestIndex, 1)[0]);
+  }
+  return chosen;
+}
+
+// Is this agent in a position to drop what they're doing and go and talk?
+//
+// Two things make it unreasonable: they're asleep, or they're on shift at their
+// own workplace — a hawker mid-service can't wander off to argue about dinner. The
+// schedule step is the single source of truth for both, so no extra state.
+function isFreeForScenario(game: Game, agent: Agent): boolean {
+  const player = game.world.players.get(agent.playerId);
+  if (!player) return false;
+  const step =
+    agent.schedule && agent.currentStepIndex !== undefined
+      ? agent.schedule[agent.currentStepIndex]
+      : undefined;
+  // No plan yet (fresh world, mid-replan) — treat them as available rather than
+  // stalling every scenario until the LLM planner has caught up.
+  if (!step) return true;
+  if (isSleepStep(step)) return false;
+  if (workLeashAnchor(player.name, step)) return false;
+  return true;
+}
+
+// Are enough of the cast free for the scenario to be worth starting? Requires a
+// clear majority rather than a bare quorum: starting the moment two of five are
+// off shift means the other three get yanked out of work to attend, which is the
+// thing waiting is meant to avoid.
+function enoughAreFree(game: Game, participants: Agent[], minParticipants: number): boolean {
+  const freeNow = participants.filter((a) => isFreeForScenario(game, a)).length;
+  const needed = Math.max(
+    minParticipants,
+    Math.ceil(participants.length * SCENARIO_READY_FRACTION),
+  );
+  return freeNow >= needed;
+}
+
+// Where a cast without a fixed venue should meet: the named landmark closest to
+// the middle of the group. Using a real location (rather than the bare centroid)
+// means they gather somewhere that reads as a place — and because the cast is
+// picked for proximity, that landmark is normally already near all of them.
+function meetingPointFor(game: Game, participants: Agent[]): { x: number; y: number } | undefined {
+  const positions = participants
+    .map((a) => game.world.players.get(a.playerId)?.position)
+    .filter((p): p is { x: number; y: number } => !!p);
+  if (positions.length === 0) return undefined;
+  const centroid = {
+    x: positions.reduce((sum, p) => sum + p.x, 0) / positions.length,
+    y: positions.reduce((sum, p) => sum + p.y, 0) / positions.length,
+  };
+  let best: { x: number; y: number } | undefined;
+  let bestDistance = Infinity;
+  for (const loc of CITY_LOCATIONS) {
+    const d = distance(centroid, { x: loc.x, y: loc.y });
+    if (d < bestDistance) {
+      bestDistance = d;
+      best = { x: loc.x, y: loc.y };
+    }
+  }
+  return best;
+}
+
+// Stamp the scenario onto its cast and open the content window: send them to the
+// meeting spot (phase 'gathering') or, with no spot, start talking where they are.
+//
+// Split out of startScenario because a scenario may sit in 'waiting' for a while
+// first — the directive and the walk order must not land until the scenario really
+// begins, otherwise the cast re-plans around a situation that hasn't started.
+function beginScenarioContent(game: Game, now: number, sc: SerializedActiveScenario): void {
+  const participants = [...game.world.agents.values()].filter((a) => a.scenarioId === sc.id);
+  const gatherPoint =
+    sc.gatherX !== undefined && sc.gatherY !== undefined
+      ? { x: sc.gatherX, y: sc.gatherY }
+      : undefined;
+
+  let contentStartTime = now;
+  if (gatherPoint) {
+    let maxEta = 0;
+    for (const a of participants) {
+      const p = game.world.players.get(a.playerId);
+      if (!p) continue;
+      maxEta = Math.max(maxEta, estimateTravelTimeMs(game, now, p, gatherPoint));
+    }
+    contentStartTime = now + Math.min(maxEta + SCENARIO_GATHER_BUFFER_MS, SCENARIO_GATHER_MAX_MS);
+  }
+
+  for (const a of participants) {
+    a.scenarioInstruction = sc.instruction;
+    if (gatherPoint) {
+      // Agent.tick walks them here deterministically until they arrive — no
+      // re-plan needed, and none forced: the gather branch runs ahead of the
+      // schedule, so a forced plan would just fight the walk.
+      a.scenarioTarget = gatherPoint;
+      a.scenarioArrivalTime = contentStartTime;
+    }
+    // Force re-extraction of the scenario-relevant profile for this scenario.
+    delete a.scenarioProfile;
+    delete a.scenarioProfileFor;
+  }
+
+  sc.phase = gatherPoint ? 'gathering' : 'active';
+  sc.contentStartTime = contentStartTime;
+  sc.endTime = contentStartTime + (sc.durationMs ?? SCENARIO_DEFAULT_DURATION_MS);
+  delete sc.waitUntil;
+}
+
 export function startScenario(
   game: Game,
   now: number,
@@ -213,6 +427,9 @@ export function startScenario(
   // an edited instruction still flows through this pipeline). Topics/goal/gather
   // all stay from the def.
   instructionOverride?: string,
+  // Optional lifetime override (real ms). Manual starts run longer than automatic
+  // ones — see SCENARIO_MANUAL_DURATION_MS.
+  durationOverride?: number,
 ): SerializedActiveScenario | undefined {
   const world = game.world;
   const instruction = instructionOverride?.trim() || def.instruction;
@@ -222,7 +439,8 @@ export function startScenario(
   const free = [...world.agents.values()].filter((a) => !a.scenarioId && !a.scenarioInstruction);
   let participants: Agent[];
   if (def.scope === 'universal') {
-    participants = free;
+    // A town-wide scenario happens to SOME people, not the entire cast at once.
+    participants = pickScenarioParticipants(game, free, def.minParticipants);
   } else {
     const workers = new Set(WORKERS_BY_LOCATION[def.locationId ?? ''] ?? []);
     participants = free.filter((a) => {
@@ -237,49 +455,37 @@ export function startScenario(
   const id = `${def.id}-${now}`;
   const loc = def.locationId ? getLocationById(def.locationId) : undefined;
   const participantNames = participants.map((a) => nameOf(game, a) ?? 'Someone');
-  const duration = def.durationMs ?? SCENARIO_DEFAULT_DURATION_MS;
+  const duration = durationOverride ?? def.durationMs ?? SCENARIO_DEFAULT_DURATION_MS;
   // Local scenarios delegate tasks by default; universal ones just reach a decision.
   const outcome = def.outcome ?? (def.scope === 'local' ? 'tasks' : 'decision');
 
-  // Local scenarios have a fixed spot (the workplace standing tile). Compute how
-  // long the slowest participant needs to walk there and run a "gathering" phase
-  // first, so the scenario's content only begins once everyone has arrived.
-  // Universal scenarios have no spot — agents react wherever they are, so they
-  // start active immediately.
-  const gatherPoint = def.scope === 'local' && loc ? { x: loc.x, y: loc.y } : undefined;
-  let contentStartTime = now;
-  let phase: 'gathering' | 'active' = 'active';
-  if (gatherPoint) {
-    let maxEta = 0;
-    for (const a of participants) {
-      const p = game.world.players.get(a.playerId);
-      if (!p) continue;
-      maxEta = Math.max(maxEta, estimateTravelTimeMs(game, now, p, gatherPoint));
-    }
-    const gatherFor = Math.min(maxEta + SCENARIO_GATHER_BUFFER_MS, SCENARIO_GATHER_MAX_MS);
-    contentStartTime = now + gatherFor;
-    phase = 'gathering';
-  }
+  // Every scenario now has a spot to meet at, so the group physically converges to
+  // talk instead of shouting across the map. Local scenarios use their workplace
+  // tile; a universal one meets at the landmark nearest the middle of its cast.
+  const gatherPoint =
+    def.scope === 'local' && loc
+      ? { x: loc.x, y: loc.y }
+      : meetingPointFor(game, participants);
 
+  // Only start now if the cast can reasonably drop what they're doing. If they're
+  // asleep or on shift the scenario queues in 'waiting' and begins when they come
+  // free — a dinner argument at 4am, or dragging a hawker off mid-service, is worse
+  // than a scenario that starts a bit later.
+  const readyNow = enoughAreFree(game, participants, def.minParticipants);
+
+  // Reserve the cast either way (scenarioId is what marks them as spoken for), but
+  // hold back the directive and the walk order until the scenario actually begins.
   for (const a of participants) {
-    a.scenarioInstruction = instruction;
     a.scenarioName = def.name;
     a.scenarioId = id;
     a.scenarioTopics = def.topics;
     a.scenarioGoal = def.completionGoal;
     a.scenarioConflict = def.conflict;
-    // Dispatch local-scenario participants to the gathering spot. Agent.tick walks
-    // them there deterministically until they arrive (see the gather branch).
-    if (gatherPoint) {
-      a.scenarioTarget = gatherPoint;
-      a.scenarioArrivalTime = contentStartTime;
-    }
-    // Force re-extraction of the scenario-relevant profile for this scenario.
     delete a.scenarioProfile;
     delete a.scenarioProfileFor;
   }
 
-  return {
+  const entry: SerializedActiveScenario = {
     id,
     defId: def.id,
     scope: def.scope,
@@ -317,10 +523,23 @@ export function startScenario(
           }
         : undefined,
     startTime: now,
-    contentStartTime,
-    phase,
-    endTime: contentStartTime + duration,
+    durationMs: duration,
+    gatherX: gatherPoint?.x,
+    gatherY: gatherPoint?.y,
+    // A waiting scenario hasn't opened its content window yet. contentStartTime /
+    // endTime are provisional (sized so it can't expire while queued) and are
+    // rewritten by beginScenarioContent the moment it actually starts.
+    contentStartTime: now,
+    phase: 'waiting',
+    waitUntil: now + SCENARIO_WAIT_MAX_MS,
+    endTime: now + SCENARIO_WAIT_MAX_MS + duration,
   };
+  // Start immediately when the cast is already free; otherwise it sits in
+  // 'waiting' and tickScenarios begins it as soon as enough of them come free.
+  if (readyNow) {
+    beginScenarioContent(game, now, entry);
+  }
+  return entry;
 }
 
 // Manually start a specific catalogue scenario through the SAME pipeline the
@@ -344,6 +563,7 @@ export function injectCatalogScenario(
   }
   delete world.scenarioInstruction;
   delete world.scenarioStartTime;
+  delete world.scenarioParticipantIds;
   delete world.scenarioTarget;
   delete world.scenarioName;
   for (const agent of world.agents.values()) {
@@ -371,7 +591,9 @@ export function injectCatalogScenario(
   }
   world.activeScenarios = undefined;
 
-  const inst = startScenario(game, now, def, instructionOverride);
+  // A manual start has to cover participants converging AND (for a decision
+  // scenario) a full deliberation, so it runs longer than an automatic firing.
+  const inst = startScenario(game, now, def, instructionOverride, SCENARIO_MANUAL_DURATION_MS);
   if (!inst) {
     return false;
   }
@@ -450,13 +672,41 @@ function tickWorkingScenario(game: Game, now: number, sc: SerializedActiveScenar
   }
 }
 
-// Promote a gathering local scenario to active once every participant has reached
-// the spot (or the gather deadline passes). Resets the content window to start now
-// and releases the gather targets so the normal conversation logic forms the group.
+// A scenario queued because its cast wasn't free. Recheck each evaluation and
+// begin the moment enough of them are (or when the wait deadline expires, so a
+// cast that never lines up doesn't queue forever). The meeting spot is recomputed
+// at that point, since the cast has moved since the scenario was created.
+function maybeBeginWaitingScenario(game: Game, now: number, sc: SerializedActiveScenario): void {
+  if (sc.phase !== 'waiting') return;
+  const participants = [...game.world.agents.values()].filter((a) => a.scenarioId === sc.id);
+  if (participants.length === 0) return;
+  const enough = enoughAreFree(game, participants, 2);
+  const outOfTime = now >= (sc.waitUntil ?? now);
+  if (!enough && !outOfTime) return;
+  // They've moved since the scenario was queued, so meet where they are NOW.
+  const meetingPoint = sc.locationId
+    ? undefined // Local scenarios keep their workplace spot from startScenario.
+    : meetingPointFor(game, participants);
+  if (meetingPoint) {
+    sc.gatherX = meetingPoint.x;
+    sc.gatherY = meetingPoint.y;
+  }
+  beginScenarioContent(game, now, sc);
+}
+
+// Promote a gathering scenario to active once every participant has reached the
+// spot (or the gather deadline passes). Resets the content window to start now and
+// releases the gather targets so the normal conversation logic forms the group.
 function maybePromoteScenario(game: Game, now: number, sc: SerializedActiveScenario): void {
   if (sc.phase !== 'gathering') return;
+  // Prefer the recorded meeting spot (universal scenarios have no locationId).
   const loc = sc.locationId ? getLocationById(sc.locationId) : undefined;
-  const gatherPoint = loc ? { x: loc.x, y: loc.y } : undefined;
+  const gatherPoint =
+    sc.gatherX !== undefined && sc.gatherY !== undefined
+      ? { x: sc.gatherX, y: sc.gatherY }
+      : loc
+        ? { x: loc.x, y: loc.y }
+        : undefined;
   let allArrived = true;
   if (gatherPoint) {
     for (const pid of sc.participantIds) {
@@ -473,11 +723,69 @@ function maybePromoteScenario(game: Game, now: number, sc: SerializedActiveScena
 
   sc.phase = 'active';
   sc.contentStartTime = now;
-  sc.endTime = now + (scenarioById(sc.defId)?.durationMs ?? SCENARIO_DEFAULT_DURATION_MS);
+  // Prefer the duration the scenario was started with (a manual start runs longer
+  // than the catalogue default) over re-deriving it from the def.
+  sc.endTime =
+    now + (sc.durationMs ?? scenarioById(sc.defId)?.durationMs ?? SCENARIO_DEFAULT_DURATION_MS);
   for (const agent of game.world.agents.values()) {
     if (agent.scenarioId !== sc.id) continue;
     delete agent.scenarioTarget;
     delete agent.scenarioArrivalTime;
+  }
+}
+
+// Every participant of `sc` currently sharing a conversation with at least one
+// other participant — i.e. the people who can actually take a deliberation turn.
+function participantsInScenarioConversation(
+  game: Game,
+  sc: SerializedActiveScenario,
+): Set<string> {
+  const participants = new Set<string>(sc.participantIds);
+  const inRoom = new Set<string>();
+  for (const conversation of game.world.conversations.values()) {
+    const present = [...conversation.participants.entries()]
+      .filter(([pid, m]) => m.status.kind === 'participating' && participants.has(pid))
+      .map(([pid]) => pid);
+    if (present.length < 2) continue; // Needs someone to deliberate WITH.
+    for (const pid of present) inRoom.add(pid);
+  }
+  return inRoom;
+}
+
+// The focal agent only ever acts from inside a scenario conversation
+// (Agent.maybeTakeFocalTurn), and startScenario picks it purely by sorting player
+// ids — so the role can land on someone who never joins one. That happened
+// routinely to a lone worker leashed to a workplace nobody else shares (James at
+// Marina Bay Sands): the deliberation then sat untouched for the scenario's whole
+// life and expired with no estimates, so the evaluator had nothing to score either.
+//
+// Once the content window has been open for FOCAL_REASSIGN_MS, hand the role to the
+// lowest-sorting participant who IS in a scenario conversation. Reassigning here in
+// the manager — a single writer, once per evaluation — keeps every agent's view of
+// who is focal consistent, the same reason the task planner's id is deterministic.
+function maybeReassignFocalAgent(
+  game: Game,
+  now: number,
+  sc: SerializedActiveScenario,
+): void {
+  const deliberation = sc.deliberation;
+  if (!deliberation || deliberation.resolvedOptionId) return;
+  if (sc.phase !== 'active') return;
+  if (now < (sc.contentStartTime ?? sc.startTime) + FOCAL_REASSIGN_MS) return;
+
+  const inRoom = participantsInScenarioConversation(game, sc);
+  if (inRoom.size === 0) return; // Nobody is talking yet — nothing better to pick.
+  if (inRoom.has(deliberation.focalPlayerId)) return; // Already where it needs to be.
+
+  const replacement = [...inRoom].sort()[0] as GameId<'players'>;
+  console.log(
+    `Reassigning focal agent for ${sc.id}: ${deliberation.focalPlayerId} never joined a scenario conversation, handing to ${replacement}.`,
+  );
+  deliberation.focalPlayerId = replacement;
+  // If the options op was requested by the old focal agent but never landed, let
+  // the new one re-request it; otherwise the scenario keeps its generated options.
+  if (deliberation.options.length === 0) {
+    delete deliberation.optionsRequested;
   }
 }
 
@@ -499,7 +807,7 @@ function maybeScheduleEvaluation(
   if (!deliberation || deliberation.evaluationRequested) return;
   if (deliberation.options.length < 2) return;
   // Never scored a single option — there is nothing to evaluate.
-  if (sc.phase === 'gathering') return;
+  if (sc.phase === 'waiting' || sc.phase === 'gathering') return;
 
   let selectedOptionId = deliberation.resolvedOptionId;
   let forced = !!deliberation.forcedDecision;
@@ -533,9 +841,9 @@ function maybeScheduleEvaluation(
 // Schedule a lock-free post-scenario memory op for each participant BEFORE the
 // scenario is torn down (spec point 6). The scenario's fields are passed in as op
 // args because the active-scenario entry is about to be removed. Skipped for a
-// gathering that expired without ever running content.
+// scenario that expired before its content ever ran (still queued or gathering).
 function rememberScenarioForParticipants(game: Game, sc: SerializedActiveScenario): void {
-  if (sc.phase === 'gathering') return;
+  if (sc.phase === 'waiting' || sc.phase === 'gathering') return;
   const plannerId = [...sc.participantIds].sort()[0];
   for (const pid of sc.participantIds) {
     const agent = [...game.world.agents.values()].find(

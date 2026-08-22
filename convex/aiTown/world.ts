@@ -57,15 +57,36 @@ export const serializedActiveScenario = v.object({
   participantIds: v.array(playerId),
   participantNames: v.array(v.string()),
   startTime: v.number(),
+  // How long the content window runs once the scenario goes active (real ms).
+  // Recorded here rather than re-derived from the def each time, because a
+  // manually-started scenario runs longer than the def's default and promotion out
+  // of the gathering phase recomputes endTime. Optional for backward-compat.
+  durationMs: v.optional(v.number()),
   // When the scenario's content begins. For local scenarios this is after the
   // gathering phase (participants travel to the spot first); for universal ones
   // it equals startTime. Optional/defaulted for backward-compat.
   contentStartTime: v.optional(v.number()),
-  // 'gathering' while participants are still travelling to a local scenario's
-  // location; 'active' once they've arrived (or universal scenarios, immediately);
-  // 'working' for a local scenario after its planning conversation has delegated
-  // concrete tasks — participants disperse and each performs their assigned task.
-  phase: v.optional(v.union(v.literal('gathering'), v.literal('active'), v.literal('working'))),
+  // 'waiting' while the cast isn't free yet (asleep, or pinned to a work shift) —
+  // the scenario is queued and begins once they are; 'gathering' while participants
+  // are travelling to the meeting spot; 'active' once they've arrived; 'working'
+  // for a local scenario after its planning conversation has delegated concrete
+  // tasks — participants disperse and each performs their assigned task.
+  phase: v.optional(
+    v.union(
+      v.literal('waiting'),
+      v.literal('gathering'),
+      v.literal('active'),
+      v.literal('working'),
+    ),
+  ),
+  // Where the cast meets to talk. Local scenarios use their workplace tile; a
+  // universal one has no locationId, so the spot is computed from where the cast
+  // actually is and recorded here (maybePromoteScenario needs it to test arrival).
+  gatherX: v.optional(v.number()),
+  gatherY: v.optional(v.number()),
+  // While phase === 'waiting', the real-ms deadline past which the scenario starts
+  // anyway rather than waiting out a cast that never all comes free at once.
+  waitUntil: v.optional(v.number()),
   // Concrete, LLM-generated tasks for the "working" phase of a local scenario, each
   // delegated to a participant. Absent for universal scenarios (which stay on the
   // talk-based topics model) and before delegation.
@@ -103,6 +124,11 @@ export const serializedWorld = {
   scenarioTarget: v.optional(point),
   scenarioName: v.optional(v.string()),
   scenarioInstruction: v.optional(v.string()),
+  // Who the custom scenario actually enlisted. Agents adopt `scenarioInstruction`
+  // by looking themselves up here, so a custom scenario involves a group rather
+  // than the entire town. Absent means "everyone" — the legacy broadcast, kept for
+  // worlds serialized before the list existed and for the meet-at-the-park button.
+  scenarioParticipantIds: v.optional(v.array(playerId)),
   // Real-epoch ms when the current custom scenario was injected. Used to auto-
   // expire `scenarioInstruction` after one in-game day so agents stop re-enacting
   // the scenario (their memories of it remain).
@@ -136,6 +162,7 @@ export class World {
   scenarioTarget?: { x: number; y: number };
   scenarioName?: string;
   scenarioInstruction?: string;
+  scenarioParticipantIds?: GameId<'players'>[];
   scenarioStartTime?: number;
   activeScenarios?: SerializedActiveScenario[];
   lastScenarioEval?: number;
@@ -154,6 +181,9 @@ export class World {
     this.scenarioTarget = scenarioTarget;
     this.scenarioName = scenarioName;
     this.scenarioInstruction = scenarioInstruction;
+    this.scenarioParticipantIds = serialized.scenarioParticipantIds?.map((id) =>
+      parseGameId('players', id),
+    );
     this.scenarioStartTime = scenarioStartTime;
     this.activeScenarios = serialized.activeScenarios;
     this.lastScenarioEval = serialized.lastScenarioEval;
@@ -183,6 +213,7 @@ export class World {
       scenarioTarget: this.scenarioTarget,
       scenarioName: this.scenarioName,
       scenarioInstruction: this.scenarioInstruction,
+      scenarioParticipantIds: this.scenarioParticipantIds,
       scenarioStartTime: this.scenarioStartTime,
       activeScenarios: this.activeScenarios,
       lastScenarioEval: this.lastScenarioEval,

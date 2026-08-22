@@ -35,6 +35,16 @@ export type SchedStep = {
   description: string;
 };
 
+// Does this block have the character asleep? Lives here (rather than in the
+// engine) so both the agent tick and the scenario manager read the same rule —
+// the engine resets fatigue on it and keeps sleepers from wandering, the manager
+// won't drag someone out of bed into a scenario.
+export function isSleepStep(step: { activity: string; description: string }): boolean {
+  return /\b(sleep|sleeping|bed|turning in|going to sleep|rest for the night)\b/.test(
+    `${step.activity} ${step.description}`.toLowerCase(),
+  );
+}
+
 // A half-open time interval [start, end) (game-minutes into the day) carrying the
 // step that should be active during it. Used internally by the overlay merge.
 type Interval = { start: number; end: number; step: SchedStep };

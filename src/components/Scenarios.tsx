@@ -83,13 +83,20 @@ export function ScenariosPanel({
           tasks.length > 0
             ? tasks.filter((t) => t.doneAt).length
             : (s.topicsDone ?? []).filter(Boolean).length;
+        const waiting = s.phase === 'waiting';
         const gathering = s.phase === 'gathering';
+        const pending = waiting || gathering;
         const complete = !!s.goalMet;
-        const subLabel = gathering
-          ? 'Gathering…'
-          : s.scope === 'local'
-            ? locationName(s.locationId) ?? 'Local'
-            : 'Town-wide';
+        // A universal scenario enlists a group, not the whole cast (see
+        // pickScenarioParticipants), so label it with who's actually in it rather
+        // than claiming "town-wide" for something three people are doing.
+        const subLabel = waiting
+          ? 'Waiting till they’re free…'
+          : gathering
+            ? 'Gathering…'
+            : s.scope === 'local'
+              ? locationName(s.locationId) ?? 'Local'
+              : `${s.participantIds.length} ${s.participantIds.length === 1 ? 'resident' : 'residents'}`;
         return (
           <button
             key={s.id}
@@ -107,14 +114,14 @@ export function ScenariosPanel({
               </span>
               <span
                 className={`text-[10px] leading-tight truncate max-w-[150px] ${
-                  gathering ? 'text-sky-300/90' : 'text-white/60'
+                  pending ? 'text-sky-300/90' : 'text-white/60'
                 }`}
               >
                 {subLabel}
               </span>
             </span>
             <span className="flex items-center gap-1.5 shrink-0 ml-auto">
-              {!gathering && itemCount > 0 && (
+              {!pending && itemCount > 0 && (
                 <span
                   className={`text-[10px] leading-none tabular-nums ${
                     complete ? 'text-green-300' : 'text-white/65'
@@ -133,15 +140,18 @@ export function ScenariosPanel({
                   ✓
                 </span>
               ) : (
-                <span className="relative flex h-2 w-2" aria-label={gathering ? 'Gathering' : 'In progress'}>
+                <span
+                  className="relative flex h-2 w-2"
+                  aria-label={waiting ? 'Waiting' : gathering ? 'Gathering' : 'In progress'}
+                >
                   <span
                     className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                      gathering ? 'bg-sky-400' : 'bg-amber-400'
+                      pending ? 'bg-sky-400' : 'bg-amber-400'
                     }`}
                   />
                   <span
                     className={`relative inline-flex rounded-full h-2 w-2 ${
-                      gathering ? 'bg-sky-500' : 'bg-amber-500'
+                      pending ? 'bg-sky-500' : 'bg-amber-500'
                     }`}
                   />
                 </span>
@@ -176,29 +186,32 @@ function DetailSection({ title, body }: { title: string; body: string }) {
   );
 }
 
-// Small pill summarising the scenario's live status: gathering, in progress, or
-// goal achieved.
+// Small pill summarising the scenario's live status: queued, gathering, in
+// progress, or goal achieved.
 function StatusBadge({ scenario }: { scenario: SerializedActiveScenario }) {
+  const waiting = scenario.phase === 'waiting';
   const gathering = scenario.phase === 'gathering';
   const working = scenario.phase === 'working';
   const complete = !!scenario.goalMet;
   const cls = complete
     ? 'bg-green-500 text-black'
-    : gathering
+    : waiting || gathering
       ? 'bg-sky-500/20 text-sky-300'
       : 'bg-amber-500/20 text-amber-300';
   const label = complete
     ? 'Goal achieved'
-    : gathering
-      ? 'Gathering participants'
-      : working
-        ? 'Working on tasks'
-        : 'In progress';
+    : waiting
+      ? 'Waiting for a free moment'
+      : gathering
+        ? 'Gathering participants'
+        : working
+          ? 'Working on tasks'
+          : 'In progress';
   return (
     <span
       className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${cls}`}
     >
-      <span aria-hidden>{complete ? '✓' : gathering ? '⏳' : '●'}</span>
+      <span aria-hidden>{complete ? '✓' : waiting ? '🕒' : gathering ? '⏳' : '●'}</span>
       {label}
     </span>
   );
@@ -622,7 +635,7 @@ export function ScenarioDetail({
             <div className="text-xs text-brown-300 mt-0.5">
               {scenario.scope === 'local'
                 ? `Local scenario${loc ? ` · ${loc}` : ''}`
-                : 'Town-wide scenario'}
+                : `Group scenario · ${scenario.participantIds.length} of the town`}
             </div>
             <div className="mt-1.5">
               <StatusBadge scenario={scenario} />
@@ -674,8 +687,13 @@ export function ScenarioDetail({
             </button>
           ) : (
             <p className="text-brown-300 text-xs italic text-center">
-              No live conversation yet — participants are still{' '}
-              {scenario.phase === 'gathering' ? 'gathering' : 'getting started'}.
+              No live conversation yet — participants are{' '}
+              {scenario.phase === 'waiting'
+                ? 'asleep or on shift; this starts once they’re free'
+                : scenario.phase === 'gathering'
+                  ? 'still gathering'
+                  : 'still getting started'}
+              .
             </p>
           )}
 

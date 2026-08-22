@@ -36,12 +36,24 @@ type OtherParticipant = {
   scenarioProfile?: string;
   human: boolean;
   position: { x: number; y: number };
+  // What this participant is visibly doing right now (their live activity), so the
+  // speaker can react to it — "still got the counter to wipe down?" — instead of
+  // everyone talking in a vacuum. Undefined when they aren't mid-activity.
+  activity?: string;
   // How the speaker relates to this participant: the directional family label (if
   // any) and the speaker's current affinity toward them (0–100). Computed in
   // queryPromptData from the speaker's own family + affinities.
   relationship?: string;
   affinity?: number;
 };
+
+// The live activity description for a player, or undefined if theirs has elapsed.
+// Agents keep their schedule ("ambient") activity running while they walk around
+// and while they talk, which is exactly what makes it worth putting in the prompt.
+function liveActivity(player: { activity?: { description: string; until: number } }): string | undefined {
+  if (!player.activity) return undefined;
+  return player.activity.until > Date.now() ? player.activity.description : undefined;
+}
 
 export async function startConversationMessage(
   ctx: ActionCtx,
@@ -74,7 +86,7 @@ export async function startConversationMessage(
       ? `You are ${player.name}, and you just joined a group conversation with ${audience}.`
       : `You are ${player.name}, and you just started a conversation with ${audience}.`,
   ];
-  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
+  prompt.push(...currentTimeAndPlacePrompt(player, worldStartTime, gameTimeMs, agent));
   prompt.push(...selfAndOthersPrompt(agent, others));
   prompt.push(
     ...previousConversationPrompt(primaryOther, lastConversation, worldStartTime, gameTimeMs),
@@ -149,7 +161,7 @@ export async function continueConversationMessage(
       : `You are ${player.name}, and you're currently in a conversation with ${audience}.`,
     `The conversation started at ${formatGameTimestamp(conversation.created, worldStartTime)}.`,
   ];
-  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
+  prompt.push(...currentTimeAndPlacePrompt(player, worldStartTime, gameTimeMs, agent));
   prompt.push(...selfAndOthersPrompt(agent, others));
   prompt.push(...relatedMemoriesPrompt(memories));
   if (agent?.scenarioId) {
@@ -204,7 +216,7 @@ export async function leaveConversationMessage(
     `You are ${player.name}, and you're currently in a conversation with ${audience}.`,
     `You've decided to leave and would like to politely tell them you're heading off.`,
   ];
-  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
+  prompt.push(...currentTimeAndPlacePrompt(player, worldStartTime, gameTimeMs, agent));
   prompt.push(...selfAndOthersPrompt(agent, others));
   prompt.push(
     `Below is the current chat history.`,
@@ -251,7 +263,7 @@ export async function summarizeGoalMessage(
       : `Your group has just reached a conclusion.`,
     `In one or two short sentences (under 200 characters), tell the others — in character, first person — HOW you pulled it off: the key decision or arrangement you reached and who's doing what. Just the upshot, not a recap of the whole chat. Don't greet them again.`,
   ];
-  prompt.push(...currentTimeAndPlacePrompt(player.position, worldStartTime, gameTimeMs, agent));
+  prompt.push(...currentTimeAndPlacePrompt(player, worldStartTime, gameTimeMs, agent));
   prompt.push(...selfAndOthersPrompt(agent, others));
   const llmMessages: LLMMessage[] = [
     {
@@ -523,6 +535,11 @@ function selfAndOthersPrompt(
     if (clauses.length > 0) {
       prompt.push(`Your relationship with ${o.name}: ${clauses.join(', ')}.`);
     }
+    // What they're visibly up to, so the speaker can react to it rather than
+    // talking past someone who is plainly in the middle of something.
+    if (o.activity) {
+      prompt.push(`${o.name} is ${o.activity} as you talk.`);
+    }
   }
   if (others.length > 1) {
     prompt.push(
@@ -574,11 +591,12 @@ function previousConversationPrompt(
 }
 
 function currentTimeAndPlacePrompt(
-  position: { x: number; y: number },
+  player: { position: { x: number; y: number }; activity?: { description: string; until: number } },
   worldStartTime: number | undefined,
   gameTimeMs: number,
   agent: { schedule?: any[]; currentStepIndex?: number } | null,
 ): string[] {
+  const position = player.position;
   const prompt: string[] = [];
   if (worldStartTime !== undefined) {
     const gt = computeGameTime(gameTimeMs, worldStartTime);
@@ -604,6 +622,16 @@ function currentTimeAndPlacePrompt(
     if (step && step.description) {
       prompt.push(`Your current plan: ${step.description}.`);
     }
+  }
+  // What they're physically doing right now, which is usually more concrete than
+  // the plan above ("wiping down the counter" vs "working my shift at the cafe").
+  // They carry on doing it through the conversation, so it's fair game to mention:
+  // an interruption mid-task, an excuse to keep it short, or just small talk.
+  const activity = liveActivity(player);
+  if (activity) {
+    prompt.push(
+      `Right now you are ${activity} — you're carrying on with it while you talk. Mention or work it into what you say when it fits naturally; don't force it.`,
+    );
   }
   return prompt;
 }
@@ -916,6 +944,7 @@ export const queryPromptData = internalQuery({
         scenarioProfile: otherAgent?.scenarioProfile,
         human: !!otherPlayer.human,
         position: otherPlayer.position,
+        activity: liveActivity(otherPlayer),
         relationship: agent ? familyRelation(agentFamily, desc?.name) : undefined,
         affinity: agent
           ? affinityToward({

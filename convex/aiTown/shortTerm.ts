@@ -57,6 +57,27 @@ export function shortTermOrDefault(shortTerm: ShortTerm | undefined, now: number
   return shortTerm ?? defaultShortTerm(now);
 }
 
+// The single debit path for the economic model. Every place that takes money off
+// an agent (daily living costs, meals, activity costs) goes through this so the
+// balance can never run negative: an agent who can't cover something pays what
+// they have and the rest is reported as `shortfall` for the caller to react to
+// (e.g. eating at home instead of at a hawker stall).
+export function spend(
+  balance: number | undefined,
+  amount: number,
+): { balance: number; paid: number; shortfall: number } {
+  const available = Math.max(0, balance ?? DEFAULT_BALANCE);
+  const wanted = Math.max(0, amount);
+  const paid = Math.min(available, wanted);
+  return { balance: available - paid, paid, shortfall: wanted - paid };
+}
+
+// True when the agent can cover `amount` outright. Used to filter choices BEFORE
+// they're made (see pickActivity) rather than only clamping the debit afterwards.
+export function canAfford(balance: number | undefined, amount: number | undefined): boolean {
+  return Math.max(0, balance ?? DEFAULT_BALANCE) >= Math.max(0, amount ?? 0);
+}
+
 // A savings balance → a 0–100 financial-pressure gauge. Pressure is 0 at/above the
 // comfort threshold and 100 at (or below) zero savings, linear in between.
 export function financialPressure(balance: number | undefined): number {

@@ -6,6 +6,7 @@ import { Id } from '../../convex/_generated/dataModel';
 import closeImg from '../../assets/close.svg';
 import { toastOnError } from '../toasts';
 import { useSendInput } from '../hooks/sendInput';
+import { useEscapeKey } from '../hooks/useEscapeKey';
 import type { GeneratedScenarioDraft } from '../../convex/scenarioGen';
 import type { SerializedGeneratedScenario } from '../../convex/aiTown/generatedScenario';
 import { ALL_SCENARIOS } from '../../data/scenarios';
@@ -181,14 +182,7 @@ export function ScenarioCreator({
     node.style.height = `${Math.min(node.scrollHeight, 220)}px`;
   }, [scenarioText, selectedScenarioId]);
 
-  // Esc closes, like the other modals.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  useEscapeKey(onClose);
 
   const onSelectScenario = (scenarioId: string) => {
     const scenario = SCENARIO_OPTIONS.find((entry) => entry.id === scenarioId);

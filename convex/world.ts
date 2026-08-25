@@ -6,6 +6,7 @@ import {
   DEFAULT_NAME,
   ENGINE_ACTION_DURATION,
   IDLE_WORLD_TIMEOUT,
+  PLAYER_MEMORIES_LIMIT,
   PLAYER_RELATIONSHIP_EVENTS_LIMIT,
   RECENT_RELATIONSHIP_EVENTS_LIMIT,
   WORLD_HEARTBEAT_INTERVAL,
@@ -286,6 +287,25 @@ export const relationshipEventsForPlayer = query({
       .withIndex('actor', (q) => q.eq('worldId', args.worldId).eq('actor', args.playerId))
       .order('desc')
       .take(PLAYER_RELATIONSHIP_EVENTS_LIMIT);
+  },
+});
+
+// Everything one character remembers, newest first, for the agents popup's
+// "more info" pane. The `memories` table is keyed by playerId alone (it carries
+// no worldId), so this needs no world argument. `embeddingId` is dropped — it's
+// a pointer into the vector table that the client has no use for, and shipping
+// it would only widen the payload.
+export const memoriesForPlayer = query({
+  args: {
+    playerId,
+  },
+  handler: async (ctx, args) => {
+    const memories = await ctx.db
+      .query('memories')
+      .withIndex('playerId', (q) => q.eq('playerId', args.playerId))
+      .order('desc')
+      .take(PLAYER_MEMORIES_LIMIT);
+    return memories.map(({ embeddingId: _embeddingId, ...rest }) => rest);
   },
 });
 

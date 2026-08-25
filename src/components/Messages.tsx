@@ -19,6 +19,7 @@ export function Messages({
   scrollViewRef,
   worldStartTime,
   game,
+  chatFrame = true,
 }: {
   worldId: Id<'worlds'>;
   engineId: Id<'engines'>;
@@ -32,6 +33,9 @@ export function Messages({
   // Used to correlate an active scenario conversation with its scenario so task /
   // goal completion markers can be dropped into the chat timeline.
   game?: ServerGame;
+  // The sidebar wants the `.chats` pixel frame; the popup supplies its own `box`
+  // frame and opts out so the two don't nest.
+  chatFrame?: boolean;
 }) {
   const humanPlayerId = humanPlayer?.id;
   const descriptions = useQuery(api.world.gameDescriptions, { worldId });
@@ -50,27 +54,39 @@ export function Messages({
     descriptions?.playerDescriptions.find((p) => p.playerId === currentlyTyping?.playerId);
   const currentlyTypingName = currentlyTypingDesc?.name;
 
-  const scrollView = scrollViewRef.current;
-  const isScrolledToBottom = useRef(false);
+  // Chats open at the newest line; this flips to false as soon as the reader
+  // scrolls up, which stops new messages from yanking them back down.
+  const isScrolledToBottom = useRef(true);
+  const lastAutoScroll = useRef(0);
   useEffect(() => {
+    // Read the ref inside the effect: on the first render the container hasn't
+    // been attached yet, so a render-time read would miss it.
+    const scrollView = scrollViewRef.current;
     if (!scrollView) return undefined;
 
     const onScroll = () => {
-      isScrolledToBottom.current = !!(
-        scrollView && scrollView.scrollHeight - scrollView.scrollTop - 50 <= scrollView.clientHeight
-      );
+      // Ignore the events our own pin generates. They land mid-relayout — when a
+      // typing bubble is removed, say — and read as "the reader scrolled up",
+      // which would silently stop the chat following along.
+      if (Date.now() - lastAutoScroll.current < 150) return;
+      isScrolledToBottom.current =
+        scrollView.scrollHeight - scrollView.scrollTop - 50 <= scrollView.clientHeight;
     };
     scrollView.addEventListener('scroll', onScroll);
     return () => scrollView.removeEventListener('scroll', onScroll);
-  }, [scrollView]);
+  }, [scrollViewRef]);
   useEffect(() => {
-    if (isScrolledToBottom.current) {
-      scrollViewRef.current?.scrollTo({
-        top: scrollViewRef.current.scrollHeight,
-        behavior: 'smooth',
-      });
-    }
-  }, [messages, currentlyTyping]);
+    const scrollView = scrollViewRef.current;
+    if (!scrollView || !isScrolledToBottom.current) return;
+    // Instant, not smooth. A smooth scroll issued in the same commit the
+    // transcript first lays out is dropped outright, and later ones cancel each
+    // other — the typing indicator refires this effect faster than an animation
+    // can finish — which left the chat stranded wherever it started.
+    lastAutoScroll.current = Date.now();
+    scrollView.scrollTo({ top: scrollView.scrollHeight });
+    // `conversation.kind` too: when a live chat ends it swaps to its archived
+    // form and loses the roster, which shortens the thread under the reader.
+  }, [messages, currentlyTyping, conversation.kind]);
 
   if (messages === undefined) {
     return null;
@@ -214,7 +230,7 @@ export function Messages({
   const isTextThread = !!conversation.doc.isText;
 
   return (
-    <div className="chats text-base sm:text-sm">
+    <div className={clsx(chatFrame && 'chats', 'text-base sm:text-sm')}>
       <div className="bg-brown-200 text-black p-2">
         {isTextThread && (
           <div className="flex items-center justify-center gap-1.5 mb-3 text-[11px] uppercase tracking-widest text-brown-700">

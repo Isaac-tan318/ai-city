@@ -2,7 +2,7 @@ import { v } from 'convex/values';
 import { agentId, conversationId, parseGameId, playerId } from './ids';
 import { Player, activity } from './player';
 import { Conversation, conversationInputs } from './conversation';
-import { movePlayer, stopPlayer } from './movement';
+import { blockedWithPositions, movePlayer, stopPlayer } from './movement';
 import { inputHandler } from './inputHandler';
 import { point } from '../util/types';
 import { Descriptions } from '../../data/characters';
@@ -12,17 +12,24 @@ import { affinityToward, clampAffinity } from './affinity';
 import { applyFocalTurn, focalTurnDelta, serializedDecisionOption } from './deliberation';
 import {
   applyShortTermDeltas,
+  clampGauge,
+  shortTermOrDefault,
   shortTermSensitivity,
   spend,
+  type ShortTermComponent,
   type ShortTermDelta,
 } from './shortTerm';
-import { MAX_LEARNED_TRAITS, SCENARIO_CUSTOM_MIN_PARTICIPANTS } from '../constants';
+import {
+  MAX_LEARNED_TRAITS,
+  SCENARIO_CUSTOM_MIN_PARTICIPANTS,
+  SICK_DURATION_DAYS,
+} from '../constants';
 import { injectCatalogScenario, pickScenarioParticipants, startScenario } from './scenarios';
 import { serializedGeneratedScenario, toScenarioDef } from './generatedScenario';
 import { scenarioById } from '../../data/scenarios';
-import { CITY_LOCATIONS, homeFor } from '../../data/cityLocations';
+import { CITY_LOCATIONS, getLocationById, homeFor } from '../../data/cityLocations';
 import { mergeFixedObligations } from '../../data/routines';
-import { CYCLE_MS } from './gameTime';
+import { computeGameTime, CYCLE_MS } from './gameTime';
 import { SCENARIO_WORK_MAX_MS, SCENARIO_INTERVAL_MIN_MS, SCENARIO_RETRY_MS } from '../constants';
 import type { SerializedActiveScenario } from './world';
 import type { Game } from './game';
@@ -391,10 +398,7 @@ export const agentInputs = {
         throw new Error(`Couldn't find agent: ${agentGameId}`);
       }
       // Release the planner's operation lock (mirrors finishDoSomething).
-      if (
-        agent.inProgressOperation &&
-        agent.inProgressOperation.operationId === args.operationId
-      ) {
+      if (agent.inProgressOperation && agent.inProgressOperation.operationId === args.operationId) {
         delete agent.inProgressOperation;
       }
       const sc = (game.world.activeScenarios ?? []).find((s) => s.id === args.scenarioId);
@@ -655,6 +659,146 @@ export const agentInputs = {
       return null;
     },
   }),
+  // Direct, absolute override of an agent's gauges, savings and health, driven by
+  // the agents popup (src/components/AgentsPanel.tsx). Deliberately NOT built on
+  // agentApplyShortTerm: that one is delta-based and scaled by the agent's
+  // profile-derived reactivity, which is right for an in-world event but wrong
+  // here — "set mood to 40" has to land on 40, not on 40 nudged by how resilient
+  // the character is. Every field is optional; only what's passed is written.
+  agentSetState: inputHandler({
+    args: {
+      agentId,
+      mood: v.optional(v.number()),
+      stress: v.optional(v.number()),
+      fatigue: v.optional(v.number()),
+      hunger: v.optional(v.number()),
+      balance: v.optional(v.number()),
+      health: v.optional(v.union(v.literal('well'), v.literal('sick'))),
+    },
+    handler: (game, now, args) => {
+      const agentId = parseGameId('agents', args.agentId);
+      const agent = game.world.agents.get(agentId);
+      if (!agent) {
+        throw new Error(`Couldn't find agent: ${agentId}`);
+      }
+      const before = shortTermOrDefault(agent.shortTerm, now);
+      const after = { ...before };
+      let changed = false;
+      let net = 0;
+      const components: ShortTermComponent[] = ['mood', 'stress', 'fatigue', 'hunger'];
+      for (const component of components) {
+        const value = args[component];
+        if (value === undefined) continue;
+        after[component] = clampGauge(value);
+        if (after[component] === before[component]) continue;
+        changed = true;
+        // Same valence convention as applyShortTermDeltas: mood rising is
+        // feeling better, the other three rising is feeling worse.
+        net +=
+          component === 'mood'
+            ? after[component] - before[component]
+            : before[component] - after[component];
+      }
+      if (changed) {
+        after.updatedAt = now;
+        agent.shortTerm = after;
+        if (net !== 0) {
+          agent.lastShortTermChange = { at: now, net };
+        }
+      }
+      if (args.balance !== undefined) {
+        // The economy floors at zero (see `spend`), so an agent can be broke but
+        // never in debt — keep a manual edit inside the same range.
+        agent.balance = Math.max(0, Math.round(args.balance));
+      }
+      if (args.health !== undefined && args.health !== (agent.health ?? 'well')) {
+        agent.health = args.health;
+        if (args.health === 'sick') {
+          agent.sickDaysLeft = SICK_DURATION_DAYS;
+          agent.consecutiveWorkDays = 0;
+          // tickSchedule only builds the stay-home rest schedule while today's
+          // schedule hasn't been generated yet, so clear that marker — otherwise
+          // an agent made sick mid-day would carry on working their shift.
+          delete agent.scheduleGeneratedForDay;
+        } else {
+          delete agent.sickDaysLeft;
+          // Back on their feet: re-plan so they drop the rest schedule.
+          agent.scheduleNeedsRefresh = true;
+        }
+      }
+      return null;
+    },
+  }),
+  // Put a character at one of the named city locations, from the agents popup,
+  // and HOLD them there.
+  //
+  // The hold is the whole trick. `teleportPlayer` (player.ts) already snaps a
+  // position, but Agent.tickSchedule runs on the very next tick and walks them
+  // straight back to their current schedule step — and rewriting that one step
+  // isn't enough either, because in-game time moves fast enough that the agent
+  // advances to the next step within seconds of real time. So this sets
+  // `agent.pin`, which tickSchedule treats as the destination until it's released
+  // or the day rolls over.
+  agentSetLocation: inputHandler({
+    args: {
+      playerId,
+      locationId: v.string(),
+    },
+    handler: (game, now, args) => {
+      const playerId = parseGameId('players', args.playerId);
+      const player = game.world.players.get(playerId);
+      if (!player) {
+        throw new Error(`Invalid player ID ${playerId}`);
+      }
+      const location = getLocationById(args.locationId);
+      if (!location) {
+        throw new Error(`Unknown location ${args.locationId}`);
+      }
+      const destination = { x: location.x, y: location.y };
+      const reason = blockedWithPositions(destination, [], game.worldMap);
+      if (reason !== null) {
+        throw new Error(`${location.name} is blocked (${reason}) — pick another place`);
+      }
+      // Leave any active conversation so neither participant gets stuck.
+      const conversation = [...game.world.conversations.values()].find((c) =>
+        c.participants.has(player.id),
+      );
+      if (conversation) {
+        conversation.leave(game, now, player);
+      }
+      stopPlayer(player);
+      player.position = destination;
+      const { dayNumber } = computeGameTime(now, game.world.worldStartTime);
+      for (const agent of game.world.agents.values()) {
+        if (agent.playerId !== player.id) continue;
+        agent.pin = { destination, locationId: location.id, day: dayNumber };
+        // A pending scenario walk would drag them straight back off again.
+        delete agent.scenarioTarget;
+        delete agent.scenarioArrivalTime;
+        break;
+      }
+      console.log(`Moved ${player.id} (${player.name}) to ${location.name}`);
+      return null;
+    },
+  }),
+  // Drop the manual hold and let the agent get on with its day again.
+  agentReleaseLocation: inputHandler({
+    args: {
+      playerId,
+    },
+    handler: (game, _now, args) => {
+      const playerId = parseGameId('players', args.playerId);
+      for (const agent of game.world.agents.values()) {
+        if (agent.playerId !== playerId) continue;
+        delete agent.pin;
+        // Re-plan from wherever they've been left rather than sprinting back to a
+        // schedule written for somewhere else.
+        agent.scheduleNeedsRefresh = true;
+        break;
+      }
+      return null;
+    },
+  }),
   // Promote a reflected-on insight to a durable "learned trait" (spec point 6).
   // Appended to a bounded, de-duplicated list kept separate from the authored
   // profile so runtime learning never overwrites the hand-authored persona.
@@ -753,9 +897,7 @@ export const agentInputs = {
       const def = toScenarioDef(args.scenario);
       if (args.manual) {
         if (!injectCatalogScenario(game, now, def)) {
-          throw new Error(
-            `Couldn't start "${def.name}" — not enough people are free right now.`,
-          );
+          throw new Error(`Couldn't start "${def.name}" — not enough people are free right now.`);
         }
         return null;
       }

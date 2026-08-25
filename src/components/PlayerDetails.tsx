@@ -5,7 +5,7 @@ import { Id } from '../../convex/_generated/dataModel';
 import closeImg from '../../assets/close.svg';
 import interactImg from '../../assets/interact.svg';
 import { SelectElement } from './Player';
-import { Messages } from './Messages';
+import { ConversationPopup } from './ConversationPopup';
 import { ScenarioCreator } from './ScenarioCreator';
 import { toastOnError } from '../toasts';
 import { useSendInput } from '../hooks/sendInput';
@@ -24,8 +24,9 @@ import {
   SHORT_TERM_EMOJI,
   type ShortTermComponent,
 } from '../../convex/aiTown/shortTerm';
-// Compact "how long ago" label for relationship-event sub-lines.
-function relativeTime(at: number, now: number): string {
+// Compact "how long ago" label for relationship-event sub-lines. Also used by
+// the agents popup's memory list, so it's exported rather than duplicated.
+export function relativeTime(at: number, now: number): string {
   const s = Math.max(0, Math.floor((now - at) / 1000));
   if (s < 60) return 'just now';
   const m = Math.floor(s / 60);
@@ -63,14 +64,12 @@ export default function PlayerDetails({
   game,
   playerId,
   setSelectedElement,
-  scrollViewRef,
 }: {
   worldId: Id<'worlds'>;
   engineId: Id<'engines'>;
   game: ServerGame;
   playerId?: GameId<'players'>;
   setSelectedElement: SelectElement;
-  scrollViewRef: React.RefObject<HTMLDivElement>;
 }) {
   const humanTokenIdentifier = useQuery(api.world.userStatus, { worldId });
 
@@ -98,10 +97,30 @@ export default function PlayerDetails({
 
   const player = playerId && game.world.players.get(playerId);
   const playerConversation = player && game.world.playerConversation(player);
+  // Hoisted above the early returns below so the chat-popup hooks can depend on it.
+  const isMe = !!(player && humanPlayer && player.id === humanPlayer.id);
+  // The conversation this player is actually *in* right now, as opposed to one
+  // they've only been invited to or are still walking over to.
+  const liveConversation =
+    playerConversation &&
+    playerId &&
+    playerConversation.participants.get(playerId)?.status.kind === 'participating'
+      ? playerConversation
+      : undefined;
+  const liveConversationId = !isMe && liveConversation ? liveConversation.id : undefined;
 
   // All the scenario-picking state now lives inside ScenarioCreator; this only
   // owns whether the modal is open.
   const [injectorOpen, setInjectorOpen] = useState(false);
+
+  // Transcripts are read in a floating popup rather than at the bottom of this
+  // column. Selecting someone mid-conversation is a request to read it, so open
+  // it for them. Keyed on the (player, conversation) pair: closing the popup
+  // doesn't re-trigger this, but switching to someone else's chat does.
+  const [chatOpen, setChatOpen] = useState(false);
+  useEffect(() => {
+    if (liveConversationId) setChatOpen(true);
+  }, [playerId, liveConversationId]);
 
   const previousConversation = useQuery(
     api.world.previousConversation,
@@ -237,7 +256,6 @@ export default function PlayerDetails({
   if (!player) {
     return null;
   }
-  const isMe = humanPlayer && player.id === humanPlayer.id;
   const canInvite = !isMe && !playerConversation && humanPlayer && !humanConversation;
   const sameConversation =
     !isMe &&
@@ -329,6 +347,16 @@ export default function PlayerDetails({
         { key: 'financialPressure', label: 'Money stress', value: wellbeing.financialPressure },
       ]
     : [];
+  // What the popup reads: the live conversation if this player is in one, else
+  // their last archived thread. Mirrors the two conditions the transcript used to
+  // render under inline. If a live conversation ends while the popup is open it
+  // falls through to the archived doc, so the finished thread stays readable.
+  const chatConversation = !isMe && liveConversation
+    ? ({ kind: 'active', doc: liveConversation } as const)
+    : !playerConversation && previousConversation
+      ? ({ kind: 'archived', doc: previousConversation } as const)
+      : undefined;
+
   return (
     <>
       <div className="flex gap-4">
@@ -348,6 +376,27 @@ export default function PlayerDetails({
       </div>
       <div className="mt-4 flex flex-col gap-3 items-center">
         {scenarioButton}
+        {chatConversation && (
+          <button
+            className="button text-white shadow-solid text-xl cursor-pointer pointer-events-auto"
+            onClick={() => setChatOpen(true)}
+            type="button"
+          >
+            <div className="h-full bg-clay-700 flex items-center gap-2 px-3">
+              <span aria-hidden className="shrink-0">
+                💬
+              </span>
+              <div className="leading-none">
+                {chatConversation.kind === 'active' ? 'read conversation' : 'read last conversation'}
+              </div>
+              {chatConversation.kind === 'active' && (
+                <span className="shrink-0 text-[10px] uppercase tracking-widest text-green-300">
+                  live
+                </span>
+              )}
+            </div>
+          </button>
+        )}
         {scenarioInjector}
       </div>
       {canInvite && (
@@ -608,33 +657,19 @@ export default function PlayerDetails({
           </ul>
         </div>
       )}
-      {!isMe && playerConversation && playerStatus?.kind === 'participating' && (
-        <Messages
+      {chatOpen && chatConversation && (
+        <ConversationPopup
           worldId={worldId}
           engineId={engineId}
-          inConversationWithMe={inConversationWithMe ?? false}
-          conversation={{ kind: 'active', doc: playerConversation }}
-          humanPlayer={humanPlayer}
-          scrollViewRef={scrollViewRef}
-          worldStartTime={game.world.worldStartTime}
           game={game}
+          conversation={chatConversation}
+          humanPlayer={humanPlayer}
+          inConversationWithMe={
+            chatConversation.kind === 'active' && (inConversationWithMe ?? false)
+          }
+          escapeEnabled={!injectorOpen}
+          onClose={() => setChatOpen(false)}
         />
-      )}
-      {!playerConversation && previousConversation && (
-        <>
-          <div className="box flex-grow">
-            <h2 className="bg-brown-700 text-lg text-center">Previous conversation</h2>
-          </div>
-          <Messages
-            worldId={worldId}
-            engineId={engineId}
-            inConversationWithMe={false}
-            conversation={{ kind: 'archived', doc: previousConversation }}
-            humanPlayer={humanPlayer}
-            scrollViewRef={scrollViewRef}
-            worldStartTime={game.world.worldStartTime}
-          />
-        </>
       )}
     </>
   );

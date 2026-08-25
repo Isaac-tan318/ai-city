@@ -322,6 +322,8 @@ export const TENSIONS_FEED_WINDOW_MS = 5 * 60_000;
 // Server-side caps on the relationship-event queries.
 export const RECENT_RELATIONSHIP_EVENTS_LIMIT = 30;
 export const PLAYER_RELATIONSHIP_EVENTS_LIMIT = 50;
+// Cap on the per-player memory listing the agents popup reads.
+export const PLAYER_MEMORIES_LIMIT = 60;
 
 // `cost` (local dollars, default 0) is deducted from the agent's balance when the
 // activity is committed, feeding financial pressure. `energy` (0–100, default 0)

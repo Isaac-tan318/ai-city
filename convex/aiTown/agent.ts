@@ -203,6 +203,12 @@ export class Agent {
   // so runtime learning augments, never overwrites, the hand-authored persona.
   learnedTraits?: string[];
 
+  // Operator override from the agents popup: hold this character at a chosen
+  // place, overriding their schedule the way a running scenario does. Cleared at
+  // the day rollover (`day` is the game-day it was set on) so a forgotten hold
+  // can never freeze someone out of their routine permanently.
+  pin?: { destination: Point; locationId: string; day: number };
+
   constructor(serialized: SerializedAgent) {
     const {
       id,
@@ -241,6 +247,7 @@ export class Agent {
       shortTermStepKey,
       lastShortTermChange,
       learnedTraits,
+      pin,
     } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
@@ -287,6 +294,7 @@ export class Agent {
     this.shortTermStepKey = shortTermStepKey;
     this.lastShortTermChange = lastShortTermChange;
     this.learnedTraits = learnedTraits;
+    this.pin = pin;
   }
 
   tick(game: Game, now: number) {
@@ -1042,6 +1050,12 @@ export class Agent {
   // Returns true if the schedule handled this tick (caller should return).
   tickSchedule(game: Game, now: number, player: import('./player').Player): boolean {
     const gt = computeGameTime(now, game.world.worldStartTime);
+    // A manual hold from the agents popup doesn't survive the night, so a
+    // forgotten pin can't freeze someone out of their routine for good.
+    if (this.pin && this.pin.day !== gt.dayNumber) {
+      delete this.pin;
+    }
+    const pinPoint = this.pin?.destination;
     const conversation = game.world.playerConversation(player);
     // A text thread does NOT take the agent off their schedule: they keep walking
     // their shift, keep their activity running, and reply between tasks. So we do
@@ -1146,7 +1160,8 @@ export class Agent {
       this.currentStepIndex !== undefined &&
       !noSchedule &&
       !dayChanged &&
-      !inScenarioMeeting
+      !inScenarioMeeting &&
+      !pinPoint
     ) {
       const step = this.schedule[this.currentStepIndex];
       if (step) {
@@ -1244,7 +1259,7 @@ export class Agent {
     // look "stuck" far from anywhere it should be.
     // A running scenario outranks the pre-dawn "wait at home" hold, or the cast
     // would be walked home out from under a scenario that's still going.
-    if (gt.minutesIntoDay < step.startMinute && !inScenarioMeeting) {
+    if (gt.minutesIntoDay < step.startMinute && !inScenarioMeeting && !pinPoint) {
       if (conversation && !texting) return false;
       const atStart = distance(player.position, step.destination) < ARRIVAL_RADIUS;
       if (!atStart) {
@@ -1276,7 +1291,11 @@ export class Agent {
     // here keeps the group in one place long enough to actually talk, while the
     // milling-about wander below stops them looking frozen.
     const scenarioAnchor = this.scenarioMeetingPoint(game);
-    const destination = scenarioAnchor ?? step.destination;
+    // A manual pin outranks everything else, the scenario anchor included. It's an
+    // explicit instruction from the agents popup, and scenarios run often enough
+    // that letting them win would make "Move here" look broken for most of the
+    // cast most of the time. The pin is cleared at the day rollover, or by hand.
+    const destination = pinPoint ?? scenarioAnchor ?? step.destination;
     const distanceToStep = distance(player.position, destination);
     // Two tiers. `atDest` is the strict "have I actually arrived" gate that stops
     // the walk-to-the-spot logic. `settled` is the looser "I'm here, just milling
@@ -1549,6 +1568,7 @@ export class Agent {
       shortTermStepKey: this.shortTermStepKey,
       lastShortTermChange: this.lastShortTermChange,
       learnedTraits: this.learnedTraits,
+      pin: this.pin,
     };
   }
 
@@ -1751,6 +1771,8 @@ export const serializedAgent = {
   lastShortTermChange: v.optional(v.object({ at: v.number(), net: v.number() })),
   // Durable self-learned traits promoted from reflection (separate from profile).
   learnedTraits: v.optional(v.array(v.string())),
+  // Manual "hold this character here" override set from the agents popup.
+  pin: v.optional(v.object({ destination: point, locationId: v.string(), day: v.number() })),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 

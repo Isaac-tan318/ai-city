@@ -60,8 +60,7 @@ export const CITY_LOCATIONS: CityLocation[] = [
     name: 'Temasek Polytechnic',
     x: 6,
     y: 39,
-    description:
-      'Large tertiary campus with lecture halls, dorms, and a sprawling library.',
+    description: 'Large tertiary campus with lecture halls, dorms, and a sprawling library.',
   },
   {
     id: 'hdb',
@@ -76,8 +75,7 @@ export const CITY_LOCATIONS: CityLocation[] = [
     name: 'Peranakan Shophouses',
     x: 60,
     y: 42,
-    description:
-      'Row of colourful shophouses — small cafes, boutiques, tailor shops, hidden bars.',
+    description: 'Row of colourful shophouses — small cafes, boutiques, tailor shops, hidden bars.',
   },
   {
     id: 'restaurant',
@@ -116,7 +114,10 @@ export const CHARACTER_WORKPLACES: Record<string, { locationId: string; activity
   Cedric: { locationId: 'shophouses', activity: 'working the espresso bar at his cafe' },
   James: { locationId: 'mbs', activity: 'waiting at the taxi stand for fares' },
   Sarah: { locationId: 'restaurant', activity: 'cooking and serving at her hawker stall' },
-  Rahman: { locationId: 'restaurant', activity: 'pulling teh tarik and serving kopi at his drinks stall' },
+  Rahman: {
+    locationId: 'restaurant',
+    activity: 'pulling teh tarik and serving kopi at his drinks stall',
+  },
   Isabel: { locationId: 'astar', activity: 'running experiments in the lab' },
   Lukas: { locationId: 'astar', activity: 'running materials experiments in the lab' },
   Clara: { locationId: 'astar', activity: 'leading her genomics lab and reviewing data' },
@@ -172,4 +173,22 @@ export function homeFor(characterName: string): CityLocation | undefined {
     return { ...base, x: entry.x, y: entry.y };
   }
   return base;
+}
+
+// The named place an agent is standing at (or closest to). Used to label a
+// position in the UI, where "x: 36, y: 22" means nothing but "Marina Bay Sands"
+// does. Squared distance — no need for the sqrt just to compare.
+export function nearestLocation(p: { x: number; y: number }): CityLocation {
+  let best = CITY_LOCATIONS[0];
+  let bestDist = Infinity;
+  for (const loc of CITY_LOCATIONS) {
+    const dx = loc.x - p.x;
+    const dy = loc.y - p.y;
+    const d = dx * dx + dy * dy;
+    if (d < bestDist) {
+      bestDist = d;
+      best = loc;
+    }
+  }
+  return best;
 }

@@ -45,7 +45,6 @@ export default function Game() {
 
   const { evaluation: newEvaluation, dismiss: dismissEvaluation } = useNewEvaluation(worldId);
 
-  const scrollViewRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<Viewport | undefined>();
 
   if (!worldId || !engineId || !game) {
@@ -94,17 +93,13 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
           </div>
         </div>
         {/* Right column area */}
-        <div
-          className="flex flex-col overflow-y-auto shrink-0 px-4 py-6 sm:px-6 lg:w-96 xl:pr-6 border-t-8 sm:border-t-0 sm:border-l-8 border-brown-900  bg-brown-800 text-brown-100"
-          ref={scrollViewRef}
-        >
+        <div className="flex flex-col overflow-y-auto shrink-0 px-4 py-6 sm:px-6 lg:w-96 xl:pr-6 border-t-8 sm:border-t-0 sm:border-l-8 border-brown-900  bg-brown-800 text-brown-100">
           <PlayerDetails
             worldId={worldId}
             engineId={engineId}
             game={game}
             playerId={selectedElement?.id}
             setSelectedElement={setSelectedElement}
-            scrollViewRef={scrollViewRef}
           />
         </div>
       </div>

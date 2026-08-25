@@ -178,6 +178,8 @@ export const runDryRunScenario = internalAction({
       context: context.context,
       completionGoal: def.completionGoal,
       conflict: def.conflict,
+      // The dry run always simulates the in-person path.
+      isText: false,
       // Far enough out that the expiry safety valve never fires during the run.
       endTime: Date.now() + 60 * 60_000,
       options,

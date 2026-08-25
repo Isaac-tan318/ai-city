@@ -82,8 +82,13 @@ export const serializedActiveScenario = v.object({
   // Where the cast meets to talk. Local scenarios use their workplace tile; a
   // universal one has no locationId, so the spot is computed from where the cast
   // actually is and recorded here (maybePromoteScenario needs it to test arrival).
+  // Absent for a text scenario — nobody goes anywhere.
   gatherX: v.optional(v.number()),
   gatherY: v.optional(v.number()),
+  // True when this scenario is being held over the cast's phones because it came
+  // up while they were on shift. Set only for `textable` scenario defs; the cast
+  // stays at work and talks in one group text thread instead of gathering.
+  viaText: v.optional(v.boolean()),
   // While phase === 'waiting', the real-ms deadline past which the scenario starts
   // anyway rather than waiting out a cast that never all comes free at once.
   waitUntil: v.optional(v.number()),

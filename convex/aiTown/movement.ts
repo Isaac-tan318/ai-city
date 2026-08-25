@@ -38,9 +38,11 @@ export function movePlayer(
   if (pointsEqual(position, destination)) {
     return;
   }
-  // Don't allow players in a conversation to move.
+  // Don't allow players in a conversation to move — unless it's a text thread.
+  // The whole point of texting is that they keep walking their shift while they
+  // reply, so a phone conversation must not pin them in place.
   const inConversation = [...game.world.conversations.values()].some(
-    (c) => c.participants.get(player.id)?.status.kind === 'participating',
+    (c) => !c.isText && c.participants.get(player.id)?.status.kind === 'participating',
   );
   if (inConversation && !allowInConversation) {
     throw new Error(`Can't move when in a conversation. Leave the conversation first!`);

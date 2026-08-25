@@ -62,8 +62,9 @@ export async function startConversationMessage(
   playerId: GameId<'players'>,
   gameTimeMs: number,
 ): Promise<string> {
-  const { player, others, agent, lastConversation, worldStartTime } = await ctx.runQuery(
-    selfInternal.queryPromptData,
+  const { player, others, conversation, agent, lastConversation, worldStartTime } =
+    await ctx.runQuery(
+      selfInternal.queryPromptData,
     { worldId, playerId, conversationId },
   );
   const audience = formatNameList(others.map((o) => o.name));
@@ -87,6 +88,7 @@ export async function startConversationMessage(
       : `You are ${player.name}, and you just started a conversation with ${audience}.`,
   ];
   prompt.push(...currentTimeAndPlacePrompt(player, worldStartTime, gameTimeMs, agent));
+  prompt.push(...textMediumPrompt(conversation));
   prompt.push(...selfAndOthersPrompt(agent, others));
   prompt.push(
     ...previousConversationPrompt(primaryOther, lastConversation, worldStartTime, gameTimeMs),
@@ -111,7 +113,9 @@ export async function startConversationMessage(
     );
   }
   prompt.push(
-    `Keep your greeting to one or two short sentences, like real spoken dialogue — under 200 characters. Don't monologue or give a speech.`,
+    conversation.isText
+      ? `Open the thread with one short line — a text, not a speech. Under 200 characters.`
+      : `Keep your greeting to one or two short sentences, like real spoken dialogue — under 200 characters. Don't monologue or give a speech.`,
   );
   const lastPrompt = speakerLabel(player.name, others);
   prompt.push(lastPrompt);
@@ -162,6 +166,7 @@ export async function continueConversationMessage(
     `The conversation started at ${formatGameTimestamp(conversation.created, worldStartTime)}.`,
   ];
   prompt.push(...currentTimeAndPlacePrompt(player, worldStartTime, gameTimeMs, agent));
+  prompt.push(...textMediumPrompt(conversation));
   prompt.push(...selfAndOthersPrompt(agent, others));
   prompt.push(...relatedMemoriesPrompt(memories));
   if (agent?.scenarioId) {
@@ -217,6 +222,7 @@ export async function leaveConversationMessage(
     `You've decided to leave and would like to politely tell them you're heading off.`,
   ];
   prompt.push(...currentTimeAndPlacePrompt(player, worldStartTime, gameTimeMs, agent));
+  prompt.push(...textMediumPrompt(conversation));
   prompt.push(...selfAndOthersPrompt(agent, others));
   prompt.push(
     `Below is the current chat history.`,
@@ -264,6 +270,7 @@ export async function summarizeGoalMessage(
     `In one or two short sentences (under 200 characters), tell the others — in character, first person — HOW you pulled it off: the key decision or arrangement you reached and who's doing what. Just the upshot, not a recap of the whole chat. Don't greet them again.`,
   ];
   prompt.push(...currentTimeAndPlacePrompt(player, worldStartTime, gameTimeMs, agent));
+  prompt.push(...textMediumPrompt(conversation));
   prompt.push(...selfAndOthersPrompt(agent, others));
   const llmMessages: LLMMessage[] = [
     {
@@ -588,6 +595,17 @@ function previousConversationPrompt(
     prompt.push(`Last time you chatted with ${otherPlayer.name} it was ${prev}. It's now ${now}.`);
   }
   return prompt;
+}
+
+// A group chat held over the residents' phones rather than face to face. The
+// register genuinely differs — typed not spoken, snatched between tasks — and
+// without saying so the model writes stage directions ("leans over and says…")
+// for people who are miles apart and mid-shift.
+function textMediumPrompt(conversation: { isText?: boolean } | null | undefined): string[] {
+  if (!conversation?.isText) return [];
+  return [
+    `IMPORTANT — this is a GROUP TEXT on your phone, not a face-to-face conversation. The others are somewhere else entirely and most of you are in the middle of work or errands. Type like you would in a real group chat: short, casual, lowercase is fine, contractions and the odd emoji or "lah"/"leh" are fine. Never describe gestures, glances, body language or the room ("*nods*", "looks over at", "walks up") — nobody can see you. It's normal to be brief because you're busy, and to mention that you're snatching a moment between tasks.`,
+  ];
 }
 
 function currentTimeAndPlacePrompt(

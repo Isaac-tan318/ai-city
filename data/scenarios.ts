@@ -43,6 +43,13 @@ export type ScenarioDef = {
   // The kind of resolution the scenario drives toward. Defaults (resolved in
   // startScenario): local -> 'tasks', universal -> 'decision'.
   outcome?: ScenarioOutcome;
+  // Can this be settled over the phone? True for situations that are about
+  // ARRANGING something for later — the kind of thing people really do sort out
+  // by group chat between customers. When such a scenario comes up while its cast
+  // is on shift, it opens a text thread instead of queueing until they're free
+  // (see convex/aiTown/scenarios.ts). Reactive, physical situations are not
+  // textable: you can't text your way out of being caught in a downpour.
+  textable?: boolean;
   // The directive injected into each participant's prompts while active.
   instruction: string;
   // --- Info-panel detail ---
@@ -187,6 +194,7 @@ export const UNIVERSAL_SCENARIOS: ScenarioDef[] = [
     instruction:
       "It's the eve of Lunar New Year. Talk about reunion dinner, ang pao, visiting plans, and well-wishes. Be warm, festive, and a little nostalgic about family.",
     minParticipants: 2,
+    textable: true,
     whatHappens:
       'The town winds down into reunion-dinner mode on the eve of Lunar New Year — red decorations everywhere, talk of family gatherings, and ang pao being prepared.',
     background:
@@ -214,6 +222,7 @@ export const UNIVERSAL_SCENARIOS: ScenarioDef[] = [
     scope: 'universal',
     outcome: 'decision',
     minParticipants: 2,
+    textable: true,
     instruction:
       'The group is hungry and trying to agree on where to eat together tonight. Push for the food YOU want, weigh price, distance, queue and cravings, and hash it out until everyone lands on ONE place.',
     whatHappens:
@@ -245,6 +254,7 @@ export const UNIVERSAL_SCENARIOS: ScenarioDef[] = [
     scope: 'universal',
     outcome: 'decision',
     minParticipants: 2,
+    textable: true,
     instruction:
       'The group is planning a movie night and can’t agree on what to watch. Argue for your genre, talk showtimes or streaming, and settle on ONE film everyone will actually sit through.',
     whatHappens:
@@ -276,6 +286,7 @@ export const UNIVERSAL_SCENARIOS: ScenarioDef[] = [
     scope: 'universal',
     outcome: 'decision',
     minParticipants: 2,
+    textable: true,
     instruction:
       'The group is toying with a short weekend getaway and needs to agree where to go. Push your destination, weigh budget and travel time, and decide on ONE plan (or agree to bail).',
     whatHappens:

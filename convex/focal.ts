@@ -112,6 +112,11 @@ export type FocalTurnData = {
   participants: { playerId: string; name: string; present: boolean }[];
   selfName: string;
   numMessages: number;
+  // True when this deliberation is happening in a group text rather than face to
+  // face. The focal agent's two lines (their question and their commitment) go
+  // through this prompt rather than the ordinary dialogue one, so without this
+  // they come out formal and spoken in the middle of a phone thread.
+  isText: boolean;
 };
 
 export const loadFocalTurnData = internalQuery({
@@ -155,6 +160,7 @@ export const loadFocalTurnData = internalQuery({
       participants,
       selfName: participants.find((p) => p.playerId === args.playerId)?.name ?? 'Someone',
       numMessages: conversation.numMessages,
+      isText: !!conversation.isText,
     };
   },
 });
@@ -187,6 +193,9 @@ export async function focalDecision(
 
   const prompt = [
     `You are ${data.selfName}. You are the one trying to get this group to actually land on a decision.`,
+    data.isText
+      ? `This is a GROUP TEXT on your phone, not a face-to-face conversation — everyone is off doing their own thing. Both lines you draft below must read like texts: short, casual, lowercase is fine, no stage directions or descriptions of the room.`
+      : ``,
     `Scenario: ${data.scenarioName} — ${data.instruction}`,
     `Situation: ${data.context}`,
     `What counts as done: ${data.completionGoal}`,

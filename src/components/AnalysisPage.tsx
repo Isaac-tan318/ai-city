@@ -5,6 +5,7 @@ import { api } from '../../convex/_generated/api';
 import { Id } from '../../convex/_generated/dataModel';
 import { CharacterIcon } from './CharacterIcon';
 import { affinityColor, affinityEmoji, affinityLabel } from '../../convex/aiTown/affinity';
+import { ScorecardModal } from './ScorecardModal';
 
 type GraphNode = {
   id: string;
@@ -73,8 +74,14 @@ export default function AnalysisPage() {
 // Every group decision the town has made, scored after the fact against the
 // hidden ground truth (see convex/evaluator.ts). This is the durable record —
 // the live deliberation panel disappears with the scenario, these rows do not.
+//
+// Each row opens the same scorecard that pops when a decision lands in the town
+// view (ScorecardModal), so the full per-resident breakdown stays reachable long
+// after the moment has passed instead of only existing for the few seconds the
+// live popup is on screen.
 function DecisionsPanel({ worldId }: { worldId: Id<'worlds'> }) {
   const evaluations = useQuery(api.world.recentEvaluations, { worldId, limit: 25 });
+  const [openId, setOpenId] = useState<string | null>(null);
   if (!evaluations || evaluations.length === 0) return null;
 
   const meanRegret =
@@ -82,6 +89,9 @@ function DecisionsPanel({ worldId }: { worldId: Id<'worlds'> }) {
       (evaluations.reduce((acc, e) => acc + e.regret, 0) / evaluations.length) * 100,
     ) / 100;
   const optimal = evaluations.filter((e) => e.regret === 0).length;
+  // The rows are the query result, so a scorecard opened here stays live: if the
+  // evaluation is ever re-scored the open modal follows it.
+  const open = openId ? evaluations.find((e) => e._id === openId) : undefined;
 
   return (
     <div className="px-6 pb-8">
@@ -96,52 +106,67 @@ function DecisionsPanel({ worldId }: { worldId: Id<'worlds'> }) {
         </div>
         <p className="text-xs text-brown-400 mb-3">
           What each group actually chose, scored against constraints they never all shared out
-          loud. Regret is how much better the best available option would have been.
+          loud. Regret is how much better the best available option would have been. Select a
+          decision for its full scorecard.
         </p>
         <ul className="divide-y divide-brown-700">
           {evaluations.map((e) => {
             const violations = e.agentScores.filter((a) => a.hardTabooViolated);
             return (
-              <li key={e._id} className="py-2.5">
-                <div className="flex items-baseline gap-2">
-                  <span className="flex-1 text-sm text-brown-100">
-                    {e.scenarioName}
-                    <span className="text-brown-300"> — {e.selectedOptionTitle}</span>
-                  </span>
-                  <span
-                    className={`shrink-0 text-sm font-bold tabular-nums ${
-                      e.regret === 0 ? 'text-green-400' : 'text-amber-300'
-                    }`}
-                    title="Regret: best available group utility minus what they chose"
-                  >
-                    {e.regret === 0 ? 'optimal' : `−${e.regret}`}
-                  </span>
-                </div>
-                <div className="text-[11px] text-brown-400 mt-0.5">
-                  {e.focalName} decided after {e.questionsAsked} question
-                  {e.questionsAsked === 1 ? '' : 's'}
-                  {e.forcedDecision ? ' (on the clock)' : ''} · scored{' '}
-                  <span className="text-brown-300 tabular-nums">{e.aggregatedGroupUtility}</span>
-                  /100
-                  {e.regret > 0 && (
-                    <>
-                      {' '}
-                      · best was{' '}
-                      <span className="text-brown-300">{e.bestOptionTitle}</span> at{' '}
-                      <span className="tabular-nums">{e.bestGroupUtility}</span>
-                    </>
-                  )}
-                </div>
-                {violations.length > 0 && (
-                  <div className="text-[11px] text-red-300 mt-0.5">
-                    ⛔ overrode a hard limit for {violations.map((v) => v.name).join(', ')}
+              <li key={e._id}>
+                <button
+                  type="button"
+                  onClick={() => setOpenId(e._id)}
+                  aria-haspopup="dialog"
+                  title={`${e.scenarioName} — open the full scorecard`}
+                  className="group w-full cursor-pointer rounded px-2 -mx-2 py-2.5 text-left transition-colors hover:bg-brown-700/50 focus:outline-none focus-visible:ring-1 focus-visible:ring-clay-500"
+                >
+                  <div className="flex items-baseline gap-2">
+                    <span className="flex-1 text-sm text-brown-100">
+                      {e.scenarioName}
+                      <span className="text-brown-300"> — {e.selectedOptionTitle}</span>
+                    </span>
+                    <span
+                      className={`shrink-0 text-sm font-bold tabular-nums ${
+                        e.regret === 0 ? 'text-green-400' : 'text-amber-300'
+                      }`}
+                      title="Regret: best available group utility minus what they chose"
+                    >
+                      {e.regret === 0 ? 'optimal' : `−${e.regret}`}
+                    </span>
                   </div>
-                )}
+                  <div className="text-[11px] text-brown-400 mt-0.5">
+                    {e.focalName} decided after {e.questionsAsked} question
+                    {e.questionsAsked === 1 ? '' : 's'}
+                    {e.forcedDecision ? ' (on the clock)' : ''} · scored{' '}
+                    <span className="text-brown-300 tabular-nums">{e.aggregatedGroupUtility}</span>
+                    /100
+                    {e.regret > 0 && (
+                      <>
+                        {' '}
+                        · best was{' '}
+                        <span className="text-brown-300">{e.bestOptionTitle}</span> at{' '}
+                        <span className="tabular-nums">{e.bestGroupUtility}</span>
+                      </>
+                    )}
+                  </div>
+                  {violations.length > 0 && (
+                    <div className="text-[11px] text-red-300 mt-0.5">
+                      ⛔ overrode a hard limit for {violations.map((v) => v.name).join(', ')}
+                    </div>
+                  )}
+                  <span className="mt-1 inline-block text-[11px] text-clay-500 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                    View scorecard →
+                  </span>
+                </button>
               </li>
             );
           })}
         </ul>
       </div>
+      {open && (
+        <ScorecardModal worldId={worldId} evaluation={open} onClose={() => setOpenId(null)} />
+      )}
     </div>
   );
 }

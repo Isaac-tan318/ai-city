@@ -61,11 +61,18 @@ export const Player = ({
     return null;
   }
 
+  // The 💬 bubble means talking out loud — a text reply gets typing dots instead
+  // (see isTextTyping below), so exclude text threads here.
   const isSpeaking = !![...game.world.conversations.values()].find(
+    (c) => !c.isText && c.isTyping?.playerId === player.id,
+  );
+  // ...but composing a text still counts as being busy, so the 💭 thinking bubble
+  // shouldn't fight the typing dots either.
+  const isComposing = !![...game.world.conversations.values()].find(
     (c) => c.isTyping?.playerId === player.id,
   );
   const agentForPlayer = [...game.world.agents.values()].find((a) => a.playerId === player.id);
-  const isThinking = !isSpeaking && !!agentForPlayer?.inProgressOperation;
+  const isThinking = !isComposing && !!agentForPlayer?.inProgressOperation;
   // Right after a conversation, flash a 💗/💔 above the character for a few seconds
   // to show whether their affinity just rose or fell. `at` is wall-clock ms, so we
   // gate on Date.now(); the marker hides itself once the window lapses.
@@ -82,6 +89,11 @@ export const Player = ({
   const conversationForPlayer = [...game.world.conversations.values()].find(
     (c) => c.participants.get(player.id)?.status.kind === 'participating',
   );
+  // Texting has no other on-screen tell — the resident carries on with their shift
+  // and never walks anywhere — so the 📱 badge is the only way to see it's
+  // happening. `isTextTyping` narrows that to whoever currently holds the floor.
+  const isTexting = !!conversationForPlayer?.isText;
+  const isTextTyping = isTexting && conversationForPlayer?.isTyping?.playerId === player.id;
   let inConflict = false;
   if (agentForPlayer) {
     const conversation = conversationForPlayer;
@@ -142,6 +154,8 @@ export const Player = ({
         isFocalAgent={isFocalAgent}
         isBeingAsked={isBeingAsked}
         memoryGain={memoryGain}
+        isTexting={isTexting}
+        isTextTyping={isTextTyping}
         emoji={
           player.activity && player.activity.until > (historicalTime ?? Date.now())
             ? player.activity?.emoji

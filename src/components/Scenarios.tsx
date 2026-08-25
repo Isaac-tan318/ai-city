@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { useQuery } from 'convex/react';
 import { SerializedActiveScenario } from '../../convex/aiTown/world';
 import { getLocationById } from '../../data/cityLocations';
@@ -94,9 +94,11 @@ export function ScenariosPanel({
           ? 'Waiting till they’re free…'
           : gathering
             ? 'Gathering…'
-            : s.scope === 'local'
-              ? locationName(s.locationId) ?? 'Local'
-              : `${s.participantIds.length} ${s.participantIds.length === 1 ? 'resident' : 'residents'}`;
+            : s.viaText
+              ? `📱 Texting · ${s.participantIds.length}`
+              : s.scope === 'local'
+                ? locationName(s.locationId) ?? 'Local'
+                : `${s.participantIds.length} ${s.participantIds.length === 1 ? 'resident' : 'residents'}`;
         return (
           <button
             key={s.id}
@@ -206,12 +208,16 @@ function StatusBadge({ scenario }: { scenario: SerializedActiveScenario }) {
         ? 'Gathering participants'
         : working
           ? 'Working on tasks'
-          : 'In progress';
+          : scenario.viaText
+            ? 'Texting from work'
+            : 'In progress';
   return (
     <span
       className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${cls}`}
     >
-      <span aria-hidden>{complete ? '✓' : waiting ? '🕒' : gathering ? '⏳' : '●'}</span>
+      <span aria-hidden>
+        {complete ? '✓' : waiting ? '🕒' : gathering ? '⏳' : scenario.viaText ? '📱' : '●'}
+      </span>
       {label}
     </span>
   );
@@ -570,21 +576,36 @@ function ScorecardSection({
             </thead>
             <tbody>
               {evaluation.agentScores.map((agent) => (
-                <tr
-                  key={agent.playerId}
-                  className={agent.hardTabooViolated ? 'text-red-300' : 'text-brown-100'}
-                >
-                  <td className="text-left py-0.5">
-                    {agent.name}
-                    {agent.hardTabooViolated && <span aria-hidden> ⛔</span>}
-                  </td>
-                  <td className="text-right pr-2">{agent.totalIndividualUtility}</td>
-                  {DIMENSION_LABELS.map((d) => (
-                    <td key={d.key} className="text-right pl-1.5 text-brown-300">
-                      {agent.dimensionFactors[d.key]}
+                <Fragment key={agent.playerId}>
+                  <tr className={agent.hardTabooViolated ? 'text-red-300' : 'text-brown-100'}>
+                    <td className="text-left py-0.5">
+                      {agent.name}
+                      {agent.hardTabooViolated && <span aria-hidden> ⛔</span>}
                     </td>
-                  ))}
-                </tr>
+                    <td className="text-right pr-2">{agent.totalIndividualUtility}</td>
+                    {DIMENSION_LABELS.map((d) => (
+                      <td key={d.key} className="text-right pl-1.5 text-brown-300">
+                        {agent.dimensionFactors[d.key]}
+                      </td>
+                    ))}
+                  </tr>
+                  {/* The evaluator's own one-line account of what drove this score.
+                      The numbers say how much; this says why. It already comes back
+                      with every evaluation (see convex/evaluator.ts), so showing it
+                      costs nothing extra. */}
+                  {agent.reason && (
+                    <tr>
+                      <td
+                        colSpan={2 + DIMENSION_LABELS.length}
+                        className={`pb-1.5 pl-2 text-left text-[10px] font-normal leading-snug ${
+                          agent.hardTabooViolated ? 'text-red-300/80' : 'text-brown-300'
+                        }`}
+                      >
+                        {agent.reason}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -633,9 +654,11 @@ export function ScenarioDetail({
               {scenario.name}
             </h2>
             <div className="text-xs text-brown-300 mt-0.5">
-              {scenario.scope === 'local'
-                ? `Local scenario${loc ? ` · ${loc}` : ''}`
-                : `Group scenario · ${scenario.participantIds.length} of the town`}
+              {scenario.viaText
+                ? `📱 Group text · ${scenario.participantIds.length} of the town, sorting it out from work`
+                : scenario.scope === 'local'
+                  ? `Local scenario${loc ? ` · ${loc}` : ''}`
+                  : `Group scenario · ${scenario.participantIds.length} of the town`}
             </div>
             <div className="mt-1.5">
               <StatusBadge scenario={scenario} />
@@ -688,7 +711,9 @@ export function ScenarioDetail({
           ) : (
             <p className="text-brown-300 text-xs italic text-center">
               No live conversation yet — participants are{' '}
-              {scenario.phase === 'waiting'
+              {scenario.viaText
+                ? 'about to open the group text'
+                : scenario.phase === 'waiting'
                 ? 'asleep or on shift; this starts once they’re free'
                 : scenario.phase === 'gathering'
                   ? 'still gathering'

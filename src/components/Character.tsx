@@ -18,6 +18,8 @@ export const Character = ({
   isFocalAgent = false,
   isBeingAsked = false,
   memoryGain,
+  isTexting = false,
+  isTextTyping = false,
   emoji = '',
   isViewer = false,
   speed = 0.1,
@@ -51,6 +53,14 @@ export const Character = ({
   // The Decider just pulled new facts out of the conversation. Floats a
   // "💡 +N memory" above the focal agent, then fades.
   memoryGain?: { count: number; at: number };
+  // --- Texting (convex/aiTown/conversation.ts, Conversation.startText) ---
+  // This resident is in a group text thread — they're carrying on with whatever
+  // they were doing and replying from their phone, so unlike a face-to-face chat
+  // there's nothing else on screen to show it. Renders a 📱.
+  isTexting?: boolean;
+  // ...and it's their turn: they're composing a reply right now. Swaps the 📱 for
+  // animated typing dots.
+  isTextTyping?: boolean;
   emoji?: string;
   // Highlights the player.
   isViewer?: boolean;
@@ -142,6 +152,7 @@ export const Character = ({
       {isFocalAgent && (
         <Text x={16} y={-30} scale={0.65} text={'👑'} anchor={{ x: 0.5, y: 0.5 }} />
       )}
+      {isTexting && (isTextTyping ? <TypingDots /> : <Text x={-16} y={-30} scale={0.7} text={'📱'} anchor={{ x: 0.5, y: 0.5 }} />)}
       {isBeingAsked && <QuestionPulse />}
       {memoryGain && <MemoryGainFloater key={memoryGain.at} count={memoryGain.count} at={memoryGain.at} />}
     </Container>
@@ -170,6 +181,34 @@ function FocalAura() {
 }
 
 // A "?" over whoever the focal agent just questioned, pulsing until they answer.
+// Three dots that fill in turn, in the same slot the 📱 occupies — the familiar
+// "someone is typing" tell, so you can see which resident is mid-reply without
+// opening the thread. Driven by useTick like QuestionPulse below.
+function TypingDots() {
+  const [phase, setPhase] = useState(0);
+  useTick((delta) => setPhase((prev) => prev + delta * 0.09));
+  // 0,1,2 -> how many dots are lit, cycling.
+  const lit = Math.floor(phase % 3) + 1;
+  return (
+    <Text
+      x={-16}
+      y={-30}
+      scale={0.5}
+      text={'.'.repeat(lit)}
+      anchor={{ x: 0.5, y: 0.5 }}
+      style={
+        new PIXI.TextStyle({
+          fontSize: 24,
+          fill: '#ffffff',
+          stroke: '#181425',
+          strokeThickness: 5,
+          fontWeight: 'bold',
+        })
+      }
+    />
+  );
+}
+
 function QuestionPulse() {
   const [phase, setPhase] = useState(0);
   useTick((delta) => setPhase((prev) => prev + delta * 0.11));

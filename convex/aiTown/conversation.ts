@@ -36,6 +36,12 @@ export class Conversation {
   // shopping). Scenario conversations use the higher participant cap and are
   // never preempted by the scenario approach logic.
   scenario?: boolean;
+  // True when this is a group chat held over the residents' phones rather than
+  // face to face. Text threads skip every proximity rule below: members start
+  // already `participating`, nobody walks anywhere, and they carry on with
+  // whatever they were doing while they reply. Opened by a textable scenario that
+  // fires while its cast is on shift (see convex/aiTown/scenarios.ts).
+  isText?: boolean;
   // Set by the dialogue orchestrator after each agent message: the participant
   // who should speak next, decided by an LLM from the conversation history.
   // Agents defer to the designated speaker (with an awkward-timeout fallback).
@@ -56,7 +62,7 @@ export class Conversation {
   allParticipants: Set<GameId<'players'>>;
 
   constructor(serialized: SerializedConversation) {
-    const { id, creator, created, isTyping, lastMessage, numMessages, participants, scenario, scenarioGoalMet, goalSummaryPosted } =
+    const { id, creator, created, isTyping, lastMessage, numMessages, participants, scenario, isText, scenarioGoalMet, goalSummaryPosted } =
       serialized;
     this.id = parseGameId('conversations', id);
     this.creator = parseGameId('players', creator);
@@ -73,6 +79,7 @@ export class Conversation {
     this.numMessages = numMessages;
     this.participants = parseMap(participants, ConversationMembership, (m) => m.playerId);
     this.scenario = scenario;
+    this.isText = isText;
     this.scenarioGoalMet = scenarioGoalMet;
     this.goalSummaryPosted = goalSummaryPosted;
     this.nextSpeaker =
@@ -119,7 +126,13 @@ export class Conversation {
       participating.push(e);
     };
 
-    if (participating.length > 0) {
+    // A text thread has no geometry: everyone is already `participating` (see
+    // Conversation.startText) and stays wherever they are. Skipping the block
+    // wholesale also guarantees `startParticipating` — which calls stopPlayer —
+    // can never freeze a texter mid-walk.
+    if (this.isText) {
+      // Nothing to promote and nothing to orient; they're on their phones.
+    } else if (participating.length > 0) {
       // Late joiners slot into an existing huddle once they're close to anyone
       // already participating (a bit looser than CONVERSATION_DISTANCE).
       for (const e of walkingOver) {
@@ -156,8 +169,9 @@ export class Conversation {
     }
 
     // Orient each settled participant toward the centroid of the others so the
-    // group faces inward.
-    if (participating.length >= 2) {
+    // group faces inward. Meaningless for a text thread — the "others" may be
+    // right across the map, and swivelling to face them would look broken.
+    if (!this.isText && participating.length >= 2) {
       for (const e of participating) {
         if (e.player.pathfinding) continue;
         const others = participating.filter((o) => o.playerId !== e.playerId);
@@ -218,6 +232,50 @@ export class Conversation {
       }),
     );
     return { conversationId };
+  }
+
+  // Open a group chat over the residents' phones.
+  //
+  // Everyone starts already `participating` rather than invited/walkingOver. That
+  // whole handshake is choreography for meeting in person — walking over, waiting
+  // to be accepted, timing out — and none of it applies to a group text. Starting
+  // participating means acceptInvite/rejectInvite/INVITE_TIMEOUT need no special
+  // casing, and Conversation.tick's proximity rules are inert (nobody is ever
+  // walkingOver). Players are left exactly where they are, so they carry on with
+  // their shift while the thread runs.
+  //
+  // Returns undefined if fewer than two of the given players are actually free.
+  static startText(
+    game: Game,
+    now: number,
+    players: Player[],
+  ): GameId<'conversations'> | undefined {
+    const free = players.filter(
+      (p) => ![...game.world.conversations.values()].some((c) => c.participants.has(p.id)),
+    );
+    if (free.length < 2) {
+      console.log(`Not enough free players to open a text thread (${free.length})`);
+      return undefined;
+    }
+    const conversationId = game.allocId('conversations');
+    console.log(`Opening text thread ${conversationId} with ${free.map((p) => p.id).join(', ')}`);
+    game.world.conversations.set(
+      conversationId,
+      new Conversation({
+        id: conversationId,
+        created: now,
+        creator: free[0].id,
+        numMessages: 0,
+        isText: true,
+        scenario: true,
+        participants: free.map((p) => ({
+          playerId: p.id,
+          invited: now,
+          status: { kind: 'participating' as const, started: now },
+        })),
+      }),
+    );
+    return conversationId;
   }
 
   setIsTyping(now: number, player: Player, messageUuid: string) {
@@ -305,7 +363,7 @@ export class Conversation {
   }
 
   serialize(): SerializedConversation {
-    const { id, creator, created, isTyping, lastMessage, numMessages, scenario, scenarioGoalMet, goalSummaryPosted, nextSpeaker } = this;
+    const { id, creator, created, isTyping, lastMessage, numMessages, scenario, isText, scenarioGoalMet, goalSummaryPosted, nextSpeaker } = this;
     return {
       id,
       creator,
@@ -315,6 +373,7 @@ export class Conversation {
       numMessages,
       participants: serializeMap(this.participants),
       scenario,
+      isText,
       scenarioGoalMet,
       goalSummaryPosted,
       nextSpeaker,
@@ -343,6 +402,9 @@ export const serializedConversation = {
   numMessages: v.number(),
   participants: v.array(v.object(serializedConversationMembership)),
   scenario: v.optional(v.boolean()),
+  // True for a group chat held over phones rather than face to face — see the
+  // `isText` field on Conversation and Conversation.startText.
+  isText: v.optional(v.boolean()),
   scenarioGoalMet: v.optional(v.boolean()),
   goalSummaryPosted: v.optional(v.boolean()),
   nextSpeaker: v.optional(playerId),

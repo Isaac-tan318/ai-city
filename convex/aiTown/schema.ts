@@ -59,6 +59,9 @@ export const aiTownTables = {
     lastMessage: serializedConversation.lastMessage,
     numMessages: serializedConversation.numMessages,
     participants: v.array(playerId),
+    // Whether this was a group text rather than a face-to-face chat, so the
+    // chat-history viewer can still tell them apart after the fact.
+    isText: v.optional(v.boolean()),
   }).index('worldId', ['worldId', 'id']),
   archivedAgents: defineTable({ worldId: v.id('worlds'), ...serializedAgent }).index('worldId', [
     'worldId',

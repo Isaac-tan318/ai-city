@@ -309,6 +309,7 @@ export class Game extends AbstractGame {
           lastMessage: conversation.lastMessage,
           numMessages: conversation.numMessages,
           participants,
+          isText: conversation.isText,
         };
         await ctx.db.insert('archivedConversations', archivedConversation);
         for (let i = 0; i < participants.length; i++) {

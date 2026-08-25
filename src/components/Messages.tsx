@@ -208,9 +208,19 @@ export function Messages({
     }
   }
 
+  // A text thread reads very differently from a face-to-face chat — nobody is in
+  // the same place — so say so at the top rather than leaving it to be inferred
+  // from the dialogue. Works for archived threads too (the flag is persisted).
+  const isTextThread = !!conversation.doc.isText;
+
   return (
     <div className="chats text-base sm:text-sm">
       <div className="bg-brown-200 text-black p-2">
+        {isTextThread && (
+          <div className="flex items-center justify-center gap-1.5 mb-3 text-[11px] uppercase tracking-widest text-brown-700">
+            <span aria-hidden>📱</span> Group text
+          </div>
+        )}
         {roster.length > 1 && (
           <div className="flex flex-wrap gap-3 justify-center mb-4 pb-3 border-b border-brown-500">
             {roster.map((p) => {

@@ -30,6 +30,7 @@ import {
 } from '../../data/cityLocations';
 import { computeGameTime } from './gameTime';
 import { isSleepStep } from '../../data/routines';
+import { Conversation } from './conversation';
 import { estimateTravelTimeMs, stopPlayer } from './movement';
 import { distance } from '../util/geometry';
 import {
@@ -350,6 +351,29 @@ function enoughAreFree(game: Game, participants: Agent[], minParticipants: numbe
   return freeNow >= needed;
 }
 
+// Is this agent awake — i.e. is the reason they can't gather that they're BUSY
+// rather than unconscious?
+function isAwakeForScenario(game: Game, agent: Agent): boolean {
+  const step =
+    agent.schedule && agent.currentStepIndex !== undefined
+      ? agent.schedule[agent.currentStepIndex]
+      : undefined;
+  return !step || !isSleepStep(step);
+}
+
+// Texting is the answer to "they're at work", not to "they're asleep". A cast in
+// bed should still queue until morning — nobody settles the dinner plan at 3am,
+// and a thread nobody is awake to read would just burn through its message budget
+// against a wall. Requires the same clear majority as enoughAreFree.
+function enoughAreAwake(game: Game, participants: Agent[], minParticipants: number): boolean {
+  const awake = participants.filter((a) => isAwakeForScenario(game, a)).length;
+  const needed = Math.max(
+    minParticipants,
+    Math.ceil(participants.length * SCENARIO_READY_FRACTION),
+  );
+  return awake >= needed;
+}
+
 // Where a cast without a fixed venue should meet: the named landmark closest to
 // the middle of the group. Using a real location (rather than the bare centroid)
 // means they gather somewhere that reads as a place — and because the cast is
@@ -383,8 +407,10 @@ function meetingPointFor(game: Game, participants: Agent[]): { x: number; y: num
 // begins, otherwise the cast re-plans around a situation that hasn't started.
 function beginScenarioContent(game: Game, now: number, sc: SerializedActiveScenario): void {
   const participants = [...game.world.agents.values()].filter((a) => a.scenarioId === sc.id);
+  // A text scenario never has a meeting spot — the whole point is that nobody
+  // leaves their post.
   const gatherPoint =
-    sc.gatherX !== undefined && sc.gatherY !== undefined
+    !sc.viaText && sc.gatherX !== undefined && sc.gatherY !== undefined
       ? { x: sc.gatherX, y: sc.gatherY }
       : undefined;
 
@@ -417,6 +443,18 @@ function beginScenarioContent(game: Game, now: number, sc: SerializedActiveScena
   sc.contentStartTime = contentStartTime;
   sc.endTime = contentStartTime + (sc.durationMs ?? SCENARIO_DEFAULT_DURATION_MS);
   delete sc.waitUntil;
+
+  // Texting: open ONE group thread containing the whole cast, right now. Doing it
+  // here rather than letting the pairwise invite logic find its way there is what
+  // makes this work at all — the ordinary path would have them walk to each other.
+  // It also guarantees the focal agent of a decision scenario is in the room, so
+  // the deliberation can't stall on someone who never showed up.
+  if (sc.viaText) {
+    const players = participants
+      .map((a) => game.world.players.get(a.playerId))
+      .filter((p): p is NonNullable<typeof p> => !!p);
+    Conversation.startText(game, now, players);
+  }
 }
 
 export function startScenario(
@@ -459,19 +497,28 @@ export function startScenario(
   // Local scenarios delegate tasks by default; universal ones just reach a decision.
   const outcome = def.outcome ?? (def.scope === 'local' ? 'tasks' : 'decision');
 
-  // Every scenario now has a spot to meet at, so the group physically converges to
-  // talk instead of shouting across the map. Local scenarios use their workplace
-  // tile; a universal one meets at the landmark nearest the middle of its cast.
-  const gatherPoint =
-    def.scope === 'local' && loc
-      ? { x: loc.x, y: loc.y }
-      : meetingPointFor(game, participants);
-
   // Only start now if the cast can reasonably drop what they're doing. If they're
   // asleep or on shift the scenario queues in 'waiting' and begins when they come
   // free — a dinner argument at 4am, or dragging a hawker off mid-service, is worse
   // than a scenario that starts a bit later.
   const readyNow = enoughAreFree(game, participants, def.minParticipants);
+  // ...unless it's the kind of thing you'd settle by group chat. A `textable`
+  // scenario that catches its cast AT WORK doesn't have to wait at all: they text
+  // about it between customers. Only ever a fallback — when the cast IS free they
+  // still meet in person, which is the better scene, and when they're asleep it
+  // queues as before.
+  const viaText =
+    !readyNow && !!def.textable && enoughAreAwake(game, participants, def.minParticipants);
+
+  // Every in-person scenario has a spot to meet at, so the group physically
+  // converges to talk instead of shouting across the map. Local scenarios use
+  // their workplace tile; a universal one meets at the landmark nearest the middle
+  // of its cast. A text scenario has no spot at all — nobody leaves their post.
+  const gatherPoint = viaText
+    ? undefined
+    : def.scope === 'local' && loc
+      ? { x: loc.x, y: loc.y }
+      : meetingPointFor(game, participants);
 
   // Reserve the cast either way (scenarioId is what marks them as spoken for), but
   // hold back the directive and the walk order until the scenario actually begins.
@@ -526,6 +573,7 @@ export function startScenario(
     durationMs: duration,
     gatherX: gatherPoint?.x,
     gatherY: gatherPoint?.y,
+    viaText: viaText || undefined,
     // A waiting scenario hasn't opened its content window yet. contentStartTime /
     // endTime are provisional (sized so it can't expire while queued) and are
     // rewritten by beginScenarioContent the moment it actually starts.
@@ -534,9 +582,10 @@ export function startScenario(
     waitUntil: now + SCENARIO_WAIT_MAX_MS,
     endTime: now + SCENARIO_WAIT_MAX_MS + duration,
   };
-  // Start immediately when the cast is already free; otherwise it sits in
-  // 'waiting' and tickScenarios begins it as soon as enough of them come free.
-  if (readyNow) {
+  // Start immediately when the cast is already free, or when it can be handled
+  // over the phone. Otherwise it sits in 'waiting' and tickScenarios begins it as
+  // soon as enough of them come free.
+  if (readyNow || viaText) {
     beginScenarioContent(game, now, entry);
   }
   return entry;
@@ -682,7 +731,18 @@ function maybeBeginWaitingScenario(game: Game, now: number, sc: SerializedActive
   if (participants.length === 0) return;
   const enough = enoughAreFree(game, participants, 2);
   const outOfTime = now >= (sc.waitUntil ?? now);
-  if (!enough && !outOfTime) return;
+  // Queued overnight and now they're up but on shift: switch to texting rather
+  // than waiting out the whole working day for a gap that may never come.
+  if (!enough && !outOfTime) {
+    const def = scenarioById(sc.defId);
+    if (def?.textable && enoughAreAwake(game, participants, 2)) {
+      sc.viaText = true;
+      delete sc.gatherX;
+      delete sc.gatherY;
+      beginScenarioContent(game, now, sc);
+    }
+    return;
+  }
   // They've moved since the scenario was queued, so meet where they are NOW.
   const meetingPoint = sc.locationId
     ? undefined // Local scenarios keep their workplace spot from startScenario.

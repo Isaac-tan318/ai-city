@@ -429,8 +429,10 @@ export class Agent {
     // Only a free-roam activity is abandoned when the agent starts moving or
     // talking. A scheduled (ambient) one keeps running: it's what they're doing
     // with this whole block, so it should follow them around the workplace and be
-    // something they can mention in conversation.
-    if (doingActivity && !player.activity!.ambient && (conversation || player.pathfinding)) {
+    // something they can mention in conversation. Texting never interrupts an
+    // activity at all — glancing at your phone mid-task is the entire point.
+    const interrupting = (conversation && !conversation.isText) || player.pathfinding;
+    if (doingActivity && !player.activity!.ambient && interrupting) {
       player.activity!.until = now;
     }
     // If we're not in a conversation, do something.
@@ -993,6 +995,9 @@ export class Agent {
     let bestDistance = Infinity;
     for (const conversation of game.world.conversations.values()) {
       if (conversation.participants.has(player.id)) continue;
+      // You can't walk into a phone thread. Text conversations are joined by the
+      // scenario manager when it opens them, never by strolling past someone.
+      if (conversation.isText) continue;
       // If we're enlisted in a scenario, only ever join that scenario's own
       // conversation — never wander into an unrelated chat that's nearby.
       if (this.scenarioId && !this.isInScenarioConversation(game, conversation)) continue;
@@ -1038,6 +1043,14 @@ export class Agent {
   tickSchedule(game: Game, now: number, player: import('./player').Player): boolean {
     const gt = computeGameTime(now, game.world.worldStartTime);
     const conversation = game.world.playerConversation(player);
+    // A text thread does NOT take the agent off their schedule: they keep walking
+    // their shift, keep their activity running, and reply between tasks. So we do
+    // all the usual schedule work but never CLAIM the tick — returning false lets
+    // Agent.tick fall through to the message logic below. We also skip every
+    // branch that would start an operation (the re-plan and the invite), since
+    // startOperation throws if one is already in flight and the messaging path
+    // needs that slot.
+    const texting = !!conversation?.isText;
     const doingActivity = player.activity && player.activity.until > now;
     // An ambient (schedule-driven) activity now runs for the whole block and
     // survives conversations, so it must NOT hold off a re-plan — otherwise
@@ -1232,7 +1245,7 @@ export class Agent {
     // A running scenario outranks the pre-dawn "wait at home" hold, or the cast
     // would be walked home out from under a scenario that's still going.
     if (gt.minutesIntoDay < step.startMinute && !inScenarioMeeting) {
-      if (conversation) return false;
+      if (conversation && !texting) return false;
       const atStart = distance(player.position, step.destination) < ARRIVAL_RADIUS;
       if (!atStart) {
         if (
@@ -1248,11 +1261,12 @@ export class Agent {
       } else if (player.pathfinding) {
         stopPlayer(player);
       }
-      return true;
+      return !texting;
     }
 
-    // Don't yank the agent out of an active conversation. The schedule can wait.
-    if (conversation) return false;
+    // Don't yank the agent out of an active conversation. The schedule can wait —
+    // unless it's a text thread, which they carry on through.
+    if (conversation && !texting) return false;
 
     // While a scenario is running, its meeting spot REPLACES the schedule's
     // destination. The gathering phase walks everyone here, but promotion clears
@@ -1287,8 +1301,16 @@ export class Agent {
       this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN;
     const justChatted =
       this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN;
-    // A sick agent keeps to themselves — don't initiate new conversations.
-    if (!onInviteCooldown && !justChatted && !this.inProgressOperation && this.health !== 'sick') {
+    // A sick agent keeps to themselves — don't initiate new conversations. Nor
+    // does someone already mid-text-thread: they're occupied, and the op slot is
+    // needed for their reply.
+    if (
+      !conversation &&
+      !onInviteCooldown &&
+      !justChatted &&
+      !this.inProgressOperation &&
+      this.health !== 'sick'
+    ) {
       const freePlayers = [...game.world.players.values()].filter(
         (p) =>
           p.id !== player.id &&
@@ -1296,11 +1318,18 @@ export class Agent {
       );
       // On shift we keep social reach close to the workplace so a worker doesn't
       // trek across the map to chat and abandon their post. An agent enlisted in a
-      // scenario is exempt: a universal scenario has no gathering spot, so leashed
-      // participants would never reach each other. A lone worker (James at Marina
-      // Bay Sands, the only person who works there) has a permanently empty pool
-      // and would sit out the scenario entirely.
-      const leashAnchor = this.scenarioId ? undefined : workLeashAnchor(player.name, step);
+      // scenario that MEETS is exempt: a universal scenario has no gathering spot,
+      // so leashed participants would never reach each other, and a lone worker
+      // (James at Marina Bay Sands, the only person who works there) has a
+      // permanently empty pool and would sit out the scenario entirely.
+      //
+      // A TEXT scenario is the opposite case — the entire premise is that they
+      // stay at work — so it keeps its leash.
+      const activeScenario = this.activeScenario(game);
+      const scenarioMeetsInPerson = !!activeScenario && !activeScenario.viaText;
+      const leashAnchor = scenarioMeetsInPerson
+        ? undefined
+        : workLeashAnchor(player.name, step);
       let pool: typeof freePlayers;
       if (!settled) {
         // In transit: only greet someone we physically pass.
@@ -1334,7 +1363,7 @@ export class Agent {
           map: game.worldMap.serialize(),
           forceInvite: true,
         });
-        return true;
+        return !texting;
       }
     }
 
@@ -1351,7 +1380,7 @@ export class Agent {
           console.warn(`Schedule move failed for ${player.id}: ${(err as Error).message}`);
         }
       }
-      return true;
+      return !texting;
     }
 
     // At the destination — set the activity for the duration of this step.
@@ -1414,7 +1443,7 @@ export class Agent {
     // The activity keeps running throughout (it's flagged ambient above), so the
     // agent is still visibly "wiping down the counter" while they cross the shop.
     this.maybeWanderAtStep(game, now, player, step, destination);
-    return true;
+    return !texting;
   }
 
   // The spot this agent's running scenario meets at, while it's actually running.
@@ -1442,7 +1471,10 @@ export class Agent {
   ): void {
     if (player.pathfinding) return;
     if (this.isHeldByScenario(game)) return;
-    if (game.world.playerConversation(player)) return;
+    // Standing and talking to someone stops the drift; texting doesn't — they're
+    // still going about their shift with a phone in hand.
+    const convo = game.world.playerConversation(player);
+    if (convo && !convo.isText) return;
     if (isSleepStep(step)) return;
     if (this.lastWanderAt && now < this.lastWanderAt + STEP_WANDER_INTERVAL_MS) return;
     // Jitter the next one so a room full of agents doesn't step in lockstep.

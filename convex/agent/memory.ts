@@ -1,9 +1,16 @@
 import { v } from 'convex/values';
-import { ActionCtx, DatabaseReader, internalMutation, internalQuery } from '../_generated/server';
+import {
+  ActionCtx,
+  DatabaseReader,
+  internalAction,
+  internalMutation,
+  internalQuery,
+} from '../_generated/server';
 import { Doc, Id } from '../_generated/dataModel';
 import { internal } from '../_generated/api';
 import { LLMMessage, chatCompletion, fetchEmbedding } from '../util/llm';
 import { asyncMap } from '../util/asyncMap';
+import * as embeddingsCache from './embeddingsCache';
 import { GameId, agentId, conversationId, playerId } from '../aiTown/ids';
 import { SerializedPlayer } from '../aiTown/player';
 import { memoryFields } from './schema';
@@ -11,6 +18,11 @@ import { formatGameTimestamp } from '../aiTown/gameTime';
 import {
   MAX_AFFINITY_CHANGE_PER_CONVERSATION,
   MAX_SHORT_TERM_CHANGE_PER_EVENT,
+  REFLECTION_IMPORTANCE_THRESHOLD,
+  REFLECTION_MIN_MEMORIES,
+  REFLECTION_OBSERVATIONS,
+  REFLECTION_OBSERVATION_CANDIDATES,
+  REFLECTION_OBSERVATION_WEIGHT_CAP,
 } from '../constants';
 import type { ShortTermComponent, ShortTermDelta } from '../aiTown/shortTerm';
 
@@ -111,15 +123,17 @@ export async function rememberConversation(
     },
     embedding,
   });
-  const learnedTrait = await reflectOnMemories(ctx, worldId, playerId);
-  return { description, affinityDeltas, shortTermDeltas, learnedTrait };
+  // Reflection is NOT triggered from here any more. It runs on its own cadence
+  // from the agent tick (see Agent.maybeReflect): a silent agent needs to reflect
+  // too, and two trigger paths could run concurrently and race on learnedTraits.
+  return { description, affinityDeltas, shortTermDeltas };
 }
 
 // A lasting takeaway an agent forms when a scenario wraps up (spec point 6).
 // Unlike the per-conversation memories the scenario's chats already produce, this
 // captures the OUTCOME and the agent's residual feelings about it, and returns
-// mood/stress deltas to apply. Stored as a reflection so it's recalled later when a
-// similar scenario recurs.
+// mood/stress deltas to apply. Stored under its own 'scenarioOutcome' memory
+// type so it's recalled later when a similar scenario recurs.
 export type ScenarioMemoryInput = {
   name: string; // the character's own name
   scenarioName: string;
@@ -169,10 +183,13 @@ export async function rememberScenarioOutcome(
   const shortTermDeltas = parsedDeltas.length > 0 ? parsedDeltas : heuristicScenarioFeelings(input);
   const importance = await calculateImportance(description);
   const { embedding } = await fetchEmbedding(description);
-  await ctx.runMutation(selfInternal.insertReflectionMemories, {
-    worldId,
+  await ctx.runMutation(selfInternal.insertScenarioOutcomeMemory, {
     playerId,
-    reflections: [{ description, relatedMemoryIds: [], importance, embedding }],
+    description,
+    importance,
+    embedding,
+    scenarioName: input.scenarioName,
+    goalMet: input.goalMet,
   });
   return { description, shortTermDeltas };
 }
@@ -492,6 +509,123 @@ export const insertMemory = internalMutation({
   },
 });
 
+// Promote salient observations into the embedded memory stream.
+//
+// The engine writes every observation to the `observations` table, but only the
+// ones that scored above OBSERVATION_EMBED_MIN_IMPORTANCE earn an embedding and
+// a `memories` row — that's what makes them retrievable in dialogue and worth
+// reflecting on. Embedding is an action (network I/O), so the engine schedules
+// this from saveDiff with the ids it just inserted.
+export const promoteObservations = internalAction({
+  args: { observationIds: v.array(v.id('observations')) },
+  handler: async (ctx, args): Promise<void> => {
+    const pending = await ctx.runQuery(selfInternal.loadObservationsToPromote, {
+      observationIds: args.observationIds,
+    });
+    if (pending.length === 0) return;
+    const { embeddings } = await embeddingsCache.fetchBatch(
+      ctx,
+      pending.map((o) => o.description),
+    );
+    await ctx.runMutation(selfInternal.writePromotedObservations, {
+      promoted: pending.map((o, i) => ({
+        observationId: o._id,
+        playerId: o.playerId,
+        description: o.description,
+        importance: o.importance,
+        at: o.at,
+        subjectPlayerIds: o.subjectPlayerIds ?? [],
+        embedding: embeddings[i],
+      })),
+    });
+  },
+});
+
+export const loadObservationsToPromote = internalQuery({
+  args: { observationIds: v.array(v.id('observations')) },
+  handler: async (ctx, args) => {
+    const out = [];
+    for (const id of args.observationIds) {
+      const observation = await ctx.db.get(id);
+      // Skip anything already promoted — a retry of this action must not create
+      // a second memory row for the same observation.
+      if (observation && !observation.promoted) out.push(observation);
+    }
+    return out;
+  },
+});
+
+export const writePromotedObservations = internalMutation({
+  args: {
+    promoted: v.array(
+      v.object({
+        observationId: v.id('observations'),
+        playerId,
+        description: v.string(),
+        importance: v.number(),
+        at: v.number(),
+        subjectPlayerIds: v.array(playerId),
+        embedding: v.array(v.float64()),
+      }),
+    ),
+  },
+  handler: async (ctx, args): Promise<void> => {
+    for (const item of args.promoted) {
+      const existing = await ctx.db.get(item.observationId);
+      if (!existing || existing.promoted) continue;
+      const embeddingId = await ctx.db.insert('memoryEmbeddings', {
+        playerId: item.playerId,
+        embedding: item.embedding,
+      });
+      await ctx.db.insert('memories', {
+        playerId: item.playerId,
+        description: item.description,
+        importance: item.importance,
+        lastAccess: item.at,
+        embeddingId,
+        data: {
+          type: 'observation',
+          subjectPlayerIds: item.subjectPlayerIds,
+        },
+      });
+      await ctx.db.patch(item.observationId, { promoted: true });
+    }
+  },
+});
+
+// A scenario's lasting takeaway. Stored under its own memory type rather than as
+// a reflection: `lastReflectionTs` is derived from the newest reflection-typed
+// memory, so writing these as reflections restarted the reflection accumulator
+// every time a scenario wrapped up.
+export const insertScenarioOutcomeMemory = internalMutation({
+  args: {
+    playerId,
+    description: v.string(),
+    importance: v.number(),
+    embedding: v.array(v.float64()),
+    scenarioName: v.optional(v.string()),
+    goalMet: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args): Promise<void> => {
+    const embeddingId = await ctx.db.insert('memoryEmbeddings', {
+      playerId: args.playerId,
+      embedding: args.embedding,
+    });
+    await ctx.db.insert('memories', {
+      playerId: args.playerId,
+      description: args.description,
+      importance: args.importance,
+      lastAccess: Date.now(),
+      embeddingId,
+      data: {
+        type: 'scenarioOutcome',
+        scenarioName: args.scenarioName,
+        goalMet: args.goalMet,
+      },
+    });
+  },
+});
+
 export const insertReflectionMemories = internalMutation({
   args: {
     worldId: v.id('worlds'),
@@ -526,35 +660,56 @@ export const insertReflectionMemories = internalMutation({
   },
 });
 
-async function reflectOnMemories(
+// Returns whether a reflection actually happened, plus the strongest insight.
+// The caller only advances the reflection window when `reflected` is true — a
+// below-threshold check must not consume the memories it declined to reflect on.
+export async function reflectOnMemories(
   ctx: ActionCtx,
   worldId: Id<'worlds'>,
   playerId: GameId<'players'>,
-) {
-  const { memories, lastReflectionTs, name } = await ctx.runQuery(
+  since?: number,
+): Promise<{ reflected: boolean; topInsight?: string }> {
+  const { memories: newMemories, observations, name } = await ctx.runQuery(
     internal.agent.memory.getReflectionMemories,
     {
       worldId,
       playerId,
       numberOfItems: 100,
+      since,
     },
   );
 
-  // should only reflect if lastest 100 items have importance score of >500
-  const sumOfImportanceScore = memories
-    .filter((m) => m._creationTime > (lastReflectionTs ?? 0))
-    .reduce((acc, curr) => acc + curr.importance, 0);
-  const shouldReflect = sumOfImportanceScore > 500;
+  // Observations are DISCOUNTED in the sum. They're far more numerous than
+  // conversation memories, so at full weight ambient perception alone would trip
+  // the threshold every few game-minutes and reflection would be constant.
+  const sumOfImportanceScore =
+    newMemories.reduce((acc, curr) => acc + curr.importance, 0) +
+    observations.reduce(
+      (acc, curr) => acc + Math.min(curr.importance, REFLECTION_OBSERVATION_WEIGHT_CAP),
+      0,
+    );
+  const shouldReflect =
+    newMemories.length + observations.length >= REFLECTION_MIN_MEMORIES &&
+    sumOfImportanceScore > REFLECTION_IMPORTANCE_THRESHOLD;
 
   if (!shouldReflect) {
-    return undefined;
+    return { reflected: false };
   }
   console.debug('sum of importance score = ', sumOfImportanceScore);
   console.debug('Reflecting...');
   const prompt = ['[no prose]', '[Output only JSON]', `You are ${name}, statements about you:`];
-  memories.forEach((m, idx) => {
+  newMemories.forEach((m, idx) => {
     prompt.push(`Statement ${idx}: ${m.description}`);
   });
+  // Listed after the memories and never cited back: `statementIds` indexes into
+  // `newMemories` alone, so observations inform the insights without being
+  // eligible as `relatedMemoryIds` (they aren't rows in `memories`).
+  if (observations.length > 0) {
+    prompt.push('Things you noticed around you recently:');
+    observations.forEach((o) => {
+      prompt.push(`- ${o.description}`);
+    });
+  }
   prompt.push('What 3 high-level insights can you infer from the above statements?');
   prompt.push(
     'Return in JSON format, where the key is a list of input statements that contributed to your insights and value is your insight. Make the response parseable by Typescript JSON.parse() function. DO NOT escape characters or include "\n" or white space in response.',
@@ -576,7 +731,11 @@ async function reflectOnMemories(
   try {
     const insights = JSON.parse(reflection) as { insight: string; statementIds: number[] }[];
     const memoriesToSave = await asyncMap(insights, async (item) => {
-      const relatedMemoryIds = item.statementIds.map((idx: number) => memories[idx]._id);
+      // The model occasionally cites a statement number that doesn't exist; drop
+      // those rather than throwing the whole reflection away on one bad index.
+      const relatedMemoryIds = (item.statementIds ?? [])
+        .filter((idx: number) => Number.isInteger(idx) && idx >= 0 && idx < newMemories.length)
+        .map((idx: number) => newMemories[idx]._id);
       const importance = await calculateImportance(item.insight);
       const { embedding } = await fetchEmbedding(item.insight);
       console.debug('adding reflection memory...', item.insight);
@@ -600,12 +759,24 @@ async function reflectOnMemories(
   } catch (e) {
     console.error('error saving or parsing reflection', e);
     console.debug('reflection', reflection);
-    return undefined;
+    // The LLM call happened and the window's material has been considered, so
+    // this counts as reflected — retrying the same statements would just burn
+    // another call on the same unparseable answer.
+    return { reflected: true };
   }
-  return topInsight;
+  return { reflected: true, topInsight };
 }
 export const getReflectionMemories = internalQuery({
-  args: { worldId: v.id('worlds'), playerId, numberOfItems: v.number() },
+  args: {
+    worldId: v.id('worlds'),
+    playerId,
+    numberOfItems: v.number(),
+    // Start of the reflection window: only material formed after this is new.
+    // Passed in from the Agent (`lastReflectionAt`) rather than derived from the
+    // newest reflection-typed memory, which any reflection-shaped write could
+    // silently reset.
+    since: v.optional(v.number()),
+  },
   handler: async (ctx, args) => {
     const world = await ctx.db.get(args.worldId);
     if (!world) {
@@ -622,24 +793,33 @@ export const getReflectionMemories = internalQuery({
     if (!playerDescription) {
       throw new Error(`Player description for ${args.playerId} not found`);
     }
-    const memories = await ctx.db
-      .query('memories')
-      .withIndex('playerId', (q) => q.eq('playerId', player.id))
-      .order('desc')
-      .take(args.numberOfItems);
+    const since = args.since ?? 0;
+    const memories = (
+      await ctx.db
+        .query('memories')
+        .withIndex('playerId', (q) => q.eq('playerId', player.id))
+        .order('desc')
+        .take(args.numberOfItems)
+    ).filter((m) => m._creationTime > since);
 
-    const lastReflection = await ctx.db
-      .query('memories')
-      .withIndex('playerId_type', (q) =>
-        q.eq('playerId', args.playerId).eq('data.type', 'reflection'),
-      )
-      .order('desc')
-      .first();
+    // Observations live in their own table (see convex/aiTown/schema.ts) and are
+    // fetched separately so ambient perception can't crowd conversation memories
+    // out of the window — they're capped and listed as their own block.
+    const observations = (
+      await ctx.db
+        .query('observations')
+        .withIndex('player', (q) => q.eq('worldId', args.worldId).eq('playerId', args.playerId))
+        .order('desc')
+        .take(REFLECTION_OBSERVATION_CANDIDATES)
+    )
+      .filter((o) => o.at > since)
+      .sort((a, b) => b.importance - a.importance)
+      .slice(0, REFLECTION_OBSERVATIONS);
 
     return {
       name: playerDescription.name,
       memories,
-      lastReflectionTs: lastReflection?._creationTime,
+      observations,
     };
   },
 });

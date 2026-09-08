@@ -1,5 +1,10 @@
 import { cronJobs } from 'convex/server';
-import { DELETE_BATCH_SIZE, IDLE_WORLD_TIMEOUT, VACUUM_MAX_AGE } from './constants';
+import {
+  DELETE_BATCH_SIZE,
+  IDLE_WORLD_TIMEOUT,
+  OBSERVATION_MAX_AGE_MS,
+  VACUUM_MAX_AGE,
+} from './constants';
 import { internal } from './_generated/api';
 import { internalMutation } from './_generated/server';
 import { TableNames } from './_generated/dataModel';
@@ -39,7 +44,41 @@ const TablesToVacuum: TableNames[] = [
   // Conflict/consequence log for the Tensions feed and inspector history; only
   // recent events are ever displayed, so old rows are safe to drop.
   'relationshipEvents',
+
+  // Short-term gauge transitions. Higher volume than relationshipEvents (a few
+  // per agent per game-day) and only useful to an offline evaluation run, so it
+  // is safe on the same two-week window.
+  'shortTermEvents',
 ];
+
+// The perception stream is far higher volume than anything above and has a much
+// shorter useful life: an observation feeds the reacting loop for minutes, and
+// anything worth keeping was already promoted into `memories` with an embedding.
+// So it gets its own aggressive sweep rather than the shared two-week window.
+crons.interval(
+  'vacuum observations',
+  { seconds: 15 * 60 },
+  internal.crons.vacuumObservations,
+);
+
+export const vacuumObservations = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const before = Date.now() - OBSERVATION_MAX_AGE_MS;
+    const stale = await ctx.db
+      .query('observations')
+      .withIndex('by_creation_time', (q) => q.lt('_creationTime', before))
+      .take(DELETE_BATCH_SIZE);
+    for (const row of stale) {
+      await ctx.db.delete(row._id);
+    }
+    // Re-run immediately while there's still a backlog, so a busy world doesn't
+    // accumulate faster than a single 15-minute batch can clear.
+    if (stale.length === DELETE_BATCH_SIZE) {
+      await ctx.scheduler.runAfter(0, internal.crons.vacuumObservations, {});
+    }
+  },
+});
 
 export const vacuumOldEntries = internalMutation({
   args: {},

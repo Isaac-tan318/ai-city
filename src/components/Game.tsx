@@ -5,6 +5,7 @@ import { useElementSize } from 'usehooks-ts';
 import { Stage } from '@pixi/react';
 import { ConvexProvider, useConvex, useQuery } from 'convex/react';
 import PlayerDetails from './PlayerDetails.tsx';
+import type { SelectedElement } from './Player.tsx';
 import { api } from '../../convex/_generated/api';
 import { useWorldHeartbeat } from '../hooks/useWorldHeartbeat.ts';
 import { useHistoricalTime } from '../hooks/useHistoricalTime.ts';
@@ -15,7 +16,6 @@ import { GameClock } from './GameClock.tsx';
 import { TimeControls } from './TimeControls.tsx';
 import { MiniMap } from './MiniMap.tsx';
 import { ScenariosPanel, ScenarioDetail } from './Scenarios.tsx';
-import { TensionsFeed } from './TensionsFeed.tsx';
 import { ScorecardModal } from './ScorecardModal.tsx';
 import { useNewEvaluation } from '../hooks/useNewEvaluation.ts';
 import type { Viewport } from 'pixi-viewport';
@@ -24,10 +24,7 @@ export const SHOW_DEBUG_UI = !!import.meta.env.VITE_SHOW_DEBUG_UI;
 
 export default function Game() {
   const convex = useConvex();
-  const [selectedElement, setSelectedElement] = useState<{
-    kind: 'player';
-    id: GameId<'players'>;
-  }>();
+  const [selectedElement, setSelectedElement] = useState<SelectedElement>();
   const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
   const [gameWrapperRef, { width, height }] = useElementSize();
 
@@ -85,11 +82,6 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
               nextScenarioTime={game.world.nextScenarioTime}
               onSelect={setSelectedScenarioId}
             />
-            <TensionsFeed
-              worldId={worldId}
-              game={game}
-              onSelectPlayer={(id) => setSelectedElement({ kind: 'player', id })}
-            />
           </div>
         </div>
         {/* Right column area */}
@@ -99,6 +91,7 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
             engineId={engineId}
             game={game}
             playerId={selectedElement?.id}
+            selection={selectedElement}
             setSelectedElement={setSelectedElement}
           />
         </div>
@@ -116,7 +109,8 @@ https://github.com/michalochman/react-pixi-fiber/issues/145#issuecomment-5315492
             worldId={worldId}
             onClose={() => setSelectedScenarioId(null)}
             onViewConversation={(playerId) => {
-              setSelectedElement({ kind: 'player', id: playerId });
+              // The button says "View the conversation", so it had better open it.
+              setSelectedElement({ kind: 'player', id: playerId, openChat: true });
               setSelectedScenarioId(null);
             }}
           />

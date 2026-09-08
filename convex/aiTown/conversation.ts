@@ -328,6 +328,9 @@ export class Conversation {
         // throw "Conversation not found" and brick the agent. Skip those.
         if (this.numMessages > 0) {
           agent.toRemember = this.id;
+          // A finished conversation counts toward the reflection gate, the same
+          // way an observation does (see Agent.maybeReflect).
+          agent.eventsSinceReflection = (agent.eventsSinceReflection ?? 0) + 1;
         }
       }
     }
@@ -346,6 +349,7 @@ export class Conversation {
       agent.lastConversation = now;
       if (this.numMessages > 0) {
         agent.toRemember = this.id;
+        agent.eventsSinceReflection = (agent.eventsSinceReflection ?? 0) + 1;
       }
     }
     this.participants.delete(player.id);

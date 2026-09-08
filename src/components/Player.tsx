@@ -18,7 +18,15 @@ import {
 } from '../../convex/constants.ts';
 import { affinityToward } from '../../convex/aiTown/affinity.ts';
 
-export type SelectElement = (element?: { kind: 'player'; id: GameId<'players'> }) => void;
+export type SelectedElement = {
+  kind: 'player';
+  id: GameId<'players'>;
+  // Set when the selection came from clicking someone on the map, which is also a
+  // request to read whatever they're currently saying.
+  openChat?: boolean;
+};
+
+export type SelectElement = (element?: SelectedElement) => void;
 
 const logged = new Set<string>();
 
@@ -166,7 +174,7 @@ export const Player = ({
         spritesheetData={character.spritesheetData}
         speed={character.speed}
         onClick={() => {
-          onClick({ kind: 'player', id: player.id });
+          onClick({ kind: 'player', id: player.id, openChat: true });
         }}
       />
     </>

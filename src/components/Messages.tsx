@@ -88,11 +88,13 @@ export function Messages({
     // form and loses the roster, which shortens the thread under the reader.
   }, [messages, currentlyTyping, conversation.kind]);
 
+  // The popup has nothing else on it, so returning null here would leave an
+  // empty frame on screen. Same treatment ChatHistoryViewer already gives it.
   if (messages === undefined) {
-    return null;
+    return <div className="py-6 text-center text-sm italic text-brown-300">Loading conversation…</div>;
   }
   if (messages.length === 0 && !inConversationWithMe) {
-    return null;
+    return <div className="py-6 text-center text-sm italic text-brown-300">No messages yet.</div>;
   }
   const messageNodes: { time: number; node: React.ReactNode }[] = messages.map((m) => {
     const node = (

@@ -916,6 +916,7 @@ function rememberScenarioForParticipants(game: Game, sc: SerializedActiveScenari
       playerId: pid,
       name: game.playerDescriptions.get(parseGameId('players', pid))?.name ?? 'Someone',
       scenarioName: sc.name,
+      scenarioId: sc.id,
       instruction: sc.instruction,
       goal: sc.completionGoal ?? sc.goals,
       goalMet: !!sc.goalMet,

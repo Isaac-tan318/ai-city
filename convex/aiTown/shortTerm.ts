@@ -19,6 +19,11 @@ import {
 // the Agent as `shortTerm` (lazily created — absent means "at baseline").
 export type ShortTermComponent = 'mood' | 'stress' | 'fatigue' | 'hunger';
 
+// The same four, enumerable at runtime. Anything that has to visit every gauge
+// — the transition log, the manual-override handler — reads this rather than
+// repeating the list and quietly missing one when a fifth is added.
+export const SHORT_TERM_COMPONENTS: ShortTermComponent[] = ['mood', 'stress', 'fatigue', 'hunger'];
+
 export type ShortTerm = {
   mood: number;
   stress: number;

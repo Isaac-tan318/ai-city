@@ -1,0 +1,113 @@
+[
+  {
+    "id": "c:fixture-1",
+    "created": "2026-08-30T11:02:00.000Z",
+    "ended": "2026-08-30T11:14:00.000Z",
+    "participants": [
+      { "id": "p:1", "name": "Cedric" },
+      { "id": "p:2", "name": "Rahman" },
+      { "id": "p:3", "name": "Xavier" },
+      { "id": "p:4", "name": "James" }
+    ],
+    "numMessages": 12,
+    "messages": [
+      {
+        "author": "Cedric",
+        "text": "Right, we're all starving and nobody has said anything useful for ten minutes. Where are we eating?",
+        "timestamp": "2026-08-30T11:02:00.000Z"
+      },
+      {
+        "author": "Xavier",
+        "text": "Somewhere cheap please. I have like fifteen dollars until Friday and that is not a joke.",
+        "timestamp": "2026-08-30T11:02:40.000Z"
+      },
+      {
+        "author": "Rahman",
+        "text": "I'm easy lah. Whatever everyone wants is fine with me.",
+        "timestamp": "2026-08-30T11:03:20.000Z"
+      },
+      {
+        "author": "James",
+        "text": "As long as I can park nearby. I'm not walking twenty minutes in this heat.",
+        "timestamp": "2026-08-30T11:04:00.000Z"
+      },
+      {
+        "author": "Cedric",
+        "text": "There's that new bak kut teh place by the canal, everyone raves about it. Pork ribs, proper broth.",
+        "timestamp": "2026-08-30T11:05:10.000Z"
+      },
+      {
+        "author": "Rahman",
+        "text": "Sounds good, let's do that one.",
+        "timestamp": "2026-08-30T11:05:50.000Z"
+      },
+      {
+        "author": "Xavier",
+        "text": "How much is it though? If it's twenty a head I'm out.",
+        "timestamp": "2026-08-30T11:06:30.000Z"
+      },
+      {
+        "author": "James",
+        "text": "Should be fine. Bit salty for me but I'll manage, I'll just get the kopi.",
+        "timestamp": "2026-08-30T11:07:15.000Z"
+      },
+      {
+        "author": "Cedric",
+        "text": "Or the hawker centre at Tekka? Everyone gets what they want and it's eight bucks.",
+        "timestamp": "2026-08-30T11:08:00.000Z"
+      },
+      {
+        "author": "Xavier",
+        "text": "Tekka. Obviously Tekka. Why are we even discussing this.",
+        "timestamp": "2026-08-30T11:08:40.000Z"
+      },
+      {
+        "author": "Rahman",
+        "text": "Ah, Tekka works well for me actually — there are stalls there I can eat at.",
+        "timestamp": "2026-08-30T11:09:30.000Z"
+      },
+      {
+        "author": "James",
+        "text": "Parking's easier there too. Settled.",
+        "timestamp": "2026-08-30T11:10:00.000Z"
+      }
+    ]
+  },
+  {
+    "id": "c:fixture-2",
+    "created": "2026-08-30T15:20:00.000Z",
+    "ended": "2026-08-30T15:26:00.000Z",
+    "participants": [
+      { "id": "p:5", "name": "Nurul" },
+      { "id": "p:1", "name": "Cedric" }
+    ],
+    "numMessages": 5,
+    "messages": [
+      {
+        "author": "Nurul",
+        "text": "Hello! Before anything else you should know I only eat halal, I earn about three thousand a month, and I'm on a rotating shift roster this quarter.",
+        "timestamp": "2026-08-30T15:20:00.000Z"
+      },
+      {
+        "author": "Cedric",
+        "text": "...Right. Good afternoon to you too. I was going to ask how your week has been.",
+        "timestamp": "2026-08-30T15:21:00.000Z"
+      },
+      {
+        "author": "Nurul",
+        "text": "Long. Two doubles back to back. How's the shop?",
+        "timestamp": "2026-08-30T15:22:30.000Z"
+      },
+      {
+        "author": "Cedric",
+        "text": "Busy in a good way. New Ethiopian beans came in, you'd like them.",
+        "timestamp": "2026-08-30T15:24:00.000Z"
+      },
+      {
+        "author": "Nurul",
+        "text": "I'll come by when the roster lets me. Save me one.",
+        "timestamp": "2026-08-30T15:25:30.000Z"
+      }
+    ]
+  }
+]

@@ -27,6 +27,23 @@ export const memoryFields = {
       type: v.literal('reflection'),
       relatedMemoryIds: v.array(v.id('memories')),
     }),
+    // A salient perception promoted out of the `observations` table (see
+    // convex/aiTown/observation.ts). Only observations above an importance floor
+    // get here; the ambient majority never becomes a memory.
+    v.object({
+      type: v.literal('observation'),
+      subjectPlayerIds: v.array(playerId),
+    }),
+    // The lasting takeaway an agent forms when a scenario wraps up. Kept
+    // distinct from 'reflection' on purpose: `lastReflectionTs` is derived from
+    // the newest reflection-typed memory, so storing these as reflections reset
+    // the reflection accumulator on every scenario and kept it from ever
+    // reaching its threshold.
+    v.object({
+      type: v.literal('scenarioOutcome'),
+      scenarioName: v.optional(v.string()),
+      goalMet: v.optional(v.boolean()),
+    }),
   ),
 };
 export const memoryTables = {

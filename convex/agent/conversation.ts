@@ -7,13 +7,16 @@ import { api, internal } from '../_generated/api';
 import * as embeddingsCache from './embeddingsCache';
 import { GameId, conversationId, playerId } from '../aiTown/ids';
 import { FamilyTie, affinityLabel, affinityToward, familyRelation } from '../aiTown/affinity';
+import { effectiveIdentity } from '../aiTown/agentDescription';
 import {
   buildShortTermSnapshot,
   shortTermSelfDescription,
   type ShortTerm,
 } from '../aiTown/shortTerm';
 import {
+  DEFAULT_AFFINITY,
   NUM_MEMORIES_TO_SEARCH,
+  RELATIONSHIP_MEMORIES_TO_SEARCH,
   SCENARIO_GOAL_CHECK_MIN_MESSAGES,
   SCENARIO_HISTORY_MESSAGE_COUNT,
   SCENARIO_RECALL_MEMORY_COUNT,
@@ -94,6 +97,9 @@ export async function startConversationMessage(
     ...previousConversationPrompt(primaryOther, lastConversation, worldStartTime, gameTimeMs),
   );
   prompt.push(...relatedMemoriesPrompt(memories));
+  prompt.push(
+    ...relationshipMemoriesPrompt(await relationshipMemories(ctx, player, others, memories)),
+  );
   if (agent?.scenarioId) {
     const scenarioMessages = await ctx.runQuery(selfInternal.loadScenarioMessages, {
       worldId,
@@ -169,6 +175,9 @@ export async function continueConversationMessage(
   prompt.push(...textMediumPrompt(conversation));
   prompt.push(...selfAndOthersPrompt(agent, others));
   prompt.push(...relatedMemoriesPrompt(memories));
+  prompt.push(
+    ...relationshipMemoriesPrompt(await relationshipMemories(ctx, player, others, memories)),
+  );
   if (agent?.scenarioId) {
     const scenarioMessages = await ctx.runQuery(selfInternal.loadScenarioMessages, {
       worldId,
@@ -665,6 +674,74 @@ function relatedMemoriesPrompt(memories: memory.Memory[]): string[] {
   return prompt;
 }
 
+// --- Two-part retrieval (Generative Agents §"dialogue generation") ---------
+//
+// The situational query above asks "what's relevant to what's happening now".
+// This second query asks "what do I know about the person in front of me",
+// which surfaces shared history the situational query misses entirely.
+//
+// Deliberately kept to ONE extra query even in a group: each one is a vector
+// search plus `rankAndTouchMemories` (a mutation that writes `lastAccess`), and
+// only the embedding itself is cached by text hash.
+
+// Who to run the relationship query about: in a 1:1 the other person, in a group
+// whoever this speaker feels most strongly about either way — a close friend or
+// someone they've clashed with carries more history worth recalling than a
+// neutral acquaintance.
+function relationshipFocus(others: OtherParticipant[]): OtherParticipant | undefined {
+  if (others.length === 0) return undefined;
+  if (others.length === 1) return others[0];
+  let best = others[0];
+  let bestDistance = -1;
+  for (const o of others) {
+    const distance = Math.abs((o.affinity ?? DEFAULT_AFFINITY) - DEFAULT_AFFINITY);
+    if (distance > bestDistance) {
+      best = o;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+// The relationship-keyed retrieval. The query text is per-pair and stable, so
+// `embeddingsCache` serves it from the hash after the first time this pair talks.
+async function relationshipMemories(
+  ctx: ActionCtx,
+  player: { id: string; name: string },
+  others: OtherParticipant[],
+  alreadyShown: memory.Memory[],
+): Promise<{ name: string; memories: memory.Memory[] } | undefined> {
+  const focus = relationshipFocus(others);
+  if (!focus) return undefined;
+  const embedding = await embeddingsCache.fetch(
+    ctx,
+    `What is ${player.name}'s relationship with ${focus.name}?`,
+  );
+  const found = await memory.searchMemories(
+    ctx,
+    player.id as GameId<'players'>,
+    embedding,
+    RELATIONSHIP_MEMORIES_TO_SEARCH,
+  );
+  // Dedupe by id only. The two result sets come from separate searches and
+  // `rankAndTouchMemories` min-max normalizes WITHIN its candidate set, so their
+  // scores aren't comparable — merging or re-ranking across them is meaningless.
+  const shown = new Set(alreadyShown.map((m) => m._id));
+  const memories = found.filter((m) => !shown.has(m._id));
+  if (memories.length === 0) return undefined;
+  return { name: focus.name, memories };
+}
+
+function relationshipMemoriesPrompt(
+  relational: { name: string; memories: memory.Memory[] } | undefined,
+): string[] {
+  if (!relational) return [];
+  return [
+    `What you remember about ${relational.name}:`,
+    ...relational.memories.map((m) => ' - ' + m.description),
+  ];
+}
+
 // Render recent messages from the rest of the current scenario (its OTHER
 // conversations) so the speaker stays consistent with what the group has already
 // said or agreed — e.g. tasks another pair has already claimed.
@@ -923,7 +1000,7 @@ export const queryPromptData = internalQuery({
         .query('agentDescriptions')
         .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('agentId', agent.id))
         .first();
-      agentIdentity = agentDescription?.identity;
+      agentIdentity = effectiveIdentity(agentDescription);
       // The character knows its OWN full structured background (self-full).
       agentProfile = agentDescription?.profile;
       // ...and how it relates to others (immutable family ties).
@@ -951,7 +1028,7 @@ export const queryPromptData = internalQuery({
           .query('agentDescriptions')
           .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('agentId', otherAgent.id))
           .first();
-        identity = ad?.identity;
+        identity = effectiveIdentity(ad);
       }
       others.push({
         id: pid,

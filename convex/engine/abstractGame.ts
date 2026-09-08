@@ -142,7 +142,18 @@ export async function engineInsertInput(
     .withIndex('byInputNumber', (q) => q.eq('engineId', engineId))
     .order('desc')
     .first();
-  const number = prevInput ? prevInput.number + 1 : 0;
+  // Numbering must stay ahead of what the engine has already consumed, not just
+  // ahead of the newest row in `inputs`. The daily vacuum (convex/crons.ts) drops
+  // inputs older than VACUUM_MAX_AGE, so a world left idle longer than that comes
+  // back with an EMPTY inputs table while its engine still holds the old
+  // `processedInputNumber`. Restarting at 0 there made every new input invisible
+  // to `loadInputs` (which takes `number > processedInputNumber`) — operations
+  // completed, wrote their result, and the engine never saw it, so every agent
+  // froze on a permanently in-flight operation. Anchoring on the engine's own
+  // counter keeps the sequence monotonic across a vacuum and self-heals an engine
+  // that is already stranded past the end of the table.
+  const engineDoc = await ctx.db.get(engineId);
+  const number = Math.max(prevInput?.number ?? -1, engineDoc?.processedInputNumber ?? -1) + 1;
   const inputId = await ctx.db.insert('inputs', {
     engineId,
     number,

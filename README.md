@@ -173,6 +173,16 @@ Note: If you want to run the backend in the cloud, you can either use a cloud-ba
 OpenAI or Together.ai or you can proxy the traffic from the cloud to your local Ollama. See
 [below](#using-local-inference-from-a-cloud-deployment) for instructions.
 
+All of the API keys below are set with `npx convex env set ...`, which stores them on the Convex
+_deployment_, not in a local file. That means they don't come along automatically if you ever swap
+Convex accounts/projects. To avoid re-typing every key by hand when that happens, copy
+`.env.keys.example` to `.env.keys` (git-ignored) and keep your real values there, then use:
+
+```sh
+npm run env:pull   # save the current deployment's env vars into .env.keys
+npm run env:push   # restore .env.keys onto whichever deployment is currently active
+```
+
 ### Ollama (default)
 
 By default, the app tries to use Ollama to run it entirely locally.

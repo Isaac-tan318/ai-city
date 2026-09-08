@@ -91,6 +91,10 @@ export const exportAllConversations = query({
           author: nameMap.get(m.author) ?? m.author,
           text: m.text,
           timestamp: new Date(m._creationTime).toISOString(),
+          // The active-scenario instance this was spoken under, when there was
+          // one. Carried so an exported transcript can be joined to the decision
+          // it produced; absent for ordinary ambient conversation.
+          scenarioId: m.scenarioId,
         })),
       });
     }

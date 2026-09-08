@@ -263,6 +263,24 @@ const LOCATION_EVENTS: Record<string, ContextualEvent[]> = {
     { description: 'in a group project huddle', emoji: '👥' },
     { description: 'queuing for an iced Milo', emoji: '🥤' },
   ],
+  changi_hospital: [
+    { description: 'doing the ward round', emoji: '🩺' },
+    { description: 'writing up patient notes', emoji: '📋' },
+    { description: 'restocking the trolley', emoji: '💊' },
+    { description: 'handing over to the next shift', emoji: '🔄' },
+  ],
+  hdb: [
+    { description: 'checking the works at the void deck', emoji: '🦺' },
+    { description: 'hanging out the washing', emoji: '🧺' },
+    { description: 'sitting with a resident who needs help', emoji: '🤝' },
+    { description: 'running a form down to the office', emoji: '📄' },
+  ],
+  gardens: [
+    { description: 'sweeping the path', emoji: '🧹' },
+    { description: 'clearing an overflowing bin', emoji: '🗑️' },
+    { description: 'watering the beds', emoji: '💧' },
+    { description: 'taking five in the shade', emoji: '🌳' },
+  ],
 };
 
 // Off-hours / non-work pool: free-form activities for any time the agent isn't

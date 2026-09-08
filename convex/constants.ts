@@ -1,8 +1,22 @@
 export const ACTION_TIMEOUT = 120_000; // more time for local dev
 // export const ACTION_TIMEOUT = 60_000;// normally fine
 
-export const IDLE_WORLD_TIMEOUT = 5 * 60 * 1000;
+// Backstop for reaping a world nobody is watching. The frontend now releases the
+// world the moment the tab is hidden or closed (see useWorldHeartbeat), so this
+// only has to cover the cases that can't run code on the way out: a browser
+// crash, a killed process, a lost connection. Shortened from 5 minutes because a
+// running world costs a full engine step every second regardless of whether it
+// is being watched.
+//
+// Keep this comfortably above WORLD_HEARTBEAT_INTERVAL: the 'stop inactive
+// worlds' cron runs on this same period, and if the two were close a live
+// viewer's world could be reaped in the gap between two heartbeats.
+export const IDLE_WORLD_TIMEOUT = 2 * 60 * 1000;
 export const WORLD_HEARTBEAT_INTERVAL = 60 * 1000;
+// How long a tab stays hidden before we stop its world. Long enough that
+// glancing at another tab and back doesn't stop and restart the engine, short
+// enough that walking away costs almost nothing.
+export const WORLD_RELEASE_DELAY = 10 * 1000;
 
 export const MAX_STEP = 10 * 60 * 1000;
 export const TICK = 16;
@@ -387,6 +401,91 @@ export const CHARACTER_ACTIVITIES: Record<string, Activity[]> = {
     { description: 'sipping a proper cup of tea', emoji: '🫖', duration: 20_000, cost: 4, energy: 0 },
     { description: 'mentoring a postdoc', emoji: '🧑‍🔬', duration: 20_000, energy: 15 },
   ],
+  Yvonne: [
+    { description: 'practising her brush calligraphy', emoji: '🖌️', duration: 20_000, energy: 5 },
+    { description: 'triple-checking a circular', emoji: '📑', duration: 20_000, energy: 10 },
+    { description: 'planning a hotpot meetup', emoji: '🍲', duration: 20_000, cost: 6, energy: 0 },
+  ],
+  Bernard: [
+    { description: 'reading in the shade', emoji: '📖', duration: 20_000, energy: 0 },
+    { description: 'taking a slow flat walk', emoji: '🚶', duration: 20_000, energy: 10 },
+    { description: 'rubbing his sore knee', emoji: '🦵', duration: 20_000, energy: 0 },
+  ],
+  Nikhil: [
+    { description: 'reordering his project board', emoji: '📊', duration: 20_000, energy: 10 },
+    { description: 'running through a chess opening', emoji: '♟️', duration: 20_000, energy: 5 },
+    { description: 'checking a menu for anything vegetarian', emoji: '🥗', duration: 20_000, energy: 0 },
+  ],
+  Nurul: [
+    { description: 'catching up on sleep after a night shift', emoji: '😴', duration: 20_000, energy: 0 },
+    { description: 'checking in on a neighbour', emoji: '🤝', duration: 20_000, energy: 10 },
+    { description: 'looking for somewhere quiet to pray', emoji: '🕌', duration: 20_000, energy: 0 },
+  ],
+  Ratna: [
+    { description: 'sending a voice note home', emoji: '📞', duration: 20_000, energy: 0 },
+    { description: 'humming while she folds laundry', emoji: '🧺', duration: 20_000, energy: 15 },
+    { description: 'counting out what she can send back', emoji: '💵', duration: 20_000, energy: 0 },
+  ],
+  Kerem: [
+    { description: 'brewing tea for whoever turns up', emoji: '🫖', duration: 20_000, cost: 3, energy: 5 },
+    { description: 'setting up the backgammon board', emoji: '🎲', duration: 20_000, energy: 5 },
+    { description: 'talking a supplier round', emoji: '📞', duration: 20_000, energy: 15 },
+  ],
+  Irina: [
+    { description: 'playing a nocturne to herself', emoji: '🎹', duration: 20_000, energy: 10 },
+    { description: 'marking up a student’s score', emoji: '🎼', duration: 20_000, energy: 5 },
+    { description: 'frowning at the noise upstairs', emoji: '😤', duration: 20_000, energy: 0 },
+  ],
+  Emeka: [
+    { description: 'walking the site before the crew arrives', emoji: '🦺', duration: 20_000, energy: 25 },
+    { description: 'practising with the church choir', emoji: '🎶', duration: 20_000, energy: 10 },
+    { description: 'wiring money home', emoji: '💸', duration: 20_000, cost: 10, energy: 0 },
+  ],
+  Sharifah: [
+    { description: 'reading up on a new drug interaction', emoji: '📚', duration: 20_000, energy: 10 },
+    { description: 'making a pot of tea', emoji: '🍵', duration: 20_000, cost: 3, energy: 0 },
+    { description: 'answering a colleague’s late-night question', emoji: '💬', duration: 20_000, energy: 5 },
+  ],
+  Hanna: [
+    { description: 'running a coffee ceremony for the ward', emoji: '☕', duration: 20_000, cost: 5, energy: 15 },
+    { description: 'cooking a big pot for whoever comes', emoji: '🍲', duration: 20_000, cost: 8, energy: 20 },
+    { description: 'sitting quietly through a fasting day', emoji: '🙏', duration: 20_000, energy: 0 },
+  ],
+  Naomi: [
+    { description: 'going for a hard morning run', emoji: '🏃', duration: 20_000, energy: 25 },
+    { description: 'listening to a legal podcast', emoji: '🎧', duration: 20_000, energy: 0 },
+    { description: 'deflecting a nosy question', emoji: '🙃', duration: 20_000, energy: 5 },
+  ],
+  Tiago: [
+    { description: 'drumming on whatever is nearest', emoji: '🥁', duration: 20_000, energy: 15 },
+    { description: 'chasing up an unpaid gig', emoji: '📱', duration: 20_000, energy: 10 },
+    { description: 'sleeping off a late night', emoji: '😴', duration: 20_000, energy: 0 },
+  ],
+  Harpreet: [
+    { description: 'cooking for the community meal', emoji: '🍛', duration: 20_000, cost: 10, energy: 25 },
+    { description: 'mentoring a student who is struggling', emoji: '🧑‍🏫', duration: 20_000, energy: 15 },
+    { description: 'making sure nobody has been left out', emoji: '🫂', duration: 20_000, energy: 5 },
+  ],
+  Mateo: [
+    { description: 'watering his potted chillies', emoji: '🌶️', duration: 20_000, energy: 10 },
+    { description: 'saving what someone else threw out', emoji: '♻️', duration: 20_000, energy: 5 },
+    { description: 'sitting quietly, listening', emoji: '🤐', duration: 20_000, energy: 0 },
+  ],
+  Dylan: [
+    { description: 'checking the surf report', emoji: '🏄', duration: 20_000, energy: 0 },
+    { description: 'running through his kit', emoji: '🚑', duration: 20_000, energy: 10 },
+    { description: 'grilling a kitchen about peanuts', emoji: '🥜', duration: 20_000, energy: 5 },
+  ],
+  Aroha: [
+    { description: 'checking in on one of her young people', emoji: '🧒', duration: 20_000, energy: 15 },
+    { description: 'singing with the community group', emoji: '🎤', duration: 20_000, energy: 10 },
+    { description: 'talking two neighbours back together', emoji: '🕊️', duration: 20_000, energy: 20 },
+  ],
+  Ravi: [
+    { description: 'restocking the shop shelves', emoji: '🏪', duration: 20_000, energy: 20 },
+    { description: 'watching the cricket', emoji: '🏏', duration: 20_000, energy: 0 },
+    { description: 'letting a regular off the bill again', emoji: '🧾', duration: 20_000, energy: 5 },
+  ],
 };
 
 export function activitiesForName(name?: string): Activity[] {
@@ -487,6 +586,125 @@ export const SHORT_TERM_INDICATOR_MS = 6000;
 // Cap on how many durable "learned traits" an agent accumulates from reflection
 // (spec point 6); oldest are dropped past this so the list stays bounded.
 export const MAX_LEARNED_TRAITS = 6;
+
+// --- Reflection trigger ---
+// Accumulated importance (across memories formed since the last reflection)
+// that tips an agent into reflecting. The original 500 was unreachable: memories
+// are scored 0–9 and an agent forms a handful per in-game day, so it needed
+// roughly 20 in-game days of talking to trip once.
+export const REFLECTION_IMPORTANCE_THRESHOLD = 40;
+// Never reflect on fewer than this many new memories, however poignant they
+// were — three insights drawn from two statements is just paraphrasing.
+export const REFLECTION_MIN_MEMORIES = 5;
+// How often an agent may CHECK whether it should reflect. The check itself is a
+// query, not an LLM call; Agent.tick fires ~62x/real second, so it needs a
+// wall-clock throttle like everything else in the prelude.
+export const REFLECTION_CHECK_INTERVAL_MS = 30_000;
+// Floor on the gap between actual reflections — roughly 5 in-game hours, so an
+// agent reflects a small number of times per in-game day rather than after every
+// eventful stretch.
+export const REFLECTION_MIN_INTERVAL_MS = 4 * 60 * 1000;
+// New memorable events (observations emitted, conversations finished) needed
+// before the check is worth running at all. Counted engine-side so the gate
+// costs nothing until there's something to reflect on.
+export const REFLECTION_MIN_EVENTS = 5;
+// Observations considered as reflection input: fetched by recency, then the most
+// salient of those are kept.
+export const REFLECTION_OBSERVATION_CANDIDATES = 60;
+export const REFLECTION_OBSERVATIONS = 20;
+// Observations count for at most this much each toward the reflection threshold.
+// They vastly outnumber conversation memories, so at full weight ambient
+// perception alone would trip the threshold every few game-minutes.
+export const REFLECTION_OBSERVATION_WEIGHT_CAP = 2;
+
+// --- Observation stream (perception) ---
+// How often each agent runs a perception pass. Agent.tick fires every 16ms of
+// simulated time (~62x/real second), so this must be wall-clock throttled. Five
+// real seconds is five in-game minutes during awake hours.
+export const OBSERVATION_INTERVAL_MS = 5000;
+// Observations at or above this salience get an embedding and a row in the
+// `memories` table, so they can surface in dialogue retrieval and reflection.
+// Below it they stay in `observations` as ambient context for the reacting loop.
+export const OBSERVATION_EMBED_MIN_IMPORTANCE = 3;
+// Hard cap per engine step. The diff crosses into saveDiff as a mutation
+// ARGUMENT, so an unbounded buffer fails the whole step instead of dropping a
+// few ambient observations.
+export const MAX_OBSERVATIONS_PER_STEP = 32;
+// How far from an observer's OWN average regard a relationship has to sit before
+// the person stands out to them. Relative, not absolute: affinity only ever
+// climbs in ordinary conversation and saturates near 100 across a long-running
+// town, at which point any fixed threshold fires on everyone and the whole
+// ambient stream gets promoted into long-term memory.
+export const AFFINITY_STANDOUT_DELTA = 15;
+// Cap on an agent's remembered dedupe fingerprints. Sized above the cast so a
+// crowded location can't push a subject out and cause repeat observations.
+export const MAX_OBSERVED_SUBJECTS = 16;
+// Observations are pruned far more aggressively than memories — they're ambient
+// context with a short useful life, and anything worth keeping was already
+// promoted into `memories` with an embedding. Twelve in-game days, i.e.
+// 12 * CYCLE_MS, spelled out because this module is deliberately import-free.
+//
+// Sized in REAL time (~3.8 hours), not game days: at 19 real minutes per in-game
+// day a two-day window is 38 real minutes, which emptied the table between
+// glances and could clip a reflection window for an agent who had been quiet.
+// Dedupe keeps the volume here low enough that a few hours costs little.
+export const OBSERVATION_MAX_AGE_MS = 12 * 19 * 60 * 1000;
+
+// --- Self-summary regeneration ---
+// Master switch. Identity drift is the one change here that compounds silently
+// over many in-game days, so it's worth being able to turn off without a revert.
+export const SELF_SUMMARY_ENABLED = true;
+// Nothing is rewritten before this in-game day: day 1 is the authored character,
+// and there's nothing to summarise from yet.
+export const SELF_SUMMARY_FIRST_DAY = 2;
+// In-game days between rewrites. NOT every day: an in-game day is 19 real
+// minutes, so daily regeneration rewrote every character about three times an
+// hour and the cast measurably converged — each summary is written from the
+// previous one, and eight characters all summarised by the same model drift
+// toward the same phrasing. Every few days leaves room for something to
+// actually have happened between rewrites.
+export const SELF_SUMMARY_INTERVAL_DAYS = 4;
+// What the rewrite draws on.
+export const SELF_SUMMARY_REFLECTIONS = 6;
+export const SELF_SUMMARY_MEMORY_CANDIDATES = 40;
+export const SELF_SUMMARY_MEMORIES = 8;
+
+// --- Reacting loop ---
+// How often an agent may consider reacting to what it has perceived. Each check
+// that gets past the salience gate below is one LLM call whose usual answer is
+// "ignore", so this is deliberately much slower than the perception pass.
+export const REACTION_INTERVAL_MS = 45_000;
+// An observation must be at least this salient to be worth a reaction check.
+// Without this gate the loop pays for a completion every 45s per agent to be
+// told that nothing has changed.
+export const REACTION_MIN_IMPORTANCE = 3;
+// How many recent unprocessed observations the reaction prompt sees.
+export const MAX_REACTION_OBSERVATIONS = 8;
+// Reaction-driven replans get their own short cooldown rather than borrowing
+// `forcePlan`, which is the scenario-injection escape hatch and the only thing
+// keeping replan churn in check.
+export const REACTION_REPLAN_COOLDOWN_MS = 60_000;
+// Ceiling on reaction-driven replans per in-game day, so a talkative model can't
+// keep an agent permanently re-planning instead of living their day.
+export const MAX_REACT_REPLANS_PER_DAY = 2;
+
+// --- Hierarchical plan decomposition ---
+// Only blocks at least this long (in game-minutes) are worth breaking into
+// finer actions. Most days are 4–7 blocks of 2–5 game-hours, so this catches
+// work shifts and long evenings while leaving short errands alone.
+export const SUBSTEP_MIN_BLOCK_MINUTES = 90;
+// Floor on how short a decomposed action may be, so the LLM can't produce a
+// flicker of one-minute activities nobody can read on the map.
+export const SUBSTEP_MIN_MINUTES = 15;
+// Cap on sub-steps per block — beyond this the activity churns faster than it
+// reads, and the prompt starts inventing filler.
+export const MAX_SUBSTEPS_PER_BLOCK = 5;
+
+// --- Two-part dialogue retrieval ---
+// How many memories the relationship-keyed query returns, alongside the
+// situational NUM_MEMORIES_TO_SEARCH. Kept small: it's a second block in every
+// conversation prompt, and one extra vector search per message.
+export const RELATIONSHIP_MEMORIES_TO_SEARCH = 2;
 
 // --- Economic model (savings + costs → financial pressure) ---
 // Every agent tracks a savings balance in local dollars. Income is credited on

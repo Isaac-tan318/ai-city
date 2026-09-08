@@ -9,6 +9,8 @@ import { serializedWorldMap } from './worldMap';
 import { serializedConversation } from './conversation';
 import { conversationId, playerId } from './ids';
 import { serializedRelationshipEvent } from './relationshipEvents';
+import { serializedShortTermEvent } from './shortTermEvents';
+import { serializedObservation } from './observation';
 
 export const aiTownTables = {
   // This table has a single document that stores all players, conversations, and agents. This
@@ -91,4 +93,31 @@ export const aiTownTables = {
   })
     .index('world', ['worldId', 'at'])
     .index('actor', ['worldId', 'actor', 'at']),
+
+  // Per-gauge short-term state transitions (convex/aiTown/shortTermEvents.ts).
+  // The Agent keeps only the current value of each gauge; this keeps the
+  // movement, which is what checking the update rules actually needs. Same
+  // buffer-and-flush path as relationshipEvents above, vacuumed alongside it.
+  shortTermEvents: defineTable({
+    worldId: v.id('worlds'),
+    ...serializedShortTermEvent,
+  })
+    .index('world', ['worldId', 'at'])
+    .index('player', ['worldId', 'playerId', 'at']),
+
+  // The perception stream (convex/aiTown/observation.ts): what each agent saw,
+  // buffered by the engine during a step and flushed in saveDiff.
+  //
+  // Deliberately NOT the `memories` table. Observations outnumber conversation
+  // memories by an order of magnitude, and both `memoriesForPlayer` (60 rows,
+  // no type filter — the agents-popup debugging surface) and the reflection
+  // window (100 rows) read `memories` unfiltered, so mixing them in would drown
+  // both. The salient minority is promoted into `memories` with an embedding;
+  // the rest stays here, queryable by recency and by the reacting loop.
+  observations: defineTable({
+    worldId: v.id('worlds'),
+    ...serializedObservation,
+  })
+    .index('player', ['worldId', 'playerId', 'at'])
+    .index('unprocessed', ['worldId', 'playerId', 'processed', 'at']),
 };

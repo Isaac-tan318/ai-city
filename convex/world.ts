@@ -59,6 +59,44 @@ export const heartbeatWorld = mutation({
   },
 });
 
+// Stop a world the moment nobody is looking at it, rather than waiting out
+// IDLE_WORLD_TIMEOUT and the cron behind it.
+//
+// This exists because a running world costs the same whether or not anyone is
+// watching: the engine steps once per second forever, rewriting the whole world
+// document and driving every agent's LLM calls. A browser tab left open behind
+// other windows keeps heartbeating (background timer throttling floors out at
+// about once a minute, which is exactly the heartbeat interval), so a forgotten
+// tab can simulate for days. Killing the dev server does NOT help — the page
+// talks straight to the Convex deployment, so an already-loaded tab keeps going.
+//
+// Safe to call spuriously: a world someone else is still watching gets restarted
+// by their next heartbeat within WORLD_HEARTBEAT_INTERVAL, and a world the
+// developer paused by hand is left alone.
+export const releaseWorld = mutation({
+  args: {
+    worldId: v.id('worlds'),
+  },
+  handler: async (ctx, args) => {
+    const worldStatus = await ctx.db
+      .query('worldStatus')
+      .withIndex('worldId', (q) => q.eq('worldId', args.worldId))
+      .first();
+    if (!worldStatus) {
+      throw new Error(`Invalid world ID: ${args.worldId}`);
+    }
+    // Only ever stop a world that is actually running. In particular never touch
+    // 'stoppedByDeveloper' — that's the explicit Pause, and clobbering it here
+    // would let the next heartbeat resume something the developer switched off.
+    if (worldStatus.status !== 'running') {
+      return;
+    }
+    console.log(`Releasing unwatched world ${worldStatus._id}`);
+    await ctx.db.patch(worldStatus._id, { status: 'inactive' });
+    await stopEngine(ctx, worldStatus.worldId);
+  },
+});
+
 export const stopInactiveWorlds = internalMutation({
   handler: async (ctx) => {
     const cutoff = Date.now() - IDLE_WORLD_TIMEOUT;

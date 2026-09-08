@@ -9,10 +9,15 @@
     "predev": "convex dev --run init --until-success",
     "dev:backend": "convex dev --tail-logs",
     "dev:frontend": "vite",
+    "stop": "convex run testing:stop",
+    "resume": "convex run testing:resume",
     "dashboard": "convex dashboard",
+    "env:push": "node scripts/sync-convex-env.mjs push",
+    "env:pull": "node scripts/sync-convex-env.mjs pull",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest --verbose",
     "level-editor": "vite src/editor/",
-    "le": "vite src/editor/"
+    "le": "vite src/editor/",
+    "eval": "node evaluation/run.mjs"
   },
   "dependencies": {
     "@clerk/clerk-react": "^4.27.0",

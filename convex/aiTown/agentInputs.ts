@@ -7,7 +7,7 @@ import { inputHandler } from './inputHandler';
 import { point } from '../util/types';
 import { Descriptions } from '../../data/characters';
 import { AgentDescription } from './agentDescription';
-import { Agent, scheduleStep } from './agent';
+import { Agent, scheduleStep, subStep } from './agent';
 import { affinityToward, clampAffinity } from './affinity';
 import { applyFocalTurn, focalTurnDelta, serializedDecisionOption } from './deliberation';
 import {
@@ -16,11 +16,15 @@ import {
   shortTermOrDefault,
   shortTermSensitivity,
   spend,
+  SHORT_TERM_COMPONENTS,
   type ShortTermComponent,
   type ShortTermDelta,
 } from './shortTerm';
+import { shortTermCause } from './shortTermEvents';
 import {
+  CONTEXTUAL_EVENT_MINUTES,
   MAX_LEARNED_TRAITS,
+  MAX_REACT_REPLANS_PER_DAY,
   SCENARIO_CUSTOM_MIN_PARTICIPANTS,
   SICK_DURATION_DAYS,
 } from '../constants';
@@ -636,6 +640,12 @@ export const agentInputs = {
         }),
       ),
       reason: v.optional(v.string()),
+      // What produced these deltas, for the durable transition log. Optional so
+      // an older queued input still applies; it is only the log that suffers.
+      cause: v.optional(shortTermCause),
+      conversationId: v.optional(conversationId),
+      scenarioId: v.optional(v.string()),
+      goalMet: v.optional(v.boolean()),
     },
     handler: (game, now, args) => {
       const agentId = parseGameId('agents', args.agentId);
@@ -646,6 +656,10 @@ export const agentInputs = {
       if (args.deltas.length === 0) return null;
       const profile = game.agentDescriptions.get(agentId)?.profile;
       const multipliers = shortTermSensitivity(profile);
+      // Captured before the deltas land: the log records both endpoints, and
+      // the reactivity multiplier plus the clamp mean the applied change is
+      // rarely the requested one.
+      const before = shortTermOrDefault(agent.shortTerm, now);
       const { shortTerm, net } = applyShortTermDeltas(
         agent.shortTerm,
         args.deltas as ShortTermDelta[],
@@ -655,6 +669,21 @@ export const agentInputs = {
       agent.shortTerm = shortTerm;
       if (net !== 0) {
         agent.lastShortTermChange = { at: now, net };
+      }
+      for (const component of SHORT_TERM_COMPONENTS) {
+        game.emitShortTermEvent({
+          at: now,
+          playerId: agent.playerId,
+          component,
+          delta: shortTerm[component] - before[component],
+          valueBefore: before[component],
+          valueAfter: shortTerm[component],
+          cause: args.cause ?? 'conversationFeelings',
+          reason: args.reason,
+          conversationId: args.conversationId,
+          scenarioId: args.scenarioId,
+          goalMet: args.goalMet,
+        });
       }
       return null;
     },
@@ -704,6 +733,21 @@ export const agentInputs = {
         agent.shortTerm = after;
         if (net !== 0) {
           agent.lastShortTermChange = { at: now, net };
+        }
+        // Logged as 'manualOverride', which the evaluation rules treat as a
+        // legitimate reset with no expected direction — because there isn't
+        // one. A human typing 40 into the box is not the mechanism under test.
+        for (const component of SHORT_TERM_COMPONENTS) {
+          game.emitShortTermEvent({
+            at: now,
+            playerId: agent.playerId,
+            component,
+            delta: after[component] - before[component],
+            valueBefore: before[component],
+            valueAfter: after[component],
+            cause: 'manualOverride',
+            reason: 'set from the agents panel',
+          });
         }
       }
       if (args.balance !== undefined) {
@@ -802,6 +846,144 @@ export const agentInputs = {
   // Promote a reflected-on insight to a durable "learned trait" (spec point 6).
   // Appended to a bounded, de-duplicated list kept separate from the authored
   // profile so runtime learning never overwrites the hand-authored persona.
+  // Write-back for agentDecomposeStep: the finer actions for one schedule block.
+  finishDecomposeStep: inputHandler({
+    args: {
+      operationId: v.string(),
+      agentId,
+      stepKey: v.string(),
+      steps: v.array(subStep),
+    },
+    handler: (game, now, args) => {
+      const agentId = parseGameId('agents', args.agentId);
+      const agent = game.world.agents.get(agentId);
+      if (!agent) {
+        throw new Error(`Couldn't find agent: ${agentId}`);
+      }
+      if (
+        !agent.inProgressOperation ||
+        agent.inProgressOperation.operationId !== args.operationId
+      ) {
+        console.debug(`Agent ${agentId} didn't have ${args.operationId} in progress`);
+        return null;
+      }
+      delete agent.inProgressOperation;
+      // Clear the in-flight stamp either way. On an empty result the block keeps
+      // its single whole-block activity — the pre-decomposition behaviour — and
+      // won't be re-requested, since the stamp only re-arms on a new step key.
+      if (args.steps.length > 0) {
+        agent.activeSubSteps = { stepKey: args.stepKey, steps: args.steps };
+        // Expire the whole-block activity that was set while we waited. It runs
+        // to the END of the block, so without this `tickSchedule` would never
+        // re-enter its `!doingActivity` branch and the sub-steps we just asked
+        // for would sit unused until the block (and their step key) expired.
+        const player = game.world.players.get(agent.playerId);
+        if (player?.activity && player.activity.ambient) {
+          player.activity.until = now;
+        }
+      }
+      return null;
+    },
+  }),
+  // Write-back for agentRegenerateSelfSummary. Writes to the description table
+  // (not the Agent), so it must flag descriptionsModified for saveDiff to persist.
+  agentSetSelfSummary: inputHandler({
+    args: {
+      agentId,
+      selfSummary: v.string(),
+      dayNumber: v.number(),
+    },
+    handler: (game, _now, args) => {
+      const agentId = parseGameId('agents', args.agentId);
+      const description = game.agentDescriptions.get(agentId);
+      if (!description) {
+        throw new Error(`Couldn't find agent description: ${agentId}`);
+      }
+      const summary = args.selfSummary.trim();
+      if (!summary) return null;
+      description.selfSummary = summary;
+      description.selfSummaryDay = args.dayNumber;
+      game.descriptionsModified = true;
+      return null;
+    },
+  }),
+  // Write-back for agentReact: apply whatever the agent decided to do about what
+  // it noticed. Every branch is a no-op if its precondition doesn't hold — a
+  // reaction is a nudge, not an override of the rest of the system.
+  finishReact: inputHandler({
+    args: {
+      agentId,
+      reaction: v.string(),
+      targetPlayerId: v.optional(playerId),
+      activity: v.string(),
+      emoji: v.optional(v.string()),
+      reason: v.optional(v.string()),
+    },
+    handler: (game, now, args) => {
+      const agentId = parseGameId('agents', args.agentId);
+      const agent = game.world.agents.get(agentId);
+      if (!agent) {
+        throw new Error(`Couldn't find agent: ${agentId}`);
+      }
+      const player = game.world.players.get(agent.playerId);
+      if (!player) return null;
+      if (args.reaction === 'talk') {
+        if (!args.targetPlayerId) return null;
+        // A preference for the next invite, consumed once used. The invite path
+        // still applies every one of its own rules (cooldowns, the work leash,
+        // scenario boundaries), so this can only steer a conversation that was
+        // going to be allowed anyway.
+        agent.preferredInvitee = parseGameId('players', args.targetPlayerId);
+        return null;
+      }
+      if (args.reaction === 'activity') {
+        if (!args.activity) return null;
+        // Ambient, or the `interrupting` check in Agent.tick cancels it the
+        // moment the agent takes a step.
+        player.activity = {
+          description: args.activity,
+          emoji: args.emoji ?? '💭',
+          until: now + CONTEXTUAL_EVENT_MINUTES * (CYCLE_MS / (24 * 60)),
+          ambient: true,
+        };
+        return null;
+      }
+      if (args.reaction === 'replan') {
+        const gt = computeGameTime(now, game.world.worldStartTime);
+        if (agent.reactReplansDay !== gt.dayNumber) {
+          agent.reactReplansDay = gt.dayNumber;
+          agent.reactReplansToday = 0;
+        }
+        if ((agent.reactReplansToday ?? 0) >= MAX_REACT_REPLANS_PER_DAY) return null;
+        agent.reactReplansToday = (agent.reactReplansToday ?? 0) + 1;
+        // Deliberately NOT `forcePlan`: that bypasses every throttle and belongs
+        // to scenario injection. `reactionReplan` gets its own, much shorter
+        // cooldown — plain `scheduleNeedsRefresh` would be honoured only after
+        // PLAN_COOLDOWN_MS (5 real minutes ≈ 5 in-game hours), far too late to
+        // read as a reaction to something just seen.
+        agent.scheduleNeedsRefresh = true;
+        agent.reactionReplan = true;
+        console.log(`Agent ${agentId} re-planning after noticing something: ${args.reason ?? ''}`);
+      }
+      return null;
+    },
+  }),
+  // Write-back for agentReflect. Only called when a reflection actually
+  // happened, so a below-threshold check never consumes the memories it declined
+  // to reflect on.
+  finishReflect: inputHandler({
+    args: { agentId },
+    handler: (game, now, args) => {
+      const agentId = parseGameId('agents', args.agentId);
+      const agent = game.world.agents.get(agentId);
+      if (!agent) {
+        throw new Error(`Couldn't find agent: ${agentId}`);
+      }
+      agent.lastReflectionAt = now;
+      agent.eventsSinceReflection = 0;
+      return null;
+    },
+  }),
   agentAddLearnedTrait: inputHandler({
     args: {
       agentId,

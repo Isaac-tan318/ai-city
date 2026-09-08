@@ -4,7 +4,7 @@ import { api } from '../../convex/_generated/api';
 import { Id } from '../../convex/_generated/dataModel';
 import closeImg from '../../assets/close.svg';
 import interactImg from '../../assets/interact.svg';
-import { SelectElement } from './Player';
+import { SelectElement, SelectedElement } from './Player';
 import { ConversationPopup } from './ConversationPopup';
 import { ScenarioCreator } from './ScenarioCreator';
 import { toastOnError } from '../toasts';
@@ -63,12 +63,15 @@ export default function PlayerDetails({
   engineId,
   game,
   playerId,
+  selection,
   setSelectedElement,
 }: {
   worldId: Id<'worlds'>;
   engineId: Id<'engines'>;
   game: ServerGame;
   playerId?: GameId<'players'>;
+  // The raw selection, so the popup can tell a click from a mere re-render.
+  selection?: SelectedElement;
   setSelectedElement: SelectElement;
 }) {
   const humanTokenIdentifier = useQuery(api.world.userStatus, { worldId });
@@ -107,24 +110,49 @@ export default function PlayerDetails({
     playerConversation.participants.get(playerId)?.status.kind === 'participating'
       ? playerConversation
       : undefined;
-  const liveConversationId = !isMe && liveConversation ? liveConversation.id : undefined;
 
   // All the scenario-picking state now lives inside ScenarioCreator; this only
   // owns whether the modal is open.
   const [injectorOpen, setInjectorOpen] = useState(false);
 
   // Transcripts are read in a floating popup rather than at the bottom of this
-  // column. Selecting someone mid-conversation is a request to read it, so open
-  // it for them. Keyed on the (player, conversation) pair: closing the popup
-  // doesn't re-trigger this, but switching to someone else's chat does.
+  // column. Clicking someone on the map is also a request to read what they're
+  // saying, so open it when they're mid-conversation; anyone else just gets
+  // selected, and their finished threads stay behind the button.
+  //
+  // Keyed on the selection object, which is a fresh reference per click. So
+  // re-clicking reopens a popup you closed, selecting someone else closes it, and
+  // a conversation merely *starting* while you read someone's profile doesn't pop
+  // anything open on its own. `liveConversation` is read from the render this
+  // selection triggered — deliberately not a dependency, since re-firing on every
+  // conversation change is exactly the unprompted popup we don't want.
   const [chatOpen, setChatOpen] = useState(false);
   useEffect(() => {
-    if (liveConversationId) setChatOpen(true);
-  }, [playerId, liveConversationId]);
+    setChatOpen(!!selection?.openChat && !isMe && !!liveConversation);
+  }, [selection]);
 
   const previousConversation = useQuery(
     api.world.previousConversation,
     playerId ? { worldId, playerId } : 'skip',
+  );
+
+  // What the popup reads: the live conversation if this player is in one, else
+  // their last archived thread. Mirrors the two conditions the transcript used to
+  // render under inline. If a live conversation ends while the popup is open it
+  // falls through to the archived doc, so the finished thread stays readable.
+  const chatConversation = !isMe && liveConversation
+    ? ({ kind: 'active', doc: liveConversation } as const)
+    : !playerConversation && previousConversation
+      ? ({ kind: 'archived', doc: previousConversation } as const)
+      : undefined;
+
+  // Warm the transcript while the inspector is open. Fetching it is a ~500ms
+  // round-trip and the popup has nothing else to show meanwhile, so start it at
+  // selection instead: by the time the button is pressed the messages are cached,
+  // and this subscription outlives the popup so reopening stays instant too.
+  useQuery(
+    api.messages.listMessages,
+    chatConversation ? { worldId, conversationId: chatConversation.doc.id } : 'skip',
   );
 
   const playerDescription = playerId && game.playerDescriptions.get(playerId);
@@ -347,15 +375,6 @@ export default function PlayerDetails({
         { key: 'financialPressure', label: 'Money stress', value: wellbeing.financialPressure },
       ]
     : [];
-  // What the popup reads: the live conversation if this player is in one, else
-  // their last archived thread. Mirrors the two conditions the transcript used to
-  // render under inline. If a live conversation ends while the popup is open it
-  // falls through to the archived doc, so the finished thread stays readable.
-  const chatConversation = !isMe && liveConversation
-    ? ({ kind: 'active', doc: liveConversation } as const)
-    : !playerConversation && previousConversation
-      ? ({ kind: 'archived', doc: previousConversation } as const)
-      : undefined;
 
   return (
     <>

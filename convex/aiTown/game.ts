@@ -27,6 +27,9 @@ import { AgentDescription, serializedAgentDescription } from './agentDescription
 import { parseMap, serializeMap } from '../util/object';
 import { tickScenarios } from './scenarios';
 import { SerializedRelationshipEvent, serializedRelationshipEvent } from './relationshipEvents';
+import { SerializedShortTermEvent, serializedShortTermEvent } from './shortTermEvents';
+import { SerializedObservation, serializedObservation } from './observation';
+import { MAX_OBSERVATIONS_PER_STEP, OBSERVATION_EMBED_MIN_IMPORTANCE } from '../constants';
 
 const gameState = v.object({
   world: v.object(serializedWorld),
@@ -43,6 +46,8 @@ const gameStateDiff = v.object({
   worldMap: v.optional(v.object(serializedWorldMap)),
   agentOperations: v.array(v.object({ name: v.string(), args: v.any() })),
   relationshipEvents: v.optional(v.array(v.object(serializedRelationshipEvent))),
+  shortTermEvents: v.optional(v.array(v.object(serializedShortTermEvent))),
+  observations: v.optional(v.array(v.object(serializedObservation))),
 });
 type GameStateDiff = Infer<typeof gameStateDiff>;
 
@@ -66,6 +71,18 @@ export class Game extends AbstractGame {
   // Relationship events (conflicts and their consequences) emitted during this
   // step; carried in the diff and inserted transactionally in saveDiff.
   pendingRelationshipEvents: SerializedRelationshipEvent[] = [];
+
+  // Short-term gauge transitions emitted during this step. Same treatment as
+  // relationship events: buffered here, carried in the diff, inserted in
+  // saveDiff. Uncapped, unlike observations — a handful per agent per game-day
+  // is nowhere near the diff argument-size limit.
+  pendingShortTermEvents: SerializedShortTermEvent[] = [];
+
+  // Observations perceived during this step (convex/aiTown/observation.ts).
+  // Capped: the diff is a mutation ARGUMENT, so an unbounded buffer would blow
+  // the argument size limit and fail the entire step rather than just dropping
+  // a few ambient observations.
+  pendingObservations: SerializedObservation[] = [];
 
   numPathfinds: number;
 
@@ -174,6 +191,24 @@ export class Game extends AbstractGame {
     this.pendingRelationshipEvents.push(event);
   }
 
+  // Record one gauge moving. Callers pass the value on both sides rather than
+  // just the delta: a delta that was clamped tells you nothing on its own, and
+  // "did this move toward or away from baseline" needs the endpoints.
+  emitShortTermEvent(event: SerializedShortTermEvent) {
+    // A no-op change is not a transition and would only dilute the accuracy
+    // denominator with events that could never have gone either way.
+    if (event.valueBefore === event.valueAfter) return;
+    this.pendingShortTermEvents.push(event);
+  }
+
+  // Returns whether the observation was kept, so callers can leave their dedupe
+  // state un-advanced on a drop and re-emit next pass instead of losing it.
+  emitObservation(observation: SerializedObservation): boolean {
+    if (this.pendingObservations.length >= MAX_OBSERVATIONS_PER_STEP) return false;
+    this.pendingObservations.push(observation);
+    return true;
+  }
+
   handleInput<Name extends InputNames>(now: number, name: Name, args: InputArgs<Name>) {
     const handler = inputs[name]?.handler;
     if (!handler) {
@@ -267,6 +302,14 @@ export class Game extends AbstractGame {
     if (this.pendingRelationshipEvents.length > 0) {
       result.relationshipEvents = this.pendingRelationshipEvents;
       this.pendingRelationshipEvents = [];
+    }
+    if (this.pendingShortTermEvents.length > 0) {
+      result.shortTermEvents = this.pendingShortTermEvents;
+      this.pendingShortTermEvents = [];
+    }
+    if (this.pendingObservations.length > 0) {
+      result.observations = this.pendingObservations;
+      this.pendingObservations = [];
     }
     if (this.descriptionsModified) {
       result.playerDescriptions = serializeMap(this.playerDescriptions);
@@ -382,6 +425,26 @@ export class Game extends AbstractGame {
     // Persist relationship events emitted during this step.
     for (const event of diff.relationshipEvents ?? []) {
       await ctx.db.insert('relationshipEvents', { worldId, ...event });
+    }
+    // Persist short-term gauge transitions emitted during this step.
+    for (const event of diff.shortTermEvents ?? []) {
+      await ctx.db.insert('shortTermEvents', { worldId, ...event });
+    }
+    // Persist observations perceived during this step, then hand the salient
+    // ones to an action for embedding — the engine can't embed (it's sync and
+    // DB-only), and embedding every ambient observation would be wasteful.
+    // Passing the ids we just inserted avoids needing a "needs embedding" index.
+    const toPromote: Id<'observations'>[] = [];
+    for (const observation of diff.observations ?? []) {
+      const id = await ctx.db.insert('observations', { worldId, ...observation });
+      if (observation.importance >= OBSERVATION_EMBED_MIN_IMPORTANCE) {
+        toPromote.push(id);
+      }
+    }
+    if (toPromote.length > 0) {
+      await ctx.scheduler.runAfter(0, internal.agent.memory.promoteObservations, {
+        observationIds: toPromote,
+      });
     }
     // Start the desired agent operations.
     for (const operation of diff.agentOperations) {

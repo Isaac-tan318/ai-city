@@ -27,6 +27,7 @@ yarn-error.log*
 
 # local env files
 .env*.local
+.env.keys
 
 # vercel
 .vercel
@@ -46,3 +47,8 @@ convex_local*
 /.claude/
 
 claude.md
+# Judgement cache and bundled CLI — both regenerate on demand.
+evaluation/.cache/
+evaluation/.build/
+evaluation/out/
+evaluation/data/

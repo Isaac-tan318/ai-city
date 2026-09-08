@@ -30,7 +30,7 @@ const GAUGES: { key: ShortTermComponent; label: string }[] = [
 ];
 
 const MEMORY_GROUPS: {
-  type: 'reflection' | 'conversation' | 'relationship';
+  type: 'reflection' | 'conversation' | 'scenarioOutcome' | 'observation' | 'relationship';
   label: string;
   emoji: string;
 }[] = [
@@ -38,6 +38,8 @@ const MEMORY_GROUPS: {
   // closest thing to a summary the memory system already produces.
   { type: 'reflection', label: 'Insights', emoji: '💡' },
   { type: 'conversation', label: 'Conversations', emoji: '💬' },
+  { type: 'scenarioOutcome', label: 'Takeaways', emoji: '🎬' },
+  { type: 'observation', label: 'Noticed', emoji: '👀' },
   { type: 'relationship', label: 'People', emoji: '🤝' },
 ];
 
@@ -60,6 +62,11 @@ type Row = {
   position: { x: number; y: number };
   draft: Draft;
   learnedTraits?: string[];
+  // Who they've become, and who they were authored as. Shown side by side so
+  // identity drift is inspectable rather than silent.
+  selfSummary?: string;
+  selfSummaryDay?: number;
+  identity: string;
   inScenario: boolean;
   // Set while a manual hold is in effect (see the agentSetLocation input).
   pinnedAt?: string;
@@ -137,6 +144,7 @@ export function AgentsPanel({
       const player = game.world.players.get(agent.playerId);
       if (!player) continue;
       const description = game.playerDescriptions.get(agent.playerId);
+      const agentDescription = game.agentDescriptions.get(agent.id);
       const st = shortTermOrDefault(agent.shortTerm, now);
       out.push({
         agentId: agent.id,
@@ -153,6 +161,9 @@ export function AgentsPanel({
           health: agent.health ?? 'well',
         },
         learnedTraits: agent.learnedTraits,
+        selfSummary: agentDescription?.selfSummary,
+        selfSummaryDay: agentDescription?.selfSummaryDay,
+        identity: agentDescription?.identity ?? '',
         inScenario: !!(agent.scenarioId || agent.scenarioInstruction),
         pinnedAt: agent.pin?.locationId,
       });
@@ -486,6 +497,26 @@ export function AgentsPanel({
                   </button>
                   {showMemories && (
                     <div className="mt-3 space-y-4">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-widest text-white/50">
+                          {selected.selfSummary
+                            ? `Who they are now (day ${selected.selfSummaryDay ?? '?'})`
+                            : 'Who they are'}
+                        </div>
+                        <p className="mt-1 text-xs leading-snug text-white/75">
+                          {selected.selfSummary ?? selected.identity}
+                        </p>
+                        {selected.selfSummary && (
+                          <>
+                            <div className="mt-2 text-[10px] uppercase tracking-widest text-white/35">
+                              Originally written as
+                            </div>
+                            <p className="mt-1 text-xs leading-snug text-white/40">
+                              {selected.identity}
+                            </p>
+                          </>
+                        )}
+                      </div>
                       {selected.learnedTraits && selected.learnedTraits.length > 0 && (
                         <div>
                           <div className="text-[10px] uppercase tracking-widest text-white/50">
@@ -503,7 +534,8 @@ export function AgentsPanel({
                       )}
                       {memories && memories.length === 0 && (
                         <div className="text-sm text-white/50">
-                          Nothing remembered yet — memories are written when a conversation ends.
+                          Nothing remembered yet — memories come from conversations,
+                          scenarios, and whatever this character notices around them.
                         </div>
                       )}
                       {memories && memories.length > 0 && (

@@ -1,8 +1,8 @@
 import { v } from 'convex/values';
-import { internalAction, internalQuery } from '../_generated/server';
+import { internalAction, internalMutation, internalQuery } from '../_generated/server';
 import { parseTimeOfDay, isWeekday, dayOfWeekName } from './gameTime';
 import { WorldMap, serializedWorldMap } from './worldMap';
-import { rememberConversation, rememberScenarioOutcome } from '../agent/memory';
+import { reflectOnMemories, rememberConversation, rememberScenarioOutcome } from '../agent/memory';
 import { GameId, agentId, conversationId, playerId } from './ids';
 import {
   continueConversationMessage,
@@ -13,6 +13,7 @@ import {
   summarizeGoalMessage,
 } from '../agent/conversation';
 import { assertNever } from '../util/assertNever';
+import { effectiveIdentity } from './agentDescription';
 import { serializedAgent, ScheduleStep, scheduleStep } from './agent';
 import {
   activitiesForName,
@@ -21,7 +22,13 @@ import {
   ACTIVITY_COST_PRESSURE_WEIGHT,
   ACTIVITY_ENERGY_FATIGUE_WEIGHT,
   CONVERSATION_COOLDOWN,
+  MAX_REACTION_OBSERVATIONS,
+  MAX_SUBSTEPS_PER_BLOCK,
+  SELF_SUMMARY_MEMORIES,
+  SELF_SUMMARY_MEMORY_CANDIDATES,
+  SELF_SUMMARY_REFLECTIONS,
   RELATIONSHIP_EVENT_REASON_MAX_CHARS,
+  SUBSTEP_MIN_MINUTES,
 } from '../constants';
 import { buildShortTermSnapshot, canAfford } from './shortTerm';
 import type { SerializedAgent } from './agent';
@@ -50,7 +57,6 @@ export const agentRememberConversation = internalAction({
   handler: async (ctx, args) => {
     let affinityDeltas: { playerId: string; delta: number }[] = [];
     let shortTermDeltas: { component: string; delta: number }[] = [];
-    let learnedTrait: string | undefined;
     let affinityReason: string | undefined;
     try {
       const result = await rememberConversation(
@@ -62,7 +68,6 @@ export const agentRememberConversation = internalAction({
       );
       affinityDeltas = result?.affinityDeltas ?? [];
       shortTermDeltas = result?.shortTermDeltas ?? [];
-      learnedTrait = result?.learnedTrait;
       // Distill the memory summary into a short "why" snippet for the
       // relationship-event log: drop the boilerplate prefix, keep the first
       // sentence, cap the length.
@@ -109,16 +114,9 @@ export const agentRememberConversation = internalAction({
           agentId: args.agentId,
           deltas: shortTermDeltas,
           reason: affinityReason,
+          cause: 'conversationFeelings',
+          conversationId: args.conversationId,
         },
-      });
-    }
-    // Promote a stable, reflected-on pattern to a durable learned trait (kept
-    // separate from the authored profile so runtime learning never clobbers it).
-    if (learnedTrait) {
-      await ctx.runMutation(api.aiTown.main.sendInput, {
-        worldId: args.worldId,
-        name: 'agentAddLearnedTrait',
-        args: { agentId: args.agentId, trait: learnedTrait },
       });
     }
     await ctx.runMutation(api.aiTown.main.sendInput, {
@@ -144,6 +142,10 @@ export const agentRememberScenario = internalAction({
     playerId,
     name: v.string(),
     scenarioName: v.string(),
+    // The active-scenario INSTANCE id, carried through so the state log can tell
+    // which scenario a gauge change belonged to — that boundary is what makes a
+    // cross-scenario continuity check possible.
+    scenarioId: v.optional(v.string()),
     instruction: v.string(),
     goal: v.optional(v.string()),
     goalMet: v.boolean(),
@@ -181,6 +183,9 @@ export const agentRememberScenario = internalAction({
           agentId: args.agentId,
           deltas: shortTermDeltas,
           reason: `after ${args.scenarioName}`,
+          cause: 'scenarioOutcome',
+          scenarioId: args.scenarioId,
+          goalMet: args.goalMet,
         },
       });
     }
@@ -410,6 +415,8 @@ export const agentDoSomething = internalAction({
     // nearby free agent. Used by scheduled agents who are settled at a location
     // and want to strike up a conversation without abandoning their spot.
     forceInvite: v.optional(v.boolean()),
+    // Someone the reacting loop wants this agent to approach (see agentReact).
+    preferredInvitee: v.optional(playerId),
     operationId: v.string(),
   },
   handler: async (ctx, args) => {
@@ -477,6 +484,7 @@ export const agentDoSomething = internalAction({
             worldId: args.worldId,
             player: args.player,
             otherFreePlayers: args.otherFreePlayers,
+            preferredInvitee: args.preferredInvitee,
           });
 
     // TODO: We hit a lot of OCC errors on sending inputs in this file. It's
@@ -564,7 +572,9 @@ export const getAgentPlanContext = internalQuery({
       .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('agentId', args.agentId))
       .first();
     if (!desc) return null;
-    return { identity: desc.identity };
+    // The evolving summary, not the authored seed — the day planner should plan
+    // for who the agent has become.
+    return { identity: effectiveIdentity(desc) ?? desc.identity };
   },
 });
 
@@ -834,6 +844,462 @@ export const agentPlanDay = internalAction({
     });
   },
 });
+
+// Rewrite who this character has become, from their own reflections and their
+// most significant memories.
+//
+// The authored `identity` in data/characters.ts is never touched — it's the
+// day-0 seed. This writes a parallel `selfSummary` that every prompt prefers,
+// so the character the town interacts with drifts with their experience while
+// the original stays on disk for comparison and for a reset.
+export const agentRegenerateSelfSummary = internalAction({
+  args: {
+    worldId: v.id('worlds'),
+    agentId,
+    playerId,
+    playerName: v.string(),
+    dayNumber: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const source = await ctx.runQuery(internal.aiTown.agentOperations.getSelfSummarySource, {
+      worldId: args.worldId,
+      agentId: args.agentId,
+      playerId: args.playerId,
+    });
+    if (!source) return;
+    // Nothing has happened to them yet — leave the authored identity alone
+    // rather than paraphrasing it back into itself.
+    if (source.reflections.length === 0 && source.memories.length === 0) return;
+
+    // Anchors: the facts that make this person *this* person. Re-stated every
+    // regeneration, because a summary of a summary of a summary quietly loses
+    // them otherwise, and an agent forgetting its job or its dietary rule breaks
+    // every scenario that depends on it.
+    const anchorKeys = ['Occupation', 'Nationality', 'Religion / worldview', 'Dietary rule'];
+    const anchors = anchorKeys
+      .map((k) => (source.profile?.[k] ? `- ${k}: ${source.profile[k]}` : ''))
+      .filter(Boolean);
+    if (source.family && source.family.length > 0) {
+      anchors.push(
+        `- Family: ${source.family.map((f) => `${f.name} (${f.relation})`).join(', ')}`,
+      );
+    }
+
+    const prompt = [
+      `Here is how ${args.playerName} was originally described:`,
+      source.currentSummary ?? source.identity,
+      ``,
+      source.reflections.length > 0
+        ? `Things ${args.playerName} has come to understand about themselves:`
+        : '',
+      ...source.reflections.map((r) => `- ${r}`),
+      source.memories.length > 0 ? `\nWhat has actually happened to them lately:` : '',
+      ...source.memories.map((m) => `- ${m}`),
+      anchors.length > 0 ? `\nFacts that are FIXED and must survive verbatim:` : '',
+      ...anchors,
+      ``,
+      `Rewrite the description of ${args.playerName} so it reflects who they have become. Keep what is still true, let what has changed show through, and don't invent events that aren't above.`,
+      `Write 2-4 sentences in the third person, in the same voice as the original description. Every fixed fact above must still be true of your version.`,
+      `Respond with the description only — no preamble, no quotes.`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    let summary = '';
+    try {
+      const { content } = await chatCompletion({
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 250,
+      });
+      summary = content.trim();
+    } catch (err) {
+      console.error(
+        `agentRegenerateSelfSummary failed for ${args.playerName}: ${(err as Error).message}`,
+      );
+      return;
+    }
+    // A suspiciously short answer is a refusal or a truncation, not a summary.
+    if (summary.length < 40) return;
+
+    await ctx.runMutation(api.aiTown.main.sendInput, {
+      worldId: args.worldId,
+      name: 'agentSetSelfSummary',
+      args: { agentId: args.agentId, selfSummary: summary, dayNumber: args.dayNumber },
+    });
+  },
+});
+
+export const getSelfSummarySource = internalQuery({
+  args: { worldId: v.id('worlds'), agentId, playerId },
+  handler: async (ctx, args) => {
+    const desc = await ctx.db
+      .query('agentDescriptions')
+      .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('agentId', args.agentId))
+      .first();
+    if (!desc) return null;
+    const reflections = await ctx.db
+      .query('memories')
+      .withIndex('playerId_type', (q) =>
+        q.eq('playerId', args.playerId as GameId<'players'>).eq('data.type', 'reflection'),
+      )
+      .order('desc')
+      .take(SELF_SUMMARY_REFLECTIONS);
+    // The most recent memories, then the most significant of those — what stands
+    // out about a life is what mattered, not merely what was last.
+    const recent = await ctx.db
+      .query('memories')
+      .withIndex('playerId', (q) => q.eq('playerId', args.playerId as GameId<'players'>))
+      .order('desc')
+      .take(SELF_SUMMARY_MEMORY_CANDIDATES);
+    const memories = recent
+      .filter((m) => m.data.type !== 'reflection')
+      .sort((a, b) => b.importance - a.importance)
+      .slice(0, SELF_SUMMARY_MEMORIES);
+    return {
+      identity: desc.identity,
+      currentSummary: desc.selfSummary,
+      profile: desc.profile,
+      family: desc.family,
+      reflections: reflections.map((r) => r.description),
+      memories: memories.map((m) => m.description),
+    };
+  },
+});
+
+// The reacting loop. Given what the agent has just noticed, decide whether to do
+// anything about it. In the paper this runs on every observation; here it's
+// throttled and gated on having seen something salient, because the honest
+// answer is usually "no" and each call costs a completion.
+export const agentReact = internalAction({
+  args: {
+    worldId: v.id('worlds'),
+    agentId,
+    playerId,
+    playerName: v.string(),
+    currentActivity: v.optional(v.string()),
+    currentPlace: v.optional(v.string()),
+    shortTermNote: v.optional(v.string()),
+    nearbyNames: v.array(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const pending = await ctx.runQuery(internal.aiTown.agentOperations.getUnprocessedObservations, {
+      worldId: args.worldId,
+      playerId: args.playerId,
+    });
+    if (pending.length === 0) return;
+    // Mark them consumed up front. A reaction is a response to a moment; if the
+    // completion fails we do NOT want the same observations prompting another
+    // call on the next pass.
+    await ctx.runMutation(internal.aiTown.agentOperations.markObservationsProcessed, {
+      observationIds: pending.map((o) => o._id),
+    });
+
+    const ctxData = await ctx.runQuery(internal.aiTown.agentOperations.getAgentPlanContext, {
+      worldId: args.worldId,
+      agentId: args.agentId,
+    });
+    const identity = ctxData?.identity ?? `${args.playerName} is a resident of Singapore.`;
+    const canTalkTo = args.nearbyNames.filter((n) => n !== args.playerName);
+
+    const prompt = [
+      `You are ${args.playerName}.`,
+      `Identity: ${identity}`,
+      args.currentPlace ? `You are at ${args.currentPlace}.` : '',
+      args.currentActivity ? `Right now you are ${args.currentActivity}.` : '',
+      args.shortTermNote ? `Your current state: ${args.shortTermNote}` : '',
+      ``,
+      `You've just noticed:`,
+      ...pending.map((o) => `- ${o.description}`),
+      ``,
+      `Does any of this actually change what you do next? Most of the time it doesn't — people notice things all day without acting on them. Only react if it genuinely would matter to ${args.playerName}.`,
+      `Choose exactly one:`,
+      `- "ignore": carry on with what you were doing. This is usually right.`,
+      canTalkTo.length > 0
+        ? `- "talk": go and speak to one of these people who are nearby: ${canTalkTo.join(', ')}. Put their name in "target".`
+        : '',
+      `- "activity": briefly do something different where you are. Put a short "-ing" phrase in "activity" and one emoji in "emoji".`,
+      `- "replan": what you saw genuinely upends the rest of your day and you need a new plan. Reserve this for real disruptions.`,
+      ``,
+      `Respond ONLY with strict JSON: {"reaction":"ignore","reason":"why, in one short clause"}`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    let parsed: any = null;
+    try {
+      const { content } = await chatCompletion({
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 200,
+        response_format: { type: 'json_object' },
+      });
+      parsed = extractJson(content);
+    } catch (err) {
+      // This fires often; a failure must be cheap and inert, never a throw that
+      // leaves state half-applied.
+      console.error(`agentReact failed for ${args.playerName}: ${(err as Error).message}`);
+      return;
+    }
+
+    const reaction = typeof parsed?.reaction === 'string' ? parsed.reaction : 'ignore';
+    if (reaction === 'ignore') return;
+    const reason =
+      typeof parsed?.reason === 'string'
+        ? parsed.reason.slice(0, RELATIONSHIP_EVENT_REASON_MAX_CHARS)
+        : undefined;
+
+    if (reaction === 'talk') {
+      const target = typeof parsed?.target === 'string' ? parsed.target.trim() : '';
+      const match = canTalkTo.find((n) => n.toLowerCase() === target.toLowerCase());
+      // An unrecognised name degrades to no-op rather than guessing at who.
+      if (!match) return;
+      const targetId = await ctx.runQuery(internal.aiTown.agentOperations.playerIdForName, {
+        worldId: args.worldId,
+        name: match,
+      });
+      if (!targetId) return;
+      await ctx.runMutation(api.aiTown.main.sendInput, {
+        worldId: args.worldId,
+        name: 'finishReact',
+        args: { agentId: args.agentId, reaction: 'talk', targetPlayerId: targetId, reason },
+      });
+      return;
+    }
+
+    if (reaction === 'activity') {
+      const activity = typeof parsed?.activity === 'string' ? parsed.activity.trim() : '';
+      if (!activity) return;
+      await ctx.runMutation(api.aiTown.main.sendInput, {
+        worldId: args.worldId,
+        name: 'finishReact',
+        args: {
+          agentId: args.agentId,
+          reaction: 'activity',
+          activity,
+          emoji: typeof parsed?.emoji === 'string' ? parsed.emoji : undefined,
+          reason,
+        },
+      });
+      return;
+    }
+
+    if (reaction === 'replan') {
+      await ctx.runMutation(api.aiTown.main.sendInput, {
+        worldId: args.worldId,
+        name: 'finishReact',
+        args: { agentId: args.agentId, reaction: 'replan', reason },
+      });
+    }
+  },
+});
+
+export const getUnprocessedObservations = internalQuery({
+  args: { worldId: v.id('worlds'), playerId },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query('observations')
+      .withIndex('unprocessed', (q) =>
+        q.eq('worldId', args.worldId).eq('playerId', args.playerId).eq('processed', false),
+      )
+      .order('desc')
+      .take(MAX_REACTION_OBSERVATIONS);
+  },
+});
+
+export const markObservationsProcessed = internalMutation({
+  args: { observationIds: v.array(v.id('observations')) },
+  handler: async (ctx, args) => {
+    for (const id of args.observationIds) {
+      await ctx.db.patch(id, { processed: true });
+    }
+  },
+});
+
+export const playerIdForName = internalQuery({
+  args: { worldId: v.id('worlds'), name: v.string() },
+  handler: async (ctx, args) => {
+    const world = await ctx.db.get(args.worldId);
+    if (!world) return null;
+    for (const player of world.players) {
+      const description = await ctx.db
+        .query('playerDescriptions')
+        .withIndex('worldId', (q) => q.eq('worldId', args.worldId).eq('playerId', player.id))
+        .first();
+      if (description?.name === args.name) return player.id;
+    }
+    return null;
+  },
+});
+
+// Reflection: distil recent memories and observations into a few high-level
+// insights about oneself. Lock-free (scheduled directly rather than through
+// startOperation) so it can run while the agent is mid-conversation or busy with
+// another op — reflecting is thinking, not doing, and gating it on the operation
+// lock is part of why it so rarely happened.
+export const agentReflect = internalAction({
+  args: {
+    worldId: v.id('worlds'),
+    agentId,
+    playerId,
+    since: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    let reflected = false;
+    let learnedTrait: string | undefined;
+    try {
+      const result = await reflectOnMemories(
+        ctx,
+        args.worldId,
+        args.playerId as GameId<'players'>,
+        args.since,
+      );
+      reflected = result.reflected;
+      learnedTrait = result.topInsight;
+    } catch (err) {
+      // Leave the window where it is so the material is reconsidered next time.
+      console.error(`agentReflect failed for ${args.agentId}: ${(err as Error).message}`);
+      return;
+    }
+    if (!reflected) return;
+    await ctx.runMutation(api.aiTown.main.sendInput, {
+      worldId: args.worldId,
+      name: 'finishReflect',
+      args: { agentId: args.agentId },
+    });
+    if (learnedTrait) {
+      await ctx.runMutation(api.aiTown.main.sendInput, {
+        worldId: args.worldId,
+        name: 'agentAddLearnedTrait',
+        args: { agentId: args.agentId, trait: learnedTrait },
+      });
+    }
+  },
+});
+
+// Break one coarse schedule block ("at work, 09:00–17:00, running experiments")
+// into 3–5 finer actions, so the agent visibly moves through their block instead
+// of doing one thing for eight hours. The paper decomposes recursively; this is
+// one lazy level, generated only when the agent actually settles into a block
+// long enough to be worth it.
+export const agentDecomposeStep = internalAction({
+  args: {
+    worldId: v.id('worlds'),
+    agentId,
+    operationId: v.string(),
+    playerName: v.string(),
+    stepKey: v.string(),
+    activity: v.string(),
+    description: v.string(),
+    locationId: v.string(),
+    startMinute: v.number(),
+    endMinute: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const ctxData = await ctx.runQuery(internal.aiTown.agentOperations.getAgentPlanContext, {
+      worldId: args.worldId,
+      agentId: args.agentId,
+    });
+    const identity = ctxData?.identity ?? `${args.playerName} is a resident of Singapore.`;
+    const location = getLocationById(args.locationId);
+    const blockMinutes = args.endMinute - args.startMinute;
+    const maxSteps = Math.min(
+      MAX_SUBSTEPS_PER_BLOCK,
+      Math.max(2, Math.floor(blockMinutes / SUBSTEP_MIN_MINUTES)),
+    );
+
+    const prompt = [
+      `You are breaking one block of ${args.playerName}'s day into finer actions.`,
+      `Identity: ${identity}`,
+      `The block: "${args.activity}" — ${args.description}`,
+      location ? `Where: ${location.name} — ${location.description}` : '',
+      `It runs from ${minutesToTimeStr(args.startMinute)} to ${minutesToTimeStr(args.endMinute)}.`,
+      ``,
+      `Break it into 3-${maxSteps} smaller things ${args.playerName} actually does during that block, in order. They stay at the same place the whole time — this is about WHAT they're doing, not where they go.`,
+      `Each entry needs: start_time (24h "HH:MM", the first one exactly ${minutesToTimeStr(args.startMinute)}), activity (a short phrase in the "-ing" form, like the block's own), and emoji (one).`,
+      // Without this the model reliably packs every sub-step into the first hour
+      // of an eight-hour shift, leaving the last one to run for the other seven.
+      `SPREAD THEM ACROSS THE WHOLE BLOCK, roughly evenly — the last one should begin near ${minutesToTimeStr(
+        Math.max(args.startMinute, args.endMinute - Math.round(blockMinutes / 4)),
+      )}, not in the first hour. Gaps of around ${Math.max(
+        SUBSTEP_MIN_MINUTES,
+        Math.round(blockMinutes / Math.max(2, maxSteps)),
+      )} minutes are about right.`,
+      `Keep every start_time inside the block and at least ${SUBSTEP_MIN_MINUTES} minutes apart. Make them specific and in character, not generic filler.`,
+      ``,
+      `Respond ONLY with strict JSON of the form:`,
+      `{"steps":[{"start_time":"09:00","activity":"setting up the workstation","emoji":"🧪"}]}`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    let steps: { startMinute: number; activity: string; emoji?: string }[] = [];
+    try {
+      const { content } = await chatCompletion({
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 400,
+        response_format: { type: 'json_object' },
+      });
+      steps = parseSubSteps(extractJson(content), args.startMinute, args.endMinute);
+    } catch (err) {
+      console.error(`agentDecomposeStep failed for ${args.playerName}: ${(err as Error).message}`);
+    }
+
+    await sleep(Math.random() * 500);
+    await ctx.runMutation(api.aiTown.main.sendInput, {
+      worldId: args.worldId,
+      name: 'finishDecomposeStep',
+      args: {
+        operationId: args.operationId,
+        agentId: args.agentId,
+        stepKey: args.stepKey,
+        // An empty list is a valid outcome: the handler clears the in-flight
+        // stamp and the block simply keeps its single whole-block activity,
+        // which is exactly the behaviour before decomposition existed.
+        steps,
+      },
+    });
+  },
+});
+
+// Validate and clamp the model's sub-steps: inside the parent block, in order,
+// spaced by at least SUBSTEP_MIN_MINUTES, and anchored to the block's start so
+// there is never a gap before the first one.
+export function parseSubSteps(
+  json: any,
+  startMinute: number,
+  endMinute: number,
+): { startMinute: number; activity: string; emoji?: string }[] {
+  const raw = Array.isArray(json?.steps) ? json.steps : [];
+  const out: { startMinute: number; activity: string; emoji?: string }[] = [];
+  for (const entry of raw) {
+    const activity = typeof entry?.activity === 'string' ? entry.activity.trim() : '';
+    if (!activity) continue;
+    const parsed = typeof entry?.start_time === 'string' ? parseTimeOfDay(entry.start_time) : null;
+    if (parsed === null) continue;
+    if (parsed < startMinute || parsed >= endMinute) continue;
+    const emoji = typeof entry?.emoji === 'string' && entry.emoji ? entry.emoji : undefined;
+    out.push({ startMinute: parsed, activity, emoji });
+    if (out.length >= MAX_SUBSTEPS_PER_BLOCK) break;
+  }
+  out.sort((a, b) => a.startMinute - b.startMinute);
+  // Drop any that crowd their predecessor, then anchor the first to the block
+  // start so the agent isn't left with no sub-step at the top of the block.
+  const spaced: typeof out = [];
+  for (const s of out) {
+    const prev = spaced[spaced.length - 1];
+    if (prev && s.startMinute - prev.startMinute < SUBSTEP_MIN_MINUTES) continue;
+    spaced.push(s);
+  }
+  if (spaced.length > 0) spaced[0].startMinute = startMinute;
+  return spaced.length >= 2 ? spaced : [];
+}
+
+// Minutes-into-day → "HH:MM", the inverse of parseTimeOfDay.
+function minutesToTimeStr(minutes: number): string {
+  const m = Math.max(0, Math.min(24 * 60 - 1, Math.round(minutes)));
+  return `${Math.floor(m / 60)
+    .toString()
+    .padStart(2, '0')}:${(m % 60).toString().padStart(2, '0')}`;
+}
 
 function extractJson(content: string): any {
   // Most providers return clean JSON when response_format is set, but tolerate

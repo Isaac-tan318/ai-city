@@ -106,6 +106,27 @@ export const CHARACTER_HOMES: Record<string, { locationId: string; x?: number; y
   Isabel: { locationId: 'hdb', x: 61, y: 17 }, // HDB block, far unit
   Rahman: { locationId: 'hdb', x: 54, y: 9 }, // HDB block, corner unit
   Lukas: { locationId: 'hdb', x: 53, y: 16 }, // HDB block, rented unit
+
+  // The wider cast (see data/characters.ts). Every tile below is passable
+  // (objmap[0][x][y] === -1) and claimed by exactly one character — sharing one
+  // would spawn two people on the same square.
+  Yvonne: { locationId: 'hdb', x: 55, y: 9 }, // HDB block, upper unit
+  Bernard: { locationId: 'hdb', x: 57, y: 9 }, // HDB block, lived here for decades
+  Nikhil: { locationId: 'hdb', x: 58, y: 9 }, // HDB block, family flat
+  Nurul: { locationId: 'hdb', x: 59, y: 9 }, // HDB block, near the lift lobby
+  Ratna: { locationId: 'hdb', x: 60, y: 9 }, // lives in, in her employer's flat
+  Kerem: { locationId: 'hdb', x: 62, y: 9 }, // HDB block, rented unit
+  Irina: { locationId: 'hdb', x: 63, y: 9 }, // HDB block, the flat with the piano
+  Emeka: { locationId: 'hdb', x: 64, y: 9 }, // HDB block, shared with two of his crew
+  Aroha: { locationId: 'hdb', x: 55, y: 17 }, // HDB block, ground floor
+  Sharifah: { locationId: 'hdb', x: 57, y: 17 }, // HDB block, middle unit
+  Hanna: { locationId: 'hdb', x: 58, y: 17 }, // HDB block, next stack over
+  Naomi: { locationId: 'hdb', x: 59, y: 17 }, // HDB block, corner unit she owns
+  Harpreet: { locationId: 'hdb', x: 60, y: 17 }, // HDB block, near the void deck
+  Mateo: { locationId: 'hdb', x: 63, y: 17 }, // HDB block, the one with the potted chillies
+  Dylan: { locationId: 'hdb', x: 64, y: 17 }, // HDB block, rented while on posting
+  Tiago: { locationId: 'shophouses', x: 58, y: 37 }, // room above one of the bars
+  Ravi: { locationId: 'shophouses', x: 62, y: 37 }, // lives above his own shop
 };
 
 // Per-character workplace. On weekdays agents spend their working hours here.
@@ -122,6 +143,25 @@ export const CHARACTER_WORKPLACES: Record<string, { locationId: string; activity
   Lukas: { locationId: 'astar', activity: 'running materials experiments in the lab' },
   Clara: { locationId: 'astar', activity: 'leading her genomics lab and reviewing data' },
   Xavier: { locationId: 'university', activity: 'cramming on coding projects on campus' },
+
+  // The wider cast. Bernard is deliberately absent — he is retired, and
+  // workplaceFor returning undefined is what leaves him free to roam all day.
+  Yvonne: { locationId: 'fusionopolis', activity: 'drafting policy papers at her desk' },
+  Nikhil: { locationId: 'fusionopolis', activity: 'running the delivery board with his team' },
+  Kerem: { locationId: 'fusionopolis', activity: 'sorting out freight schedules over tea' },
+  Nurul: { locationId: 'changi_hospital', activity: 'doing her rounds on the ward' },
+  Sharifah: { locationId: 'changi_hospital', activity: 'checking prescriptions in the dispensary' },
+  Hanna: { locationId: 'changi_hospital', activity: 'settling patients and changing dressings' },
+  Dylan: { locationId: 'changi_hospital', activity: 'restocking the ambulance between callouts' },
+  Ratna: { locationId: 'hdb', activity: 'cleaning and cooking in her employer’s flat' },
+  Emeka: { locationId: 'hdb', activity: 'supervising the upgrading crew on site' },
+  Aroha: { locationId: 'hdb', activity: 'running the youth programme at the family service centre' },
+  Irina: { locationId: 'university', activity: 'taking piano students through their scales' },
+  Harpreet: { locationId: 'university', activity: 'teaching class and marking assignments' },
+  Naomi: { locationId: 'mbs', activity: 'working through case files at her firm' },
+  Tiago: { locationId: 'shophouses', activity: 'setting up sound for tonight’s gig' },
+  Ravi: { locationId: 'shophouses', activity: 'minding the counter at his provision shop' },
+  Mateo: { locationId: 'gardens', activity: 'sweeping the paths and clearing the bins' },
 };
 
 export function getLocationById(id: string): CityLocation | undefined {

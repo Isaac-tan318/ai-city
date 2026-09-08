@@ -42,6 +42,18 @@ import {
   WORK_LEASH_RADIUS,
   CONTEXTUAL_EVENT_PROBABILITY,
   CONTEXTUAL_EVENT_MINUTES,
+  SUBSTEP_MIN_BLOCK_MINUTES,
+  OBSERVATION_INTERVAL_MS,
+  MAX_OBSERVED_SUBJECTS,
+  REFLECTION_CHECK_INTERVAL_MS,
+  REFLECTION_MIN_EVENTS,
+  REFLECTION_MIN_INTERVAL_MS,
+  REACTION_INTERVAL_MS,
+  REACTION_MIN_IMPORTANCE,
+  REACTION_REPLAN_COOLDOWN_MS,
+  SELF_SUMMARY_ENABLED,
+  SELF_SUMMARY_FIRST_DAY,
+  SELF_SUMMARY_INTERVAL_DAYS,
   SICK_BASE_PROBABILITY,
   SICK_PER_WORKDAY_PROBABILITY,
   SICK_MAX_PROBABILITY,
@@ -69,7 +81,9 @@ import {
   shortTermSelfDescription,
   shortTermSensitivity,
   spend,
+  SHORT_TERM_COMPONENTS,
   type ShortTerm,
+  type ShortTermComponent,
 } from './shortTerm';
 import {
   SHORT_TERM_DAILY_DECAY,
@@ -90,7 +104,20 @@ import {
   STEP_SETTLED_RADIUS,
   STEP_WANDER_INTERVAL_MS,
 } from '../constants';
-import { getLocationById, homeFor, workLeashAnchor } from '../../data/cityLocations';
+import {
+  getLocationById,
+  homeFor,
+  nearestLocation,
+  workLeashAnchor,
+} from '../../data/cityLocations';
+import {
+  affinityMean,
+  conversationObservationText,
+  fingerprint,
+  observationImportance,
+  observationText,
+  observedFingerprint,
+} from './observation';
 import { pickContextualEvent, buildSickSchedule, isSleepStep } from '../../data/routines';
 
 export type ScheduleStep = {
@@ -100,6 +127,15 @@ export type ScheduleStep = {
   activity: string;
   emoji?: string;
   description: string;
+};
+
+// One finer-grained action within a schedule block, produced by decomposing that
+// block (see Agent.maybeDecomposeStep). Inherits the parent step's location — a
+// sub-step changes what the agent is doing, not where they are.
+export type SubStep = {
+  startMinute: number;
+  activity: string;
+  emoji?: string;
 };
 
 
@@ -209,6 +245,56 @@ export class Agent {
   // can never freeze someone out of their routine permanently.
   pin?: { destination: Point; locationId: string; day: number };
 
+  // --- Hierarchical plan decomposition ---
+  // Finer-grained actions for the CURRENT schedule block only, keyed by the step
+  // instance they decompose (`${day}:${stepIndex}:${startMinute}` — the same key
+  // `shortTermStepKey` uses). A re-plan changes the key, so stale sub-steps are
+  // discarded rather than silently re-pointed at a different block.
+  activeSubSteps?: { stepKey: string; steps: SubStep[] };
+  // The step key a decomposition request is in flight for, so a slow op isn't
+  // re-requested on every tick.
+  subStepsRequestedFor?: string;
+
+  // --- Perception ---
+  // Dedupe state for the observation stream: the last state fingerprint recorded
+  // for each subject in range. Persisted (not in-memory) because the Game is
+  // rebuilt from the DB every ~30s. Hashes rather than text to keep the world
+  // document small — it is rewritten every step.
+  observed?: { k: string; h: number }[];
+  lastObservationAt?: number;
+
+  // --- Reflection ---
+  // Start of the current reflection window: only material formed after this is
+  // new. Advanced ONLY when a reflection actually happens, so a below-threshold
+  // check doesn't consume the memories it declined to reflect on.
+  lastReflectionAt?: number;
+  // When we last CHECKED whether to reflect. Separate from the window above and
+  // stamped optimistically at schedule time — the reflect op is lock-free, so it
+  // has no operationId and nothing clears an in-flight marker on return.
+  lastReflectionCheck?: number;
+  // Memorable things that have happened since the last reflection (observations
+  // emitted, conversations finished). A free engine-side gate, so the check
+  // itself costs nothing until there is something to reflect on.
+  eventsSinceReflection?: number;
+
+  // --- Reacting loop ---
+  lastReactionAt?: number;
+  // Salient observations emitted since the last reaction check. Counted in the
+  // engine so the gate is free: without it the loop pays for a completion every
+  // REACTION_INTERVAL_MS per agent just to be told nothing has changed.
+  salientSinceReaction?: number;
+  // A reaction decided the day's plan no longer fits. Separate from `forcePlan`,
+  // which is scenario injection's escape hatch past every throttle.
+  reactionReplan?: boolean;
+  lastReactionReplanAt?: number;
+  reactReplansToday?: number;
+  reactReplansDay?: number;
+  // Someone a reaction wants this agent to approach; consumed on the next invite.
+  preferredInvitee?: GameId<'players'>;
+
+  // Day-rollover guard for the self-summary rewrite (see §5).
+  selfSummaryCheckedForDay?: number;
+
   constructor(serialized: SerializedAgent) {
     const {
       id,
@@ -248,6 +334,21 @@ export class Agent {
       lastShortTermChange,
       learnedTraits,
       pin,
+      activeSubSteps,
+      subStepsRequestedFor,
+      observed,
+      lastObservationAt,
+      lastReflectionAt,
+      lastReflectionCheck,
+      eventsSinceReflection,
+      lastReactionAt,
+      salientSinceReaction,
+      reactionReplan,
+      lastReactionReplanAt,
+      reactReplansToday,
+      reactReplansDay,
+      preferredInvitee,
+      selfSummaryCheckedForDay,
     } = serialized;
     const playerId = parseGameId('players', serialized.playerId);
     this.id = parseGameId('agents', id);
@@ -295,6 +396,22 @@ export class Agent {
     this.lastShortTermChange = lastShortTermChange;
     this.learnedTraits = learnedTraits;
     this.pin = pin;
+    this.activeSubSteps = activeSubSteps;
+    this.subStepsRequestedFor = subStepsRequestedFor;
+    this.observed = observed;
+    this.lastObservationAt = lastObservationAt;
+    this.lastReflectionAt = lastReflectionAt;
+    this.lastReflectionCheck = lastReflectionCheck;
+    this.eventsSinceReflection = eventsSinceReflection;
+    this.lastReactionAt = lastReactionAt;
+    this.salientSinceReaction = salientSinceReaction;
+    this.reactionReplan = reactionReplan;
+    this.lastReactionReplanAt = lastReactionReplanAt;
+    this.reactReplansToday = reactReplansToday;
+    this.reactReplansDay = reactReplansDay;
+    this.preferredInvitee =
+      preferredInvitee !== undefined ? parseGameId('players', preferredInvitee) : undefined;
+    this.selfSummaryCheckedForDay = selfSummaryCheckedForDay;
   }
 
   tick(game: Game, now: number) {
@@ -372,6 +489,12 @@ export class Agent {
     // the candidate options. Lock-free and placed before the in-flight-op guard
     // so it can be requested while this agent is busy doing something else.
     this.maybeRequestDecisionOptions(game);
+    // Perception. In the prelude on purpose — see tickObservations. Writes no
+    // movement state and starts no operation, so it is safe to run lock-free
+    // while the agent is busy, mid-conversation, or held by a scenario.
+    this.tickObservations(game, now, player);
+    this.maybeReflect(game, now);
+    this.maybeReact(game, now, player);
     if (this.inProgressOperation) {
       if (now < this.inProgressOperation.started + ACTION_TIMEOUT) {
         // Wait on the operation to finish.
@@ -468,7 +591,9 @@ export class Agent {
           .map((p) => p.serialize()),
         agent: this.serialize(),
         map: game.worldMap.serialize(),
+        preferredInvitee: this.preferredInvitee,
       });
+      delete this.preferredInvitee;
       return;
     }
     // Check to see if we have a conversation we need to remember.
@@ -1105,12 +1230,33 @@ export class Agent {
       this.updateHealthForNewDay(gt.dayNumber);
     }
 
+    // Once-per-day identity refresh: rewrite who this character has become from
+    // their own reflections and memories. Lock-free — it writes a description,
+    // never movement — and staggered by the day rollover it already rides.
+    const lastSummaryDay = game.agentDescriptions.get(this.id)?.selfSummaryDay;
+    if (
+      SELF_SUMMARY_ENABLED &&
+      this.selfSummaryCheckedForDay !== gt.dayNumber &&
+      gt.dayNumber >= SELF_SUMMARY_FIRST_DAY &&
+      (lastSummaryDay === undefined ||
+        gt.dayNumber - lastSummaryDay >= SELF_SUMMARY_INTERVAL_DAYS)
+    ) {
+      this.selfSummaryCheckedForDay = gt.dayNumber;
+      game.scheduleOperation('agentRegenerateSelfSummary', {
+        worldId: game.worldId,
+        agentId: this.id,
+        playerId: this.playerId,
+        playerName: player.name ?? 'someone',
+        dayNumber: gt.dayNumber,
+      });
+    }
+
     // Once-per-day short-term bookkeeping: decay the gauges back toward baseline,
     // couple in any sickness, and pay a working day's income. Runs after the health
     // roll so sickness set today is reflected in the same day's mood/stress.
     if (this.shortTermCheckedForDay !== gt.dayNumber) {
       this.shortTermCheckedForDay = gt.dayNumber;
-      this.updateShortTermForNewDay(gt.dayNumber, now);
+      this.updateShortTermForNewDay(game, gt.dayNumber, now);
     }
 
     // If sick and today's rest schedule isn't set up yet, stay home and rest —
@@ -1177,8 +1323,15 @@ export class Agent {
     }
 
     const conversationRefresh = !!this.scheduleNeedsRefresh;
+    // A reaction-driven replan. It rides its own short cooldown rather than the
+    // 5-minute plan cooldown below (≈5 in-game hours — long enough that the thing
+    // reacted to would be ancient history) and rather than `forcePlan`, which
+    // bypasses every throttle and belongs to scenario injection.
+    const reactionReplan =
+      !!this.reactionReplan &&
+      now - (this.lastReactionReplanAt ?? 0) > REACTION_REPLAN_COOLDOWN_MS;
     const wantsPlan =
-      (noSchedule || dayChanged || disrupted || conversationRefresh) &&
+      (noSchedule || dayChanged || disrupted || conversationRefresh || reactionReplan) &&
       !conversation &&
       !busyWithOneOffActivity;
     if (wantsPlan) {
@@ -1209,7 +1362,7 @@ export class Agent {
       // after every conversation, that made agents abandon their schedule and
       // stand around at random tiles for minutes after each chat. Instead, fall
       // through and keep executing the existing schedule (walk to current step).
-      if (forcePlan || (!onCooldown && !beforeStagger)) {
+      if (forcePlan || reactionReplan || (!onCooldown && !beforeStagger)) {
         const playerName = player.name ?? 'someone';
         const home = this.home ?? (homeFor(playerName) ?? getLocationById('hdb'))!;
         const homePoint = this.home ?? { x: home.x, y: home.y };
@@ -1217,6 +1370,10 @@ export class Agent {
         this.lastPlanAttempt = now;
         delete this.scheduleNeedsRefresh;
         delete this.forcePlan;
+        if (this.reactionReplan) {
+          this.lastReactionReplanAt = now;
+          delete this.reactionReplan;
+        }
         // Precompute the short-term self-state note so the planner can factor it in
         // (rest when exhausted, cheaper choices when money is tight).
         const shortTermNote = shortTermSelfDescription(
@@ -1237,7 +1394,10 @@ export class Agent {
           dayNumber: gt.dayNumber,
           currentTimeStr: gt.timeStr,
           currentMinutesIntoDay: gt.minutesIntoDay,
-          existingSchedule: (disrupted || conversationRefresh || forcePlan) ? this.schedule : undefined,
+          existingSchedule:
+            disrupted || conversationRefresh || forcePlan || reactionReplan
+              ? this.schedule
+              : undefined,
           scenarioInstruction: this.scenarioInstruction,
           shortTermNote,
         });
@@ -1381,7 +1541,12 @@ export class Agent {
           agent: this.serialize(),
           map: game.worldMap.serialize(),
           forceInvite: true,
+          preferredInvitee: this.preferredInvitee,
         });
+        // Consumed whether or not the invite lands: a reaction is about the
+        // moment, and a stale preference would steer conversations long after
+        // whatever prompted it.
+        delete this.preferredInvitee;
         return !texting;
       }
     }
@@ -1422,6 +1587,7 @@ export class Agent {
         const fatigueMultiplier =
           shortTermSensitivity(game.agentDescriptions.get(this.id)?.profile).fatigue ?? 1;
         this.accrueStepShortTerm(
+          game,
           step,
           minutesLeft,
           gt.dayNumber,
@@ -1432,28 +1598,50 @@ export class Agent {
       }
       // Game-minute → real-ms: each in-game minute lasts CYCLE_MS / (24*60).
       const realMsPerGameMinute = CYCLE_MS / (24 * 60);
-      // Stage 2: sometimes swap in a short contextual micro-event tied to the
-      // current block (office events during work hours, flexible ones
-      // otherwise), then fall back to the block's base activity afterwards.
-      const event =
-        Math.random() < CONTEXTUAL_EVENT_PROBABILITY
-          ? pickContextualEvent(step.locationId, gt.minutesIntoDay)
-          : null;
-      if (event) {
-        const eventMinutes = Math.min(minutesLeft, CONTEXTUAL_EVENT_MINUTES);
+      // Hierarchical plan decomposition: a coarse block ("at work, 09:00–17:00")
+      // is broken into 3–5 finer actions the first time we settle into it, so the
+      // agent visibly moves through their block instead of doing one thing for
+      // eight hours. Purely presentational — sub-steps drive `player.activity`
+      // and nothing else, never the currentStepIndex advance loop above.
+      const subStep = this.currentSubStep(stepKey, gt.minutesIntoDay);
+      if (subStep) {
+        const subEnd = this.subStepEndMinute(stepKey, gt.minutesIntoDay, stepEndMinutes);
         player.activity = {
-          description: event.description,
-          emoji: event.emoji,
-          until: now + eventMinutes * realMsPerGameMinute,
+          description: subStep.activity,
+          emoji: subStep.emoji ?? step.emoji ?? '💭',
+          until: now + Math.max(1, subEnd - gt.minutesIntoDay) * realMsPerGameMinute,
           ambient: true,
         };
       } else {
-        player.activity = {
-          description: step.activity,
-          emoji: step.emoji ?? '💭',
-          until: now + minutesLeft * realMsPerGameMinute,
-          ambient: true,
-        };
+        // Stage 2: sometimes swap in a short contextual micro-event tied to the
+        // current block (office events during work hours, flexible ones
+        // otherwise), then fall back to the block's base activity afterwards.
+        // Only reachable when the block has no sub-steps — the two mechanisms
+        // both exist to break up a long block, so running both would fight.
+        const event =
+          Math.random() < CONTEXTUAL_EVENT_PROBABILITY
+            ? pickContextualEvent(step.locationId, gt.minutesIntoDay)
+            : null;
+        if (event) {
+          const eventMinutes = Math.min(minutesLeft, CONTEXTUAL_EVENT_MINUTES);
+          player.activity = {
+            description: event.description,
+            emoji: event.emoji,
+            until: now + eventMinutes * realMsPerGameMinute,
+            ambient: true,
+          };
+        } else {
+          player.activity = {
+            description: step.activity,
+            emoji: step.emoji ?? '💭',
+            until: now + minutesLeft * realMsPerGameMinute,
+            ambient: true,
+          };
+        }
+        // Ask for a decomposition of this block if it's long enough to be worth
+        // one and we haven't already. Fires at most once per step instance: the
+        // request is stamped with the same key the result is stored under.
+        this.maybeDecomposeStep(game, now, player, step, stepKey, stepEndMinutes);
       }
     }
 
@@ -1463,6 +1651,259 @@ export class Agent {
     // agent is still visibly "wiping down the counter" while they cross the shop.
     this.maybeWanderAtStep(game, now, player, step, destination);
     return !texting;
+  }
+
+  // Bookkeeping for the two gates an observation feeds: reflection (any
+  // observation counts) and reacting (only salient ones are worth a completion).
+  noteObserved(importance: number) {
+    this.eventsSinceReflection = (this.eventsSinceReflection ?? 0) + 1;
+    if (importance >= REACTION_MIN_IMPORTANCE) {
+      this.salientSinceReaction = (this.salientSinceReaction ?? 0) + 1;
+    }
+  }
+
+  // --- Reacting loop ---------------------------------------------------------
+  //
+  // Gated hard on having actually seen something salient. Unlike reflection this
+  // one is about acting on the moment, so it also requires the agent to be free:
+  // reacting to a passer-by while mid-conversation or held by a scenario would
+  // fight whatever they're already committed to.
+  maybeReact(game: Game, now: number, player: import('./player').Player) {
+    if ((this.salientSinceReaction ?? 0) === 0) return;
+    if (now - (this.lastReactionAt ?? 0) < REACTION_INTERVAL_MS) return;
+    if (this.inProgressOperation) return;
+    if (game.world.playerConversation(player)) return;
+    if (this.isHeldByScenario(game) || this.scenarioTarget) return;
+    // Optimistic stamp: the op is lock-free, so nothing else prevents a re-fire
+    // during the action's latency.
+    this.lastReactionAt = now;
+    this.salientSinceReaction = 0;
+    const step =
+      this.schedule && this.currentStepIndex !== undefined
+        ? this.schedule[this.currentStepIndex]
+        : undefined;
+    const activity =
+      player.activity && player.activity.until > now ? player.activity.description : undefined;
+    const nearbyNames = [...game.world.players.values()]
+      .filter((p) => p.id !== player.id)
+      .filter((p) => distance(p.position, player.position) < SCHEDULE_CHAT_RADIUS)
+      .map((p) => p.name ?? game.playerDescriptions.get(p.id)?.name ?? 'someone');
+    game.scheduleOperation('agentReact', {
+      worldId: game.worldId,
+      agentId: this.id,
+      playerId: this.playerId,
+      playerName: player.name ?? 'someone',
+      currentActivity: activity,
+      currentPlace: step ? getLocationById(step.locationId)?.name : undefined,
+      shortTermNote: shortTermSelfDescription(
+        buildShortTermSnapshot({
+          shortTerm: this.shortTerm,
+          balance: this.balance,
+          health: this.health,
+          now,
+        }),
+      ),
+      nearbyNames,
+    });
+  }
+
+  // --- Reflection ------------------------------------------------------------
+  //
+  // Also in the prelude, and lock-free for the same reason as perception: an
+  // agent should be able to reflect while it is mid-conversation or waiting on
+  // another operation. Gating reflection on the operation lock and on the end of
+  // a conversation is part of why it previously almost never ran.
+  maybeReflect(game: Game, now: number) {
+    if (now - (this.lastReflectionCheck ?? 0) < REFLECTION_CHECK_INTERVAL_MS) return;
+    if ((this.eventsSinceReflection ?? 0) < REFLECTION_MIN_EVENTS) return;
+    // Floor on the gap between actual reflections, so an eventful stretch
+    // produces one reflection rather than a run of them.
+    const lastReflection = this.lastReflectionAt ?? game.world.worldStartTime ?? 0;
+    if (now - lastReflection < REFLECTION_MIN_INTERVAL_MS) return;
+    // Stamp the check optimistically: the op is lock-free, so nothing else stops
+    // this from re-firing every tick for the multi-second life of the action.
+    this.lastReflectionCheck = now;
+    game.scheduleOperation('agentReflect', {
+      worldId: game.worldId,
+      agentId: this.id,
+      playerId: this.playerId,
+      since: this.lastReflectionAt,
+    });
+  }
+
+  // --- Perception ------------------------------------------------------------
+  //
+  // Runs from the tick PRELUDE, before the `inProgressOperation` guard and
+  // before tickSchedule claims the tick. That placement is load-bearing:
+  // tickSchedule returns truthy on essentially every tick once an agent has a
+  // schedule, and the states that early-return (busy on an op, held by a
+  // scenario, mid-conversation) are exactly the ones worth perceiving during.
+  //
+  // Emits only on CHANGE, against fingerprints persisted on the Agent. They have
+  // to be persisted: the Game is rebuilt from the world doc every ~30s
+  // (ENGINE_ACTION_DURATION), so in-memory dedupe state would be wiped that
+  // often and every subject would be re-observed from scratch.
+  tickObservations(game: Game, now: number, player: import('./player').Player) {
+    if (now - (this.lastObservationAt ?? 0) < OBSERVATION_INTERVAL_MS) return;
+    this.lastObservationAt = now;
+
+    const previous = new Map((this.observed ?? []).map((o) => [o.k, o.h]));
+    // Computed once per pass, not per subject.
+    const meanAffinity = affinityMean(this.affinities);
+    // Rebuilt from scratch each pass, so subjects that leave perception range
+    // are dropped — and re-emit when they come back, which is the arrival signal.
+    const seen: { k: string; h: number }[] = [];
+    const description = game.agentDescriptions.get(this.id);
+
+    for (const other of game.world.players.values()) {
+      if (other.id === player.id) continue;
+      // Distance only: there is no line-of-sight or occlusion model anywhere in
+      // this codebase, so agents perceive through walls. Keeping the radius at
+      // the conversation radius keeps that from being conspicuous.
+      if (distance(other.position, player.position) >= SCHEDULE_CHAT_RADIUS) continue;
+      const activity =
+        other.activity && other.activity.until > now ? other.activity.description : undefined;
+      const location = nearestLocation(other.position);
+      const key = `player:${other.id}`;
+      const h = fingerprint(activity, location.id);
+      seen.push({ k: key, h });
+      if (previous.get(key) === h) continue;
+
+      const name = other.name ?? game.playerDescriptions.get(other.id)?.name ?? 'someone';
+      const otherAgent = [...game.world.agents.values()].find((a) => a.playerId === other.id);
+      const otherStep =
+        otherAgent?.schedule && otherAgent.currentStepIndex !== undefined
+          ? otherAgent.schedule[otherAgent.currentStepIndex]
+          : undefined;
+      const atWork = !!workLeashAnchor(name, otherStep);
+      const atHome = homeFor(name)?.id === location.id;
+      const importance = observationImportance({
+        family: description?.family,
+        subjectName: name,
+        affinity: this.affinityFor(game, other.id as GameId<'players'>),
+        affinityMean: meanAffinity,
+        outOfPlace: !atWork && !atHome,
+        subjectSick: otherAgent?.health === 'sick',
+      });
+      const kept = game.emitObservation({
+        playerId: this.playerId,
+        at: now,
+        description: observationText({ name, activity, locationName: location.name }),
+        importance,
+        subjectPlayerIds: [other.id],
+        locationId: location.id,
+        processed: false,
+        promoted: false,
+      });
+      // Dropped by the per-step cap: leave the fingerprint un-advanced so we
+      // re-emit next pass rather than silently losing the change.
+      if (!kept) seen.pop();
+      else this.noteObserved(importance);
+    }
+
+    // Conversations happening in range that we're not part of. This is what lets
+    // an agent know who is spending time with whom without being told.
+    for (const conversation of game.world.conversations.values()) {
+      if (conversation.participants.has(player.id)) continue;
+      const participants = [...conversation.participants.keys()]
+        .map((pid) => game.world.players.get(pid))
+        .filter((p): p is import('./player').Player => !!p);
+      if (participants.length < 2) continue;
+      if (!participants.some((p) => distance(p.position, player.position) < SCHEDULE_CHAT_RADIUS)) {
+        continue;
+      }
+      const key = `conv:${conversation.id}`;
+      const names = participants.map(
+        (p) => p.name ?? game.playerDescriptions.get(p.id)?.name ?? 'someone',
+      );
+      const location = nearestLocation(participants[0].position);
+      const h = fingerprint(names.join(','), location.id);
+      seen.push({ k: key, h });
+      if (previous.get(key) === h) continue;
+      const importance = observationImportance({
+        family: description?.family,
+        subjectName: names[0],
+        affinity: this.affinityFor(game, participants[0].id as GameId<'players'>),
+        affinityMean: meanAffinity,
+        groupSize: participants.length,
+      });
+      const kept = game.emitObservation({
+        playerId: this.playerId,
+        at: now,
+        description: conversationObservationText(names, location.name),
+        importance,
+        subjectPlayerIds: participants.map((p) => p.id),
+        locationId: location.id,
+        processed: false,
+        promoted: false,
+      });
+      if (!kept) seen.pop();
+      else this.noteObserved(importance);
+    }
+
+    this.observed = seen.slice(0, MAX_OBSERVED_SUBJECTS);
+  }
+
+  // --- Hierarchical plan decomposition -------------------------------------
+  //
+  // Sub-steps hang off the Agent rather than off ScheduleStep on purpose. On the
+  // step they would enter the `scheduleStep` validator (and so the world doc for
+  // every step of every agent), `mergeFixedObligations` would duplicate them
+  // when it splits a block around a work shift, and `existingSchedule` feeds the
+  // schedule back to the day planner as context — which would then see and echo
+  // its own sub-steps. One slot, keyed by step instance, avoids all three.
+
+  // The sub-step covering `minutesIntoDay`, or undefined when this block has no
+  // decomposition (stale key, never requested, or the request failed).
+  currentSubStep(stepKey: string, minutesIntoDay: number): SubStep | undefined {
+    if (!this.activeSubSteps || this.activeSubSteps.stepKey !== stepKey) return undefined;
+    const steps = this.activeSubSteps.steps;
+    let current: SubStep | undefined;
+    for (const s of steps) {
+      if (s.startMinute <= minutesIntoDay) current = s;
+      else break;
+    }
+    return current;
+  }
+
+  // When the current sub-step gives way to the next one, bounded by the parent
+  // block's end so a sub-step can never outlive the block it decomposes.
+  subStepEndMinute(stepKey: string, minutesIntoDay: number, stepEndMinutes: number): number {
+    if (!this.activeSubSteps || this.activeSubSteps.stepKey !== stepKey) return stepEndMinutes;
+    const next = this.activeSubSteps.steps.find((s) => s.startMinute > minutesIntoDay);
+    return Math.min(next ? next.startMinute : stepEndMinutes, stepEndMinutes);
+  }
+
+  maybeDecomposeStep(
+    game: Game,
+    now: number,
+    player: import('./player').Player,
+    step: ScheduleStep,
+    stepKey: string,
+    stepEndMinutes: number,
+  ) {
+    if (this.inProgressOperation) return;
+    // Already decomposed, or a request for this exact step instance is in flight.
+    if (this.activeSubSteps?.stepKey === stepKey) return;
+    if (this.subStepsRequestedFor === stepKey) return;
+    // A scenario owns the agent's activity while it runs — don't fight it.
+    if (this.scenarioId || this.scenarioInstruction) return;
+    const blockMinutes = stepEndMinutes - step.startMinute;
+    if (blockMinutes < SUBSTEP_MIN_BLOCK_MINUTES) return;
+    // Stamp the request optimistically so a slow op can't be re-requested every
+    // tick while it's in flight.
+    this.subStepsRequestedFor = stepKey;
+    this.startOperation(game, now, 'agentDecomposeStep', {
+      worldId: game.worldId,
+      agentId: this.id,
+      playerName: player.name ?? 'someone',
+      stepKey,
+      activity: step.activity,
+      description: step.description,
+      locationId: step.locationId,
+      startMinute: step.startMinute,
+      endMinute: stepEndMinutes,
+    });
   }
 
   // The spot this agent's running scenario meets at, while it's actually running.
@@ -1569,6 +2010,21 @@ export class Agent {
       lastShortTermChange: this.lastShortTermChange,
       learnedTraits: this.learnedTraits,
       pin: this.pin,
+      activeSubSteps: this.activeSubSteps,
+      subStepsRequestedFor: this.subStepsRequestedFor,
+      observed: this.observed,
+      lastObservationAt: this.lastObservationAt,
+      lastReflectionAt: this.lastReflectionAt,
+      lastReflectionCheck: this.lastReflectionCheck,
+      eventsSinceReflection: this.eventsSinceReflection,
+      lastReactionAt: this.lastReactionAt,
+      salientSinceReaction: this.salientSinceReaction,
+      reactionReplan: this.reactionReplan,
+      lastReactionReplanAt: this.lastReactionReplanAt,
+      reactReplansToday: this.reactReplansToday,
+      reactReplansDay: this.reactReplansDay,
+      preferredInvitee: this.preferredInvitee,
+      selfSummaryCheckedForDay: this.selfSummaryCheckedForDay,
     };
   }
 
@@ -1608,18 +2064,45 @@ export class Agent {
   // --- Short-term memory: once-per-day bookkeeping ---
   // Decay each gauge toward its baseline, bleed any sickness into mood/stress, and
   // credit a working day's income. Called once per game-day from tickSchedule.
-  updateShortTermForNewDay(dayNumber: number, now: number) {
-    let st = decayTowardBaseline(
-      this.shortTerm ?? defaultShortTerm(now),
-      SHORT_TERM_DAILY_DECAY,
-      now,
-    );
+  updateShortTermForNewDay(game: Game, dayNumber: number, now: number) {
+    const before = this.shortTerm ?? defaultShortTerm(now);
+    let st = decayTowardBaseline(before, SHORT_TERM_DAILY_DECAY, now);
+    // Logged as two separate transitions rather than one net change: decay and
+    // the illness penalty pull mood in opposite directions, and a single event
+    // showing their sum would make both of them look wrong.
+    for (const component of SHORT_TERM_COMPONENTS) {
+      game.emitShortTermEvent({
+        at: now,
+        playerId: this.playerId,
+        component,
+        delta: st[component] - before[component],
+        valueBefore: before[component],
+        valueAfter: st[component],
+        cause: 'dailyDecay',
+        reason: `day ${dayNumber} rollover`,
+        scenarioId: this.scenarioId,
+      });
+    }
     if (this.health === 'sick') {
+      const beforeSickness = st;
       st = {
         ...st,
         stress: clampGauge(st.stress + SICK_STRESS_PER_DAY),
         mood: clampGauge(st.mood - SICK_MOOD_PENALTY_PER_DAY),
       };
+      for (const component of ['stress', 'mood'] as ShortTermComponent[]) {
+        game.emitShortTermEvent({
+          at: now,
+          playerId: this.playerId,
+          component,
+          delta: st[component] - beforeSickness[component],
+          valueBefore: beforeSickness[component],
+          valueAfter: st[component],
+          cause: 'sickness',
+          reason: 'unwell',
+          scenarioId: this.scenarioId,
+        });
+      }
     }
     this.shortTerm = st;
     // Economics: a working weekday pays income (weekends and sick days earn
@@ -1643,6 +2126,7 @@ export class Agent {
   // at the 'restaurant' counts as work, never a meal); `fatigueMultiplier` is the
   // profile-derived reactivity (fit tires slower, frail faster).
   accrueStepShortTerm(
+    game: Game,
     step: ScheduleStep,
     gameMinutesInStep: number,
     dayNumber: number,
@@ -1650,7 +2134,13 @@ export class Agent {
     isOwnWorkplace: boolean,
     fatigueMultiplier: number,
   ) {
-    const st = { ...(this.shortTerm ?? defaultShortTerm(now)) };
+    const before = this.shortTerm ?? defaultShortTerm(now);
+    const st = { ...before };
+    // The two gauges this step can move carry different causes — sleeping is
+    // rest, eating is a meal, everything else is activity — so they are tracked
+    // separately rather than logged under one label for the whole step.
+    let fatigueCause: 'rest' | 'activity' = 'activity';
+    let hungerCause: 'meal' | 'activity' = 'activity';
     const text = `${step.activity} ${step.description}`.toLowerCase();
     const isHome = step.locationId === 'home' || step.locationId === 'hdb';
     const isSleep = isSleepStep(step);
@@ -1664,6 +2154,7 @@ export class Agent {
     let resetHunger = false;
     if (isSleep) {
       st.fatigue = FATIGUE_BASELINE;
+      fatigueCause = 'rest';
     } else if (isMeal) {
       // Eating OUT: resets hunger and costs money — but only if they can actually
       // cover it. An agent who can't afford the stall eats at home instead: hunger
@@ -1671,6 +2162,7 @@ export class Agent {
       // is charged, rather than driving the balance further down.
       st.hunger = HUNGER_BASELINE;
       resetHunger = true;
+      hungerCause = 'meal';
       this.lastMealDay = dayNumber;
       if (canAfford(this.balance, MEAL_COST)) {
         this.balance = spend(this.balance, MEAL_COST).balance;
@@ -1681,6 +2173,7 @@ export class Agent {
       // meal steps (which the LLM rarely schedules), so hunger saturated at 100.
       st.hunger = HUNGER_BASELINE;
       resetHunger = true;
+      hungerCause = 'meal';
       this.lastMealDay = dayNumber;
     } else {
       const isWork =
@@ -1697,8 +2190,36 @@ export class Agent {
     }
     st.updatedAt = now;
     this.shortTerm = st;
+    game.emitShortTermEvent({
+      at: now,
+      playerId: this.playerId,
+      component: 'fatigue',
+      delta: st.fatigue - before.fatigue,
+      valueBefore: before.fatigue,
+      valueAfter: st.fatigue,
+      cause: fatigueCause,
+      reason: step.activity,
+      scenarioId: this.scenarioId,
+    });
+    game.emitShortTermEvent({
+      at: now,
+      playerId: this.playerId,
+      component: 'hunger',
+      delta: st.hunger - before.hunger,
+      valueBefore: before.hunger,
+      valueAfter: st.hunger,
+      cause: hungerCause,
+      reason: step.activity,
+      scenarioId: this.scenarioId,
+    });
   }
 }
+
+export const subStep = v.object({
+  startMinute: v.number(),
+  activity: v.string(),
+  emoji: v.optional(v.string()),
+});
 
 export const scheduleStep = v.object({
   startMinute: v.number(),
@@ -1773,6 +2294,25 @@ export const serializedAgent = {
   learnedTraits: v.optional(v.array(v.string())),
   // Manual "hold this character here" override set from the agents popup.
   pin: v.optional(v.object({ destination: point, locationId: v.string(), day: v.number() })),
+  // Sub-steps for the current schedule block only (see Agent.maybeDecomposeStep).
+  activeSubSteps: v.optional(v.object({ stepKey: v.string(), steps: v.array(subStep) })),
+  subStepsRequestedFor: v.optional(v.string()),
+  // Perception dedupe state (see Agent.tickObservations).
+  observed: v.optional(v.array(observedFingerprint)),
+  lastObservationAt: v.optional(v.number()),
+  // Reflection cadence (see Agent.maybeReflect).
+  lastReflectionAt: v.optional(v.number()),
+  lastReflectionCheck: v.optional(v.number()),
+  eventsSinceReflection: v.optional(v.number()),
+  // Reacting loop (see Agent.maybeReact).
+  lastReactionAt: v.optional(v.number()),
+  salientSinceReaction: v.optional(v.number()),
+  reactionReplan: v.optional(v.boolean()),
+  lastReactionReplanAt: v.optional(v.number()),
+  reactReplansToday: v.optional(v.number()),
+  reactReplansDay: v.optional(v.number()),
+  preferredInvitee: v.optional(playerId),
+  selfSummaryCheckedForDay: v.optional(v.number()),
 };
 export type SerializedAgent = ObjectType<typeof serializedAgent>;
 
@@ -1822,6 +2362,18 @@ export async function runAgentOperation(ctx: MutationCtx, operation: string, arg
       break;
     case 'agentPlanDay':
       reference = internal.aiTown.agentOperations.agentPlanDay;
+      break;
+    case 'agentDecomposeStep':
+      reference = internal.aiTown.agentOperations.agentDecomposeStep;
+      break;
+    case 'agentReflect':
+      reference = internal.aiTown.agentOperations.agentReflect;
+      break;
+    case 'agentReact':
+      reference = internal.aiTown.agentOperations.agentReact;
+      break;
+    case 'agentRegenerateSelfSummary':
+      reference = internal.aiTown.agentOperations.agentRegenerateSelfSummary;
       break;
     case 'agentExtractScenarioProfile':
       reference = internal.aiTown.agentOperations.agentExtractScenarioProfile;
@@ -1910,8 +2462,13 @@ export const findConversationCandidate = internalQuery({
     worldId: v.id('worlds'),
     player: v.object(serializedPlayer),
     otherFreePlayers: v.array(v.object(serializedPlayer)),
+    // Set by the reacting loop when the agent decided to go and talk to someone
+    // specific. A preference, not an override: if they're on the pair cooldown or
+    // no longer free, we fall through to the usual affinity-vs-distance pick
+    // rather than forcing a conversation that the rest of the system would refuse.
+    preferredInvitee: v.optional(playerId),
   },
-  handler: async (ctx, { now, worldId, player, otherFreePlayers }) => {
+  handler: async (ctx, { now, worldId, player, otherFreePlayers, preferredInvitee }) => {
     const { position } = player;
 
     // Load our affinities + family so relationships bias who we approach: we'll
@@ -1967,6 +2524,10 @@ export const findConversationCandidate = internalQuery({
         family,
         otherName: otherPlayer.name,
       });
+      // Past the pair cooldown above, so this really is someone we may approach.
+      if (preferredInvitee && otherPlayer.id === preferredInvitee) {
+        return otherPlayer.id as GameId<'players'>;
+      }
       const score = affinity - distanceWeight * distance(position, otherPlayer.position);
       if (!best || score > best.score) {
         best = { id: otherPlayer.id as GameId<'players'>, score };

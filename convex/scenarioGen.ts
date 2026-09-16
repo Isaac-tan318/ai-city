@@ -29,7 +29,7 @@ import {
 } from './_generated/server';
 import { SerializedGeneratedScenario } from './aiTown/generatedScenario';
 import { MAX_DECISION_OPTIONS } from './constants';
-import { chatCompletion } from './util/llm';
+import { trackedChatCompletion } from './util/llmTrack';
 import { parseLLMJson } from './util/llmJson';
 import { ALL_SCENARIOS } from '../data/scenarios';
 
@@ -209,11 +209,15 @@ export async function generateScenarioDraft(
     .filter(Boolean)
     .join('\n');
 
-  const { content } = await chatCompletion({
-    messages: [{ role: 'user', content: prompt }],
-    max_tokens: 1400,
-    response_format: { type: 'json_object' },
-  });
+  const { content } = await trackedChatCompletion(
+    ctx,
+    { operation: 'scenario.generate', worldId },
+    {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 1400,
+      response_format: { type: 'json_object' },
+    },
+  );
 
   const parsed = parseLLMJson(content, GeneratedScenarioSchema, `generateScenario/${worldId}`);
   if (!parsed) return undefined;

@@ -35,7 +35,7 @@ import {
   OptionScore,
   snapFactors,
 } from './scoring';
-import { chatCompletion } from './util/llm';
+import { trackedChatCompletion } from './util/llmTrack';
 import { parseLLMJson } from './util/llmJson';
 
 const selfInternal = internal.evaluator;
@@ -195,11 +195,15 @@ async function scoreOption(
     .filter(Boolean)
     .join('\n');
 
-  const { content } = await chatCompletion({
-    messages: [{ role: 'user', content: prompt }],
-    max_tokens: 1400,
-    response_format: { type: 'json_object' },
-  });
+  const { content } = await trackedChatCompletion(
+    ctx,
+    { operation: 'evaluator.scoreOption', subject: scenarioName },
+    {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 1400,
+      response_format: { type: 'json_object' },
+    },
+  );
 
   const parsed = parseLLMJson(content, EvaluatorOutputSchema, `evaluate/${option.optionId}`);
   if (!parsed) return undefined;
@@ -309,19 +313,28 @@ export async function evaluateDecision(
   let selectedScores: EvaluatedAgentScore[] | undefined;
 
   for (const option of args.options) {
-    const result = await scoreOption(
-      ctx,
-      option,
-      profiles,
-      transcript,
-      args.scenarioName,
-    );
+    const result = await scoreOption(ctx, option, profiles, transcript, args.scenarioName);
     if (!result) {
       commentaries.push(`(scoring failed for "${option.title}"; excluded from the comparison)`);
       continue;
     }
     const utility = groupUtility(result.scores.map((s) => s.totalIndividualUtility));
-    optionScores.push({ optionId: option.optionId, title: option.title, groupUtility: utility });
+    optionScores.push({
+      optionId: option.optionId,
+      title: option.title,
+      groupUtility: utility,
+      // Retained for every option, not just the winner. The mean above answers
+      // "how good was this option"; the vector answers "good for whom", which is
+      // the only form an alternative aggregation rule can consume. Without it,
+      // comparing Nash against the utilitarian mean is impossible after the fact
+      // and the evaluator would have to be re-run to ask the question.
+      perAgent: result.scores.map((s) => ({
+        playerId: s.playerId,
+        name: s.name,
+        hardTabooViolated: s.hardTabooViolated,
+        totalIndividualUtility: s.totalIndividualUtility,
+      })),
+    });
     commentaries.push(`${option.title}: ${result.commentary}`);
     if (option.optionId === args.selectedOptionId) {
       selectedScores = result.scores;

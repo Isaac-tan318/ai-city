@@ -320,9 +320,10 @@ export function pickScenarioParticipants(
 
 // Is this agent in a position to drop what they're doing and go and talk?
 //
-// Two things make it unreasonable: they're asleep, or they're on shift at their
-// own workplace — a hawker mid-service can't wander off to argue about dinner. The
-// schedule step is the single source of truth for both, so no extra state.
+// Three things make it unreasonable: they're asleep, they're on the point of
+// falling asleep, or they're on shift at their own workplace — a hawker
+// mid-service can't wander off to argue about dinner. The schedule step is the
+// single source of truth for the first and last, so no extra state.
 function isFreeForScenario(game: Game, agent: Agent): boolean {
   const player = game.world.players.get(agent.playerId);
   if (!player) return false;
@@ -334,6 +335,7 @@ function isFreeForScenario(game: Game, agent: Agent): boolean {
   // stalling every scenario until the LLM planner has caught up.
   if (!step) return true;
   if (isSleepStep(step)) return false;
+  if (agent.tooTiredToTalk()) return false;
   if (workLeashAnchor(player.name, step)) return false;
   return true;
 }
@@ -358,7 +360,11 @@ function isAwakeForScenario(game: Game, agent: Agent): boolean {
     agent.schedule && agent.currentStepIndex !== undefined
       ? agent.schedule[agent.currentStepIndex]
       : undefined;
-  return !step || !isSleepStep(step);
+  // Someone who is upright but too tired to talk counts as unconscious here:
+  // the point of the awake test is whether a thread would find a reader, and
+  // an agent one message from turning in is not going to work through a
+  // scenario's topics. Queue until morning instead.
+  return (!step || !isSleepStep(step)) && !agent.tooTiredToTalk();
 }
 
 // Texting is the answer to "they're at work", not to "they're asleep". A cast in

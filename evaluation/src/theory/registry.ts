@@ -24,6 +24,7 @@
 // but they have not been traced to a specific source. Fill these in before any
 // DCR number is reported as a literature-anchored result.
 import type { ExpectedDirection } from '../metrics';
+import type { BehaviourLevel } from '../judges/behaviourCoding';
 
 export type Group = 'high' | 'low' | 'unclassified';
 
@@ -56,8 +57,16 @@ export type Dimension = {
   // The structured profile key this dimension reads (data/characterProfiles.ts
   // vocabulary, carried through to each entry in data/characters.ts).
   attribute: string;
-  // The behaviour a coder can mark true or false from a single response.
+  // The behaviour a coder grades from a single response.
   observable: string;
+  // The lowest coded intensity that counts as the behaviour being present.
+  // 'explicit' where the theory is about whether someone will own a position
+  // outright — hedging is then the interesting contrast and must not count.
+  // 'hedged' where any form of the behaviour is what was predicted.
+  //
+  // This is the knob that fixes the ceiling: with a boolean coder every
+  // character "objected" to an unfair bill and the test tied at 100% vs 100%.
+  threshold: BehaviourLevel;
   agentFacing: AgentFacing;
   analysisOnly: AnalysisOnly;
 };
@@ -81,13 +90,18 @@ export const DIMENSIONS: Dimension[] = [
     id: 'conflict-avoidance',
     attribute: 'Conflict style',
     observable: 'Objects immediately, in this reply, to the uneven split',
+    threshold: 'explicit',
     agentFacing: {
       situation:
-        'Six of you have just finished dinner at a hawker centre. The bill comes to S$150. ' +
-        'Bernard, who ordered the most and had two beers, says brightly: "Let us just split it ' +
-        'six ways, easiest that way — S$25 each." Two people at the table ate only rice and ' +
-        'vegetables and drank water. Nobody has said anything yet. Everyone is looking at the bill.',
-      ask: 'What do you say next? Reply with ONLY strict JSON: {"say":"the single line you would actually speak"}',
+        'Six of you have just finished dinner at a hawker centre. The bill comes to S$96. ' +
+        'Bernard, who had a beer and a slightly pricier dish than most, says: "Shall we just ' +
+        'split it six ways? S$16 each, easiest that way." You had one of the cheaper dishes and ' +
+        'only drank water, so this costs you two or three dollars more than your share. Two ' +
+        'people have already shrugged and reached for their wallets, and the group is starting ' +
+        'to stand up and gather their things.',
+      ask:
+        'What do you say next, if anything? You may stay out of it — if you would not speak up here, ' +
+        'return an empty string. Reply with ONLY strict JSON: {"say":"the line you would speak, or an empty string"}',
       options: [],
     },
     analysisOnly: {
@@ -133,12 +147,16 @@ export const DIMENSIONS: Dimension[] = [
     id: 'payment-norm',
     attribute: 'Payment/gift norm',
     observable: 'Accepts being treated rather than insisting on paying their share',
+    threshold: 'hedged',
     agentFacing: {
       situation:
-        'The meal is over and the bill is on the table. Clara, who earns considerably more than ' +
-        'most of the group, picks it up and says: "Put your wallets away, this one is on me. ' +
-        'Really — I insist."',
-      ask: 'What do you say next? Reply with ONLY strict JSON: {"say":"the single line you would actually speak"}',
+        'The meal is over and the bill is on the table. Clara, a colleague you know a little but ' +
+        'not well, picks it up and says: "I can get this one if you like." She has not insisted, ' +
+        'and she is not obviously wealthier than anyone here. One person at the table has already ' +
+        'said "no no, let me put in for mine" and is counting out notes.',
+      ask:
+        'What do you say next, if anything? You may stay out of it — if you would not speak up here, ' +
+        'return an empty string. Reply with ONLY strict JSON: {"say":"the line you would speak, or an empty string"}',
       options: [],
     },
     analysisOnly: {
@@ -180,13 +198,16 @@ export const DIMENSIONS: Dimension[] = [
     id: 'privacy-norm',
     attribute: 'Privacy/modesty norm',
     observable: 'Answers the personal question with a substantive detail on the first ask',
+    threshold: 'hedged',
     agentFacing: {
       situation:
         'You are in a group of five having coffee. The conversation turns to money and living ' +
         'arrangements. Someone you have met twice before turns to you and asks, cheerfully and in ' +
         'front of everyone: "So how much are you actually paying for your place? And who do you ' +
         'live with?"',
-      ask: 'What do you say next? Reply with ONLY strict JSON: {"say":"the single line you would actually speak"}',
+      ask:
+        'What do you say next, if anything? You may stay out of it — if you would not speak up here, ' +
+        'return an empty string. Reply with ONLY strict JSON: {"say":"the line you would speak, or an empty string"}',
       options: [],
     },
     analysisOnly: {
@@ -205,6 +226,7 @@ export const DIMENSIONS: Dimension[] = [
     id: 'alcohol-attitude',
     attribute: 'Alcohol attitude',
     observable: 'Endorses the bar as their choice',
+    threshold: 'hedged',
     agentFacing: {
       situation:
         'The group is picking somewhere to spend Friday evening together. Three places are on ' +
@@ -259,12 +281,17 @@ export const DIMENSIONS: Dimension[] = [
     id: 'social-power',
     attribute: 'Social power',
     observable: 'Proposes a concrete resolution rather than deferring or waiting',
+    threshold: 'explicit',
     agentFacing: {
       situation:
-        'The group has been going back and forth about the weekend plan for twenty minutes and ' +
-        'is completely stuck: three people want the beach, three want a museum, and the same ' +
-        'arguments keep coming round again. There is a long, slightly awkward silence.',
-      ask: 'What do you say next? Reply with ONLY strict JSON: {"say":"the single line you would actually speak"}',
+        'The group has been going back and forth about the weekend plan for a while: some want ' +
+        'the beach, some want a museum. It is friendly enough and nobody is annoyed. Someone has ' +
+        'just said "shall we just sleep on it and sort it out in the group chat tomorrow?" and a ' +
+        'couple of people made agreeable noises. The conversation could easily move on to ' +
+        'something else now.',
+      ask:
+        'What do you say next, if anything? You may stay out of it — if you would not speak up here, ' +
+        'return an empty string. Reply with ONLY strict JSON: {"say":"the line you would speak, or an empty string"}',
       options: [],
     },
     analysisOnly: {
@@ -305,12 +332,15 @@ export const DIMENSIONS: Dimension[] = [
     id: 'directness',
     attribute: 'Communication style',
     observable: 'States the objection plainly rather than hedging or going along with it',
+    threshold: 'explicit',
     agentFacing: {
       situation:
         'The group has settled on a plan that genuinely does not work for you — it is on the one ' +
         'evening you are not free, and nobody has asked whether the date suits everyone. ' +
         'Someone says: "Right, that is settled then. Thursday it is."',
-      ask: 'What do you say next? Reply with ONLY strict JSON: {"say":"the single line you would actually speak"}',
+      ask:
+        'What do you say next, if anything? You may stay out of it — if you would not speak up here, ' +
+        'return an empty string. Reply with ONLY strict JSON: {"say":"the line you would speak, or an empty string"}',
       options: [],
     },
     analysisOnly: {
@@ -349,11 +379,16 @@ export const DIMENSIONS: Dimension[] = [
     id: 'observance',
     attribute: 'Observance level',
     observable: 'Raises the clash with their observance rather than letting the time stand',
+    threshold: 'hedged',
     agentFacing: {
       situation:
-        'The group is fixing a time for a long lunch this Friday. Someone proposes 12:30 to 3pm, ' +
-        'across town, and says: "That works for everyone, yes?"',
-      ask: 'What do you say next? Reply with ONLY strict JSON: {"say":"the single line you would actually speak"}',
+        'The group is loosely talking about getting lunch together some time this week. Someone ' +
+        'mentions that Friday around midday tends to suit most people, without proposing it ' +
+        'formally, and the conversation carries on. Nothing has been fixed and nobody has been ' +
+        'asked to confirm anything.',
+      ask:
+        'What do you say next, if anything? You may stay out of it — if you would not speak up here, ' +
+        'return an empty string. Reply with ONLY strict JSON: {"say":"the line you would speak, or an empty string"}',
       options: [],
     },
     analysisOnly: {

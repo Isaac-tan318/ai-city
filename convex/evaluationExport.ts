@@ -147,10 +147,20 @@ export const bundle = internalQuery({
         // per-option utilities retained is what would fill this in; leaving it
         // empty is honest, and normalize.ts reports the component as skipped
         // rather than comparing the winner against itself.
-        perOptionUtilities: [] as {
-          optionId: string;
-          utilities: { name: string; utility: number }[];
-        }[],
+        // Filled from optionScores[].perAgent, which the evaluator now retains
+        // for every option rather than only the winner. Rows written before that
+        // change have no perAgent and simply contribute nothing here, which the
+        // analyzer reports as a skipped component rather than a comparison of
+        // the winning option against itself.
+        perOptionUtilities: evaluation.optionScores
+          .filter((o) => o.perAgent && o.perAgent.length > 0)
+          .map((o) => ({
+            optionId: o.optionId,
+            utilities: o.perAgent!.map((a) => ({
+              name: a.name,
+              utility: a.totalIndividualUtility,
+            })),
+          })),
       });
     }
 

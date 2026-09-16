@@ -571,7 +571,8 @@ export const HUNGER_BASELINE = 10;
 // Points each gauge moves back toward its baseline at a day rollover.
 export const SHORT_TERM_DAILY_DECAY = 25;
 // Fatigue gained on arriving at a demanding work block vs. any other "away" (out
-// of the house) schedule step. Resets at the nightly sleep step.
+// of the house) schedule step. Reset when the agent WAKES UP, not when they turn
+// in — going to bed is what tiredness causes, so it can't also be its cure.
 export const FATIGUE_PER_WORK_BLOCK = 12;
 // Hunger accrued per in-game hour spent on a non-meal step; a meal step resets it.
 export const HUNGER_PER_GAME_HOUR = 7;
@@ -586,6 +587,35 @@ export const SHORT_TERM_INDICATOR_MS = 6000;
 // Cap on how many durable "learned traits" an agent accumulates from reflection
 // (spec point 6); oldest are dropped past this so the list stays bounded.
 export const MAX_LEARNED_TRAITS = 6;
+
+// --- Sleep pressure (the nightly fatigue cycle) ---
+// Per-step accrual alone left fatigue wherever the day happened to leave it, so
+// an agent who'd had an easy day was as fresh at midnight as at breakfast. These
+// govern a FLOOR under fatigue that rises as the agent's own bedtime approaches
+// (see Agent.applySleepPressure): tiredness is driven by the clock, not just by
+// what you did. "Bedtime" is whenever the next sleep block in the agent's own
+// schedule starts, so a night-shift worker's ramp lands in the early morning
+// rather than at 10 PM along with everyone else's.
+//
+// Fatigue the floor reaches at bedtime, and holds at for the whole time an agent
+// is in a sleep block. Just short of 100 so a bad day can still stack on top.
+export const SLEEP_PRESSURE_PEAK = 95;
+// Game-minutes before bedtime over which the floor ramps 0 -> SLEEP_PRESSURE_PEAK.
+// Scaled per agent by their profile-derived fatigue reactivity, so someone frail
+// starts flagging earlier in the evening than someone athletic.
+export const SLEEP_PRESSURE_RAMP_MINUTES = 5 * 60;
+// How often (real ms) the engine re-applies the floor. Agent.tick runs ~62x a
+// second, and during awake hours one real second is one game minute, so this is
+// a ~15 game-minute resolution on the ramp — smooth enough to watch, cheap
+// enough not to write the world doc on every tick.
+export const SLEEP_PRESSURE_INTERVAL_MS = 15_000;
+// At or above this fatigue an agent stops socialising: they won't start, accept
+// or join a conversation, and they bow out of any they're already in with a
+// one-line goodnight (see FATIGUE_MAX_CONVERSATION_MESSAGES).
+export const FATIGUE_SOCIAL_CUTOFF = 80;
+// Messages an exhausted agent will exchange before excusing themselves — enough
+// for a "night, ah" and a reply, not a conversation.
+export const FATIGUE_MAX_CONVERSATION_MESSAGES = 2;
 
 // --- Reflection trigger ---
 // Accumulated importance (across memories formed since the last reflection)

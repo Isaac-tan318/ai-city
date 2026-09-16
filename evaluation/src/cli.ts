@@ -38,6 +38,7 @@ type Flags = {
   out: string;
   limit?: number;
   perGroup?: number;
+  castSize?: number;
   dimension?: string;
   concurrency: number;
   miseryThreshold: number;
@@ -85,6 +86,9 @@ function parseFlags(argv: string[]): Flags {
         break;
       case '--per-group':
         flags.perGroup = Number(next());
+        break;
+      case '--cast':
+        flags.castSize = Number(next());
         break;
       case '--dimension':
         flags.dimension = next();
@@ -160,7 +164,9 @@ Flags
   --input <file>          chat-history JSON, or an evaluation bundle
   --from-convex           run the admin bundle query first, then analyze it
   --limit N               cap conversations judged (analyze)
-  --per-group N           cap characters per group (probe)
+  --per-group N           cap characters per attribute group (theory probes)
+  --cast N                cap characters for the choice probes, sampled across
+                          background groups (default: the whole cast)
   --dimension <id>        run one theory dimension: ${DIMENSIONS.map((d) => d.id).join(', ')}
   --background <axis>     what counts as the same background for WGDR:
                           ${BACKGROUND_AXES.join(', ')} (default nationality)
@@ -349,6 +355,7 @@ async function commandProbe(flags: Flags): Promise<void> {
     runProbes(judge, profiles, {
       dimensionId: flags.dimension,
       perGroup: flags.perGroup,
+      castSize: flags.castSize,
       skipChoice: flags.skipChoice,
       skipTheory: flags.skipTheory,
       backgroundAxis: flags.backgroundAxis,

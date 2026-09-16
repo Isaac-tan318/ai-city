@@ -160,6 +160,48 @@ function buildEmbeddingUrl(config: LLMConfig): string {
   return `${base}/embeddings`;
 }
 
+// Token accounting for a single provider call. `estimated` is set when the
+// provider returned no `usage` block and the counts are a chars/4 approximation
+// rather than the provider's own accounting — the usage page shows the
+// difference rather than quietly mixing the two.
+export interface LLMUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimated: boolean;
+}
+
+// Rough stand-in for a real tokenizer, only used when the provider omits usage.
+// ~4 characters per token is the usual English approximation, close enough to
+// keep an estimate in the right order of magnitude.
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+function readUsage(
+  json: CreateChatCompletionResponse,
+  promptText: string,
+  completionText: string,
+): LLMUsage {
+  const reported = json.usage;
+  if (reported && typeof reported.total_tokens === 'number') {
+    return {
+      promptTokens: reported.prompt_tokens ?? 0,
+      completionTokens: reported.completion_tokens ?? 0,
+      totalTokens: reported.total_tokens,
+      estimated: false,
+    };
+  }
+  const promptTokens = estimateTokens(promptText);
+  const completionTokens = estimateTokens(completionText);
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: promptTokens + completionTokens,
+    estimated: true,
+  };
+}
+
 // Overload for non-streaming
 export async function chatCompletion(
   body: Omit<CreateChatCompletionRequest, 'model'> & {
@@ -167,7 +209,13 @@ export async function chatCompletion(
   } & {
     stream?: false | null | undefined;
   },
-): Promise<{ content: string; retries: number; ms: number }>;
+): Promise<{
+  content: string;
+  retries: number;
+  ms: number;
+  model: string;
+  usage: LLMUsage | undefined;
+}>;
 // Overload for streaming
 export async function chatCompletion(
   body: Omit<CreateChatCompletionRequest, 'model'> & {
@@ -175,7 +223,13 @@ export async function chatCompletion(
   } & {
     stream?: true;
   },
-): Promise<{ content: ChatCompletionContent; retries: number; ms: number }>;
+): Promise<{
+  content: ChatCompletionContent;
+  retries: number;
+  ms: number;
+  model: string;
+  usage: LLMUsage | undefined;
+}>;
 export async function chatCompletion(
   body: Omit<CreateChatCompletionRequest, 'model'> & {
     model?: CreateChatCompletionRequest['model'];
@@ -186,6 +240,9 @@ export async function chatCompletion(
   const stopWords = body.stop ? (typeof body.stop === 'string' ? [body.stop] : body.stop) : [];
   if (config.stopWords) stopWords.push(...config.stopWords);
   console.log(body);
+  // Filled in by the attempt that succeeds below. A streamed response carries no
+  // usage block, so it stays undefined there.
+  let usage: LLMUsage | undefined;
   const {
     result: content,
     retries,
@@ -221,6 +278,7 @@ export async function chatCompletion(
       if (content === undefined) {
         throw new Error('Unexpected result from OpenAI: ' + JSON.stringify(json));
       }
+      usage = readUsage(json, JSON.stringify(body.messages), content);
       console.log(content);
       return content;
     }
@@ -230,6 +288,8 @@ export async function chatCompletion(
     content,
     retries,
     ms,
+    model: body.model!,
+    usage,
   };
 }
 
@@ -250,12 +310,27 @@ export async function tryPullOllama(model: string, error: string) {
 
 export async function fetchEmbeddingBatch(texts: string[]) {
   const config = getLLMConfig();
+  const inputTokens = () => texts.reduce((acc, t) => acc + estimateTokens(t), 0);
   if (config.provider === 'ollama') {
+    const started = Date.now();
+    const embeddings = await Promise.all(
+      texts.map(async (t) => (await ollamaFetchEmbedding(t)).embedding),
+    );
+    const promptTokens = inputTokens();
     return {
       ollama: true as const,
-      embeddings: await Promise.all(
-        texts.map(async (t) => (await ollamaFetchEmbedding(t)).embedding),
-      ),
+      embeddings,
+      usage: undefined as number | undefined,
+      retries: 0,
+      ms: Date.now() - started,
+      model: config.embeddingModel,
+      // Ollama's embeddings endpoint reports nothing, so this is always an estimate.
+      llmUsage: {
+        promptTokens,
+        completionTokens: 0,
+        totalTokens: promptTokens,
+        estimated: true,
+      } satisfies LLMUsage,
     };
   }
   const {
@@ -316,12 +391,21 @@ export async function fetchEmbeddingBatch(texts: string[]) {
   }
   const allembeddings = json.data;
   allembeddings.sort((a, b) => a.index - b.index);
+  const reportedTokens = json.usage?.total_tokens;
+  const totalTokens = reportedTokens ?? inputTokens();
   return {
     ollama: false as const,
     embeddings: allembeddings.map(({ embedding }) => embedding),
-    usage: json.usage?.total_tokens,
+    usage: reportedTokens,
     retries,
     ms,
+    model: config.embeddingModel,
+    llmUsage: {
+      promptTokens: json.usage?.prompt_tokens ?? totalTokens,
+      completionTokens: 0,
+      totalTokens,
+      estimated: reportedTokens === undefined,
+    } satisfies LLMUsage,
   };
 }
 

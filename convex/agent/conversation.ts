@@ -1,8 +1,10 @@
 import { v } from 'convex/values';
 import { Id } from '../_generated/dataModel';
 import { ActionCtx, internalQuery } from '../_generated/server';
-import { LLMMessage, chatCompletion } from '../util/llm';
+import { LLMMessage } from '../util/llm';
+import { trackedChatCompletion } from '../util/llmTrack';
 import * as memory from './memory';
+import { splitProfileConstraints } from './profileConstraints';
 import { api, internal } from '../_generated/api';
 import * as embeddingsCache from './embeddingsCache';
 import { GameId, conversationId, playerId } from '../aiTown/ids';
@@ -11,8 +13,10 @@ import { effectiveIdentity } from '../aiTown/agentDescription';
 import {
   buildShortTermSnapshot,
   shortTermSelfDescription,
+  tooTiredToSocialize,
   type ShortTerm,
 } from '../aiTown/shortTerm';
+import { FATIGUE_BASELINE } from '../constants';
 import {
   DEFAULT_AFFINITY,
   NUM_MEMORIES_TO_SEARCH,
@@ -53,7 +57,9 @@ type OtherParticipant = {
 // The live activity description for a player, or undefined if theirs has elapsed.
 // Agents keep their schedule ("ambient") activity running while they walk around
 // and while they talk, which is exactly what makes it worth putting in the prompt.
-function liveActivity(player: { activity?: { description: string; until: number } }): string | undefined {
+function liveActivity(player: {
+  activity?: { description: string; until: number };
+}): string | undefined {
   if (!player.activity) return undefined;
   return player.activity.until > Date.now() ? player.activity.description : undefined;
 }
@@ -66,10 +72,7 @@ export async function startConversationMessage(
   gameTimeMs: number,
 ): Promise<string> {
   const { player, others, conversation, agent, lastConversation, worldStartTime } =
-    await ctx.runQuery(
-      selfInternal.queryPromptData,
-    { worldId, playerId, conversationId },
-  );
+    await ctx.runQuery(selfInternal.queryPromptData, { worldId, playerId, conversationId });
   const audience = formatNameList(others.map((o) => o.name));
   const embedding = await embeddingsCache.fetch(ctx, `${player.name} is talking to ${audience}`);
 
@@ -110,7 +113,12 @@ export async function startConversationMessage(
     prompt.push(...scenarioHistoryPrompt(scenarioMessages));
   }
   if (agent?.scenarioInstruction) {
-    const pastScenarios = await recallPastScenarios(ctx, player.id as GameId<'players'>, agent, memories);
+    const pastScenarios = await recallPastScenarios(
+      ctx,
+      player.id as GameId<'players'>,
+      agent,
+      memories,
+    );
     prompt.push(...pastScenariosPrompt(pastScenarios));
   }
   if (memoryWithOtherPlayer && primaryOther) {
@@ -126,16 +134,20 @@ export async function startConversationMessage(
   const lastPrompt = speakerLabel(player.name, others);
   prompt.push(lastPrompt);
 
-  const { content } = await chatCompletion({
-    messages: [
-      {
-        role: 'user',
-        content: prompt.join('\n'),
-      },
-    ],
-    max_tokens: 120,
-    stop: stopWords(player.name, others),
-  });
+  const { content } = await trackedChatCompletion(
+    ctx,
+    { operation: 'conversation.start', worldId, subject: player.name },
+    {
+      messages: [
+        {
+          role: 'user',
+          content: prompt.join('\n'),
+        },
+      ],
+      max_tokens: 120,
+      stop: stopWords(player.name, others),
+    },
+  );
   return trimContentPrefx(content, lastPrompt);
 }
 
@@ -188,7 +200,12 @@ export async function continueConversationMessage(
     prompt.push(...scenarioHistoryPrompt(scenarioMessages));
   }
   if (agent?.scenarioInstruction) {
-    const pastScenarios = await recallPastScenarios(ctx, player.id as GameId<'players'>, agent, memories);
+    const pastScenarios = await recallPastScenarios(
+      ctx,
+      player.id as GameId<'players'>,
+      agent,
+      memories,
+    );
     prompt.push(...pastScenariosPrompt(pastScenarios));
   }
   prompt.push(
@@ -206,11 +223,15 @@ export async function continueConversationMessage(
   const lastPrompt = speakerLabel(player.name, others);
   llmMessages.push({ role: 'user', content: lastPrompt });
 
-  const { content } = await chatCompletion({
-    messages: llmMessages,
-    max_tokens: 300,
-    stop: stopWords(player.name, others),
-  });
+  const { content } = await trackedChatCompletion(
+    ctx,
+    { operation: 'conversation.continue', worldId, subject: player.name },
+    {
+      messages: llmMessages,
+      max_tokens: 300,
+      stop: stopWords(player.name, others),
+    },
+  );
   return trimContentPrefx(content, lastPrompt);
 }
 
@@ -226,16 +247,25 @@ export async function leaveConversationMessage(
     { worldId, playerId, conversationId },
   );
   const audience = formatNameList(others.map((o) => o.name));
+  // The exhausted exit is its own thing. The engine pulls an agent out of a
+  // conversation once fatigue crosses the cutoff, and a generic "politely tell
+  // them you're heading off" produced a leaving speech from someone who should
+  // barely be able to string a sentence together.
+  const turningIn = isExhausted(agent);
   const prompt = [
     `You are ${player.name}, and you're currently in a conversation with ${audience}.`,
-    `You've decided to leave and would like to politely tell them you're heading off.`,
+    turningIn
+      ? `You are exhausted and going to bed. Say goodnight and go.`
+      : `You've decided to leave and would like to politely tell them you're heading off.`,
   ];
   prompt.push(...currentTimeAndPlacePrompt(player, worldStartTime, gameTimeMs, agent));
   prompt.push(...textMediumPrompt(conversation));
   prompt.push(...selfAndOthersPrompt(agent, others));
   prompt.push(
     `Below is the current chat history.`,
-    `How would you like to tell them that you're leaving? Your response should be brief and within 200 characters.`,
+    turningIn
+      ? `Give them a short goodnight — ONE line, in your own voice, under 100 characters. No plans, no questions, no new topics.`
+      : `How would you like to tell them that you're leaving? Your response should be brief and within 200 characters.`,
   );
   const llmMessages: LLMMessage[] = [
     {
@@ -247,11 +277,15 @@ export async function leaveConversationMessage(
   const lastPrompt = speakerLabel(player.name, others);
   llmMessages.push({ role: 'user', content: lastPrompt });
 
-  const { content } = await chatCompletion({
-    messages: llmMessages,
-    max_tokens: 300,
-    stop: stopWords(player.name, others),
-  });
+  const { content } = await trackedChatCompletion(
+    ctx,
+    { operation: 'conversation.leave', worldId, subject: player.name },
+    {
+      messages: llmMessages,
+      max_tokens: 300,
+      stop: stopWords(player.name, others),
+    },
+  );
   return trimContentPrefx(content, lastPrompt);
 }
 
@@ -291,11 +325,15 @@ export async function summarizeGoalMessage(
   const lastPrompt = speakerLabel(player.name, others);
   llmMessages.push({ role: 'user', content: lastPrompt });
 
-  const { content } = await chatCompletion({
-    messages: llmMessages,
-    max_tokens: 200,
-    stop: stopWords(player.name, others),
-  });
+  const { content } = await trackedChatCompletion(
+    ctx,
+    { operation: 'conversation.summarizeGoal', worldId, subject: player.name },
+    {
+      messages: llmMessages,
+      max_tokens: 200,
+      stop: stopWords(player.name, others),
+    },
+  );
   return trimContentPrefx(content, lastPrompt);
 }
 
@@ -336,7 +374,11 @@ export async function decideNextSpeaker(
 
   // Fast path: a single other agent and no goal to judge — no LLM call needed.
   if (candidates.length === 1 && !checkGoal) {
-    return { nextSpeaker: candidates[0].id as GameId<'players'>, goalMet: false, coveredTopics: [] };
+    return {
+      nextSpeaker: candidates[0].id as GameId<'players'>,
+      goalMet: false,
+      coveredTopics: [],
+    };
   }
 
   const recent = prevMessages
@@ -386,10 +428,14 @@ export async function decideNextSpeaker(
   let goalMet = false;
   let coveredTopics: number[] = [];
   try {
-    const { content } = await chatCompletion({
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: checkGoal ? 60 : 10,
-    });
+    const { content } = await trackedChatCompletion(
+      ctx,
+      { operation: 'conversation.nextSpeaker', worldId, subject: player.name },
+      {
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: checkGoal ? 60 : 10,
+      },
+    );
     let nameText: string;
     if (checkGoal) {
       const parsed = parseGoalJudge(content, topics.length);
@@ -476,6 +522,12 @@ function speakerLabel(name: string, others: { name: string }[]): string {
   return others.length === 1 ? `${name} to ${others[0].name}:` : `${name}:`;
 }
 
+// Is this agent too tired to be holding a conversation at all? The same cutoff
+// the engine gates invites and joins on, so the prompt and the behaviour agree.
+function isExhausted(agent: { shortTerm?: ShortTerm } | null): boolean {
+  return tooTiredToSocialize(agent?.shortTerm?.fatigue ?? FATIGUE_BASELINE);
+}
+
 function selfAndOthersPrompt(
   agent: {
     identity: string;
@@ -495,9 +547,36 @@ function selfAndOthersPrompt(
   if (agent) {
     prompt.push(`About you: ${agent.identity}`);
     // Self-full: the character is aware of its own complete structured background.
+    //
+    // Split into two blocks rather than one flat dump. In a single list,
+    // "Dietary rule: Halal only; no pork; no alcohol" sits between a hobby and a
+    // hometown with identical weight, and the model reads it as colour. The
+    // fields describing something a character cannot simply choose to ignore are
+    // pulled out and named as such.
+    //
+    // This is presentation of stipulated profile attributes, not instruction.
+    // Nothing here says when to raise any of it, or that raising it is expected
+    // at all — deciding whether a constraint is worth mentioning, and when, is
+    // the behaviour under observation and stays with the character.
     if (agent.profile && Object.keys(agent.profile).length > 0) {
-      const lines = Object.entries(agent.profile).map(([k, val]) => `  - ${k}: ${val}`);
-      prompt.push([`Your background details:`, ...lines].join('\n'));
+      const { constraints, rest } = splitProfileConstraints(agent.profile);
+      if (rest.length > 0) {
+        const lines = rest.map(([k, val]) => `  - ${k}: ${val}`);
+        prompt.push([`Your background details:`, ...lines].join('\n'));
+      }
+      if (constraints.length > 0) {
+        const lines = constraints.map(([k, val]) => `  - ${k}: ${val}`);
+        prompt.push(
+          [
+            `Fixed facts about your life — these are not preferences you can trade away:`,
+            ...lines,
+            // LLM role-play routinely proceeds as though everyone at the table
+            // already knows these. Correcting that false premise is a statement
+            // of fact, not a direction to disclose.
+            `Nobody else here knows any of this unless you have said it out loud in this conversation.`,
+          ].join('\n'),
+        );
+      }
     }
     // Durable traits the character has learned about itself over time (promoted
     // from reflection); augments — never replaces — the authored background above.
@@ -530,6 +609,16 @@ function selfAndOthersPrompt(
     if (selfState) {
       prompt.push(
         `${selfState} Let this temporary state colour your tone and choices in the moment, but stay in character.`,
+      );
+    }
+    // Past the point of conversation. The engine has already stopped this agent
+    // starting or accepting anything and will pull them out after a message or
+    // two (see FATIGUE_MAX_CONVERSATION_MESSAGES); this makes the one or two
+    // lines they do get read like someone on their way to bed rather than
+    // someone happily chatting who then abruptly vanishes.
+    if (isExhausted(agent)) {
+      prompt.push(
+        `You are dead on your feet and about to turn in for the night. Do NOT start a topic, ask a question that needs an answer, or make plans. Say one short line — a goodnight, or a quick word before bed — and leave it there. Absolutely no more than two short sentences.`,
       );
     }
   }
@@ -921,10 +1010,14 @@ export async function planScenarioTasks(
     .filter(Boolean)
     .join('\n');
 
-  const { content } = await chatCompletion({
-    messages: [{ role: 'user', content: prompt }],
-    max_tokens: 400,
-  });
+  const { content } = await trackedChatCompletion(
+    ctx,
+    { operation: 'scenario.planTasks', worldId, subject: scenarioId },
+    {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 400,
+    },
+  );
   return parseScenarioTasks(content, data.participants);
 }
 
@@ -953,8 +1046,9 @@ function parseScenarioTasks(
     const nameKey = typeof t.assignee === 'string' ? t.assignee.trim().toLowerCase() : '';
     let assigneeId =
       byName.get(nameKey) ??
-      [...byName.entries()].find(([n]) => nameKey && (nameKey.includes(n) || n.includes(nameKey)))
-        ?.[1];
+      [...byName.entries()].find(
+        ([n]) => nameKey && (nameKey.includes(n) || n.includes(nameKey)),
+      )?.[1];
     if (!assigneeId) assigneeId = participants[i % participants.length].id;
     const sec = Number(t.durationSec);
     const durationMs = Number.isFinite(sec)

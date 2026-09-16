@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { HashRouter, Route, Routes } from 'react-router-dom';
 import Home from './App.tsx';
 import AnalysisPage from './components/AnalysisPage.tsx';
+import UsagePage from './components/UsagePage.tsx';
 import './index.css';
 import 'uplot/dist/uPlot.min.css';
 import 'react-toastify/dist/ReactToastify.css';
@@ -15,6 +16,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/analysis" element={<AnalysisPage />} />
+          <Route path="/usage" element={<UsagePage />} />
         </Routes>
       </HashRouter>
     </ConvexClientProvider>

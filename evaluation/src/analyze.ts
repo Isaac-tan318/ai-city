@@ -33,7 +33,11 @@ import {
 import type { Conversation, Corpus, Decision } from './corpus/normalize';
 import { ProfileIndex, type BackgroundAxis, type CharacterRecord } from './corpus/profiles';
 import type { Judge } from './llm';
-import { findOpportunities, type Opportunity } from './judges/opportunities';
+import {
+  findOpportunities,
+  type Opportunity,
+  type OpportunityRejection,
+} from './judges/opportunities';
 import { gradeOpportunities, type FidelityJudgement } from './judges/personaFidelity';
 import {
   gradeDisclosures,
@@ -89,6 +93,9 @@ export type AnalyzeResult = {
   // for the run again.
   evidence: {
     opportunities: Opportunity[];
+    // Candidate opportunities the gates threw out, with the reason. Kept so a
+    // denominator that shrank can be audited as readily as one that grew.
+    rejectedOpportunities: OpportunityRejection[];
     fidelity: FidelityJudgement[];
     disclosure: DisclosureJudgement[];
     premature: PrematureJudgement[];
@@ -126,6 +133,7 @@ export async function analyze(
 
   // --- Components 1 and 4 -----------------------------------------------------
   const opportunities: Opportunity[] = [];
+  const rejections: OpportunityRejection[] = [];
   const fidelity: FidelityJudgement[] = [];
   const disclosures: DisclosureJudgement[] = [];
   const interactions: PrematureJudgement[] = [];
@@ -133,11 +141,12 @@ export async function analyze(
   await Promise.all(
     pairs.map(async ({ conversation, character }) => {
       const found = await findOpportunities(judge, conversation, character);
-      opportunities.push(...found);
+      opportunities.push(...found.kept);
+      rejections.push(...found.rejected);
 
       const [graded, disclosed, premature] = await Promise.all([
-        gradeOpportunities(judge, conversation, character, found),
-        gradeDisclosures(judge, conversation, character, found),
+        gradeOpportunities(judge, conversation, character, found.kept),
+        gradeDisclosures(judge, conversation, character, found.kept),
         gradePremature(judge, conversation, character),
       ]);
       fidelity.push(...graded);
@@ -195,7 +204,13 @@ export async function analyze(
         ? { comparisons, disagreement: ruleDisagreementRate(comparisons) }
         : undefined,
     neutrality: checkNeutrality(),
-    evidence: { opportunities, fidelity, disclosure: disclosures, premature: interactions },
+    evidence: {
+      opportunities,
+      rejectedOpportunities: rejections,
+      fidelity,
+      disclosure: disclosures,
+      premature: interactions,
+    },
   };
 }
 
@@ -334,6 +349,8 @@ async function analyseDynamicState(judge: Judge, corpus: Corpus): Promise<Dynami
         baseline: baselineFor(event.component),
         expected,
         crossScenario: !first && event.scenarioId !== previousScenario,
+        scenarioId: event.scenarioId,
+        conversationId: event.conversationId,
       });
       previousScenario = event.scenarioId;
       first = false;

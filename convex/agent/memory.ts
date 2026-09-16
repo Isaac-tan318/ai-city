@@ -8,7 +8,12 @@ import {
 } from '../_generated/server';
 import { Doc, Id } from '../_generated/dataModel';
 import { internal } from '../_generated/api';
-import { LLMMessage, chatCompletion, fetchEmbedding } from '../util/llm';
+import { LLMMessage } from '../util/llm';
+import {
+  LLMCallLabel,
+  trackedChatCompletion,
+  trackedFetchEmbedding,
+} from '../util/llmTrack';
 import { asyncMap } from '../util/asyncMap';
 import * as embeddingsCache from './embeddingsCache';
 import { GameId, agentId, conversationId, playerId } from '../aiTown/ids';
@@ -92,7 +97,12 @@ export async function rememberConversation(
     });
   }
   llmMessages.push({ role: 'user', content: 'Summary:' });
-  const { content } = await chatCompletion({
+  const label: LLMCallLabel = {
+    operation: 'memory.rememberConversation',
+    worldId,
+    subject: player.name,
+  };
+  const { content } = await trackedChatCompletion(ctx, label, {
     messages: llmMessages,
     max_tokens: 500,
   });
@@ -107,8 +117,8 @@ export async function rememberConversation(
     data.conversation._creationTime,
     worldStartTime,
   )}: ${summary}`;
-  const importance = await calculateImportance(description);
-  const { embedding } = await fetchEmbedding(description);
+  const importance = await calculateImportance(ctx, description, label);
+  const { embedding } = await trackedFetchEmbedding(ctx, label, description);
   authors.delete(player.id as GameId<'players'>);
   await ctx.runMutation(selfInternal.insertMemory, {
     agentId,
@@ -169,9 +179,17 @@ export async function rememberScenarioOutcome(
     .filter(Boolean)
     .join('\n');
 
+  const label: LLMCallLabel = {
+    operation: 'memory.rememberScenario',
+    worldId,
+    subject: input.name,
+  };
   let content = '';
   try {
-    const res = await chatCompletion({ messages: [{ role: 'user', content: prompt }], max_tokens: 220 });
+    const res = await trackedChatCompletion(ctx, label, {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 220,
+    });
     content = res.content;
   } catch (err) {
     console.error(`rememberScenarioOutcome LLM failed: ${(err as Error).message}`);
@@ -181,8 +199,8 @@ export async function rememberScenarioOutcome(
   const description = `${input.scenarioName}: ${summary || `${roleNote} ${outcomeNote}`}`;
   // Heuristic fallback so short-term still moves even if the Feelings line is absent.
   const shortTermDeltas = parsedDeltas.length > 0 ? parsedDeltas : heuristicScenarioFeelings(input);
-  const importance = await calculateImportance(description);
-  const { embedding } = await fetchEmbedding(description);
+  const importance = await calculateImportance(ctx, description, label);
+  const { embedding } = await trackedFetchEmbedding(ctx, label, description);
   await ctx.runMutation(selfInternal.insertScenarioOutcomeMemory, {
     playerId,
     description,
@@ -464,19 +482,25 @@ export const loadMessages = internalQuery({
   },
 });
 
-async function calculateImportance(description: string) {
-  const { content: importanceRaw } = await chatCompletion({
-    messages: [
-      {
-        role: 'user',
-        content: `On the scale of 0 to 9, where 0 is purely mundane (e.g., brushing teeth, making bed) and 9 is extremely poignant (e.g., a break up, college acceptance), rate the likely poignancy of the following piece of memory.
+// Takes the caller's label so the importance rating is attributed to whatever
+// memory write prompted it, rather than showing up as an orphan on the usage page.
+async function calculateImportance(ctx: ActionCtx, description: string, label: LLMCallLabel) {
+  const { content: importanceRaw } = await trackedChatCompletion(
+    ctx,
+    { ...label, operation: 'memory.importance' },
+    {
+      messages: [
+        {
+          role: 'user',
+          content: `On the scale of 0 to 9, where 0 is purely mundane (e.g., brushing teeth, making bed) and 9 is extremely poignant (e.g., a break up, college acceptance), rate the likely poignancy of the following piece of memory.
       Memory: ${description}
       Answer on a scale of 0 to 9. Respond with number only, e.g. "5"`,
-      },
-    ],
-    temperature: 0.0,
-    max_tokens: 1,
-  });
+        },
+      ],
+      temperature: 0.0,
+      max_tokens: 1,
+    },
+  );
 
   let importance = parseFloat(importanceRaw);
   if (isNaN(importance)) {
@@ -718,7 +742,8 @@ export async function reflectOnMemories(
     'Example: [{insight: "...", statementIds: [1,2]}, {insight: "...", statementIds: [1]}, ...]',
   );
 
-  const { content: reflection } = await chatCompletion({
+  const label: LLMCallLabel = { operation: 'memory.reflect', worldId, subject: name };
+  const { content: reflection } = await trackedChatCompletion(ctx, label, {
     messages: [
       {
         role: 'user',
@@ -736,8 +761,8 @@ export async function reflectOnMemories(
       const relatedMemoryIds = (item.statementIds ?? [])
         .filter((idx: number) => Number.isInteger(idx) && idx >= 0 && idx < newMemories.length)
         .map((idx: number) => newMemories[idx]._id);
-      const importance = await calculateImportance(item.insight);
-      const { embedding } = await fetchEmbedding(item.insight);
+      const importance = await calculateImportance(ctx, item.insight, label);
+      const { embedding } = await trackedFetchEmbedding(ctx, label, item.insight);
       console.debug('adding reflection memory...', item.insight);
       return {
         description: item.insight,

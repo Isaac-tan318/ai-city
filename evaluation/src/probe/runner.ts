@@ -75,6 +75,10 @@ export async function runProbe(
   }
 
   const parsed = await judge.ask(`probe/${probeId}/${character.name}`, prompt, OpenResponseSchema);
-  if (!parsed || !parsed.say.trim()) return undefined;
+  // Only a failed call is undefined. An empty reply means the character chose
+  // not to speak, which is a real observation — coded 'absent' downstream — and
+  // dropping it would quietly remove exactly the people the theory predicts
+  // will say nothing.
+  if (!parsed) return undefined;
   return { characterName: character.name, probeId, prompt, response: parsed.say.trim() };
 }

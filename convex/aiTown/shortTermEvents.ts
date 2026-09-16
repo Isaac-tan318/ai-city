@@ -25,8 +25,13 @@ export const shortTermCause = v.union(
   v.literal('activity'),
   // Eating: the only thing that brings hunger down.
   v.literal('meal'),
-  // Sleeping: resets fatigue to its baseline.
+  // Waking up: resets fatigue to its baseline. Going to BED does not — the
+  // night's rest is what earns the reset, so it lands on the way out.
   v.literal('rest'),
+  // The nightly ramp: fatigue floored upward as the agent's own bedtime nears,
+  // and held at that floor for as long as they are asleep. See
+  // Agent.applySleepPressure and sleepPressureFloor in shortTerm.ts.
+  v.literal('sleepPressure'),
   // The daily illness penalty (SICK_STRESS_PER_DAY, SICK_MOOD_PENALTY_PER_DAY).
   v.literal('sickness'),
   // decayTowardBaseline on the daily tick.

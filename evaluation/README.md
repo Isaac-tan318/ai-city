@@ -74,6 +74,43 @@ Every rate prints its denominator and a Wilson 95% interval, so a 100% built on 
 cannot be mistaken for a result. A component the input cannot support prints as _skipped_, with the
 reason — never as a rate over nothing.
 
+## What counts as one observation
+
+Four rules decide what goes in a denominator, and all four exist because the naive reading of
+"an opportunity" inflates one.
+
+**One constraint, one conversation, one case.** A transcript where grilled meat is proposed on six
+consecutive turns puts Ratna's halal rule on the table _once_. `collapseDisclosureEpisodes` folds
+repeats of the same constraint, for the same person, in the same conversation into a single episode
+anchored at the first opportunity; it counts as disclosed if she stated it anywhere in the
+conversation. Counting each mention separately does not measure her six times — it counts one
+behaviour six times and then reports a Wilson interval as though six independent observations had
+been made. The report prints how many repeats were folded.
+
+**A conditional constraint is only live when its condition is.** Irina avoids animal products
+_during Orthodox fasting periods_; Yvonne is vegetarian _on Buddhist observance days_. Nothing in
+the simulation models a fasting calendar, so `corpus/conditions.ts` classifies these rules from
+their own wording and the opportunity judge must quote the words in the transcript that establish
+the occasion is now. An activation it cannot quote is one it inferred from the profile, and the
+opportunity is discarded with reason `condition-not-active` — named in the report, not just
+counted. A rule with an unconditional half (`Avoids beef; vegetarian on prayer days`) stays ungated:
+hiding a rule that binds every day is the worse error.
+
+**A disclosure has to be actionable.** The disclosure judge codes how clearly the constraint came
+across — `explicit`, `actionable`, `preference-only`, `not-stated` — and only the first two count.
+"I'd prefer soto or tempeh" tells a group what someone would enjoy and leaves them free to book the
+place where she cannot eat; scoring it as a successful disclosure of a halal requirement measures
+politeness, not information flow. Downgraded cases are listed in the report with what was actually
+said.
+
+**A verdict with nothing quoted behind it is an abstention.** Persona fidelity used to accept
+silence as evidence of consistency, which made part of PCR a measure of how often the subject was
+dropped. A verdict whose evidence field is empty is now withdrawn to `unclear` — excluded from both
+PCR and HCCR, in either direction — and the withdrawal is reported beside the abstention rate.
+Quotes are checked against the speaker's own turns (`judges/quoting.ts`); one that cannot be found
+there is still counted but flagged as unverifiable, because judges paraphrase and a false rejection
+would throw away a real verdict.
+
 ## Tracing a number back to an utterance
 
 The console output is a summary. Every run also writes `evaluation/out/<mode>-<timestamp>.json`,
@@ -82,13 +119,13 @@ for the run again.
 
 | Console line         | Where the detail lives                                                                                                                                                                               |
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| PCR / HCCR           | `evidence.opportunities[]` — every counted moment, with `conversationId`, `messageIndex` and `why` it counted (the itemised denominator); `evidence.fidelity[]` — the verdict for each, with a quote |
-| Relevant Disclosure  | `evidence.disclosure[]` — per constraint, whether it was said and the words that said it                                                                                                             |
+| PCR / HCCR           | `evidence.opportunities[]` — every counted moment, with `conversationId`, `messageIndex` and `why` it counted (the itemised denominator); `evidence.rejectedOpportunities[]` — every moment a gate threw out, and why; `evidence.fidelity[]` — the verdict for each, with its quote, `support` and the `statedVerdict` before any withdrawal |
+| Relevant Disclosure  | `disclosure.episodes[]` — the collapsed cases the rate is over, with `occurrences`; `evidence.disclosure[]` — per mention, `conveys`, the quote, and any `downgradedBecause`                          |
 | Premature Disclosure | `evidence.premature[]` — what was volunteered, and the judge's reasoning                                                                                                                             |
 | DCR                  | `dimensions[].responses[]` — the verbatim line each NPC gave, its group, and the blind coder's boolean                                                                                               |
 | WGDR                 | `choiceProbes[].choices[]` — per character, `feasibleOptionIds` and `choiceDetermined`, so an excluded pair is explicable                                                                            |
 | Coverage             | `coverage.perDecision[]` and `withinGroup.exclusions`                                                                                                                                                |
-| STA / URR            | `dynamicState.unexpectedResets[]`, with before/after values and cause                                                                                                                                |
+| STA / URR            | `dynamicState.incorrectTransitions[]` — every transition counted against accuracy, with cause, component, both values, scenario and conversation; `dynamicState.unexpectedResets[]`                   |
 | Aggregation          | `aggregation.comparisons[]` — each rule's winner and regret, per scenario                                                                                                                            |
 
 The probe JSON is the most useful of these: a tied DCR is readable directly, by looking at what the
@@ -120,6 +157,59 @@ the behaviour to look for — never the profile, the group, or the hypothesis.
 `neutrality.ts` then checks the built prompts anyway, and fails if a group label, the observable, or
 experimental vocabulary appears in experimenter-authored text. It deliberately does _not_ scan the
 persona block: stating a profile attribute is allowed; stating the expected outcome is not.
+
+## Designing a probe that can actually discriminate
+
+Three failure modes cost this framework four of its seven dimensions on the first real run, and all
+three are easy to walk back into.
+
+**A scenario that compels the behaviour measures the scenario.** The first conflict-avoidance probe
+put a blatant injustice on the table with everyone looking at you and asked "what do you say next?".
+All ten characters objected, and the test tied at 100% against 100%. A probe only discriminates if
+_not_ doing the behaviour is socially available: keep the stakes low, let someone else have already
+spoken, and make letting it go cost nothing. Every open probe also permits an empty reply, because
+silence is the conflict-avoidant answer and a prompt that demands a line makes it unobservable.
+
+**A binary coder collapses the signal.** "Objects: yes/no" scored _"I appreciate the suggestion, but
+perhaps we could consider..."_ and _"it's only fair we pay for what we ordered"_ identically.
+Responses are coded `absent | hedged | explicit`, and each dimension declares the `threshold` that
+counts. Pick `explicit` where the theory is about owning a position outright, `hedged` where any
+form of the behaviour is what was predicted.
+
+**Grade the behaviour, not the eloquence.** On the payment-norm probe every character firmly
+_declined_ to be treated, and every one was coded `explicit` against an observable reading "accepts
+being treated" — a confident refusal scored as a strong instance of accepting. The coder now names
+this case explicitly. It is worth re-reading the level definitions whenever a dimension saturates.
+
+The report distinguishes these outcomes: `ceiling` and `floor` mean the probe drew the behaviour
+from nearly everyone or nearly nobody and cannot discriminate, which is a broken instrument rather
+than a null result. Both stay out of the DCR denominator.
+
+## DCR is not the only number that matters
+
+DCR counts a test as following the prediction if the rates differ in the right direction _by any
+amount_. At the group sizes a 25-character cast supports, 3/6 against 2/5 clears that bar and is
+indistinguishable from chance. The report prints **of which groups separate** beside it — the share
+of tests whose Wilson intervals do not overlap — and marks the others _direction only_. Since the
+thresholds and scenarios are tunable until everything passes, a DCR of 7/7 with a separation rate
+near zero should be read as a warning, not a result.
+
+## Sizing a choice probe
+
+`--per-group` caps characters per _attribute group_ and applies to the theory dimensions. `--cast`
+caps the choice probes, and the two are deliberately separate: sharing one flag silently wrecked
+Component 3, because capping the cast at four took the four alphabetically-first characters, and
+four deciders cannot cover a four-option menu (2/4 coverage looked like polarization but was
+arithmetic) while four different nationalities produced zero comparable pairs for within-group
+diversity.
+
+`--cast` fills the largest background groups first rather than spreading across them. Within-group
+diversity needs people who _share_ a background, so breadth is the wrong instinct here. Coverage
+computed on fewer than two deciders per option is labelled NOT INTERPRETABLE.
+
+Watch for **dominated options**. An option that is the most expensive, the longest and the least
+comfortable will never be chosen by anyone, and it puts a ceiling on Option Coverage that no amount
+of population diversity can lift — the gap then measures the menu, not the town.
 
 ## Adding a theory dimension
 
@@ -156,8 +246,10 @@ src/aggregation.ts    PURE: utilitarian / max-min / average-without-misery / Nas
 src/analyze.ts        the recorded-corpus pipeline
 src/probe/            standardized-probe generation and pipeline
 src/judges/           one LLM judgement each, all zod-validated
+src/judges/quoting.ts PURE: is a judge's quote really in the speaker's turns. Tested.
 src/theory/           the dimension registry, choice probes, state update rules
 src/corpus/           input schemas, normalization, the profile index
+src/corpus/conditions.ts  PURE: which constraints only bind at certain times. Tested.
 src/neutrality.ts     the prompt-neutrality lint
 src/report.ts         console + JSON artifacts under evaluation/out
 ```

@@ -275,6 +275,26 @@ their summary texts to inject into the conversation prompt.
 To avoid computing the same embedding over and over again, we cache embeddings by a hash of their
 text in a Convex table.
 
+### LLM usage tracking (`convex/util/llmTrack.ts`, `convex/llmUsage.ts`)
+
+`convex/util/llm.ts` stays dependency-free — the offline evaluation harness imports it from plain
+Node — so it reports token usage in its return value but never writes to the database. The Convex
+side of that is `convex/util/llmTrack.ts`: `trackedChatCompletion` and `trackedFetchEmbedding(Batch)`
+take the same arguments plus an `ActionCtx` and a label (`{ operation, worldId?, subject? }`), and
+write one `llmCalls` row per provider call. Every LLM call site in `convex/` goes through them.
+
+`operation` is a dotted label naming the call site (`conversation.continue`, `agent.planDay`,
+`memory.reflect`, ...) and `subject` is usually the agent the call was made on behalf of, which is
+what the usage page groups by. Failures are recorded too, with `ok: false` and zero tokens.
+Recording is best-effort: an insert that fails is logged and swallowed so it can never take down an
+agent operation.
+
+`convex/llmUsage.ts` serves the page at `/usage` (`src/components/UsagePage.tsx`): `summary` rolls a
+time window up by operation, model, agent and kind and returns a bucketed time series, `calls`
+returns the individual rows, and `clear` drops the log. Both reads are capped at 10k rows and say so
+via `truncated` rather than failing on a wide window. Rows ride the two-week vacuum in
+`convex/crons.ts`.
+
 ## Design goals and limitations
 
 AI Town's game engine has a few design goals:

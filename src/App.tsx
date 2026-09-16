@@ -31,8 +31,8 @@ export default function Home() {
         <div className="font-body">
           <h1 className="text-center text-6xl font-bold font-display game-title">Help</h1>
           <p>
-            Welcome to AI City. AI City supports both anonymous <i>spectators</i> and logged in{' '}
-            <i>interactivity</i>.
+            Welcome to Virtual City of Singapore. Virtual City of Singapore supports both anonymous{' '}
+            <i>spectators</i> and logged in <i>interactivity</i>.
           </p>
           <h2 className="text-4xl mt-4">Spectating</h2>
           <p>
@@ -55,7 +55,7 @@ export default function Home() {
             in the messages panel.
           </p>
           <p className="mt-4">
-            AI City only supports {MAX_HUMAN_PLAYERS} humans at a time. If you're idle for five
+            Virtual City of Singapore only supports {MAX_HUMAN_PLAYERS} humans at a time. If you're idle for five
             minutes, you'll be automatically removed from the simulation.
           </p>
         </div>
@@ -72,7 +72,7 @@ export default function Home() {
 
       <div className="w-full h-screen relative isolate overflow-hidden lg:px-8 lg:pb-4 lg:pt-2 shadow-2xl flex flex-col justify-start">
         <h1 className="mx-auto text-4xl p-1 sm:text-6xl lg:text-7xl font-bold font-display leading-none tracking-wide game-title w-full text-left sm:text-center sm:w-auto">
-          AI City
+          Virtual City of Singapore
         </h1>
 
         <Game />
@@ -94,6 +94,16 @@ export default function Home() {
               <div className="inline-block bg-clay-700">
                 <span>
                   <div className="inline-flex h-full items-center gap-4 px-4">Analysis</div>
+                </span>
+              </div>
+            </Link>
+            <Link
+              to="/usage"
+              className="button text-white shadow-solid text-xl pointer-events-auto"
+            >
+              <div className="inline-block bg-clay-700">
+                <span>
+                  <div className="inline-flex h-full items-center gap-4 px-4">Usage</div>
                 </span>
               </div>
             </Link>

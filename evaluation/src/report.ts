@@ -56,6 +56,33 @@ export function renderAnalyze(result: AnalyzeResult): string {
     );
     out.push(line('Hard-Constraint Contradiction', result.personaFidelity.hccr, 'target 0'));
     out.push(line('judge abstention', result.personaFidelity.abstention, 'excluded from both'));
+    // How much of that abstention is the evidence rule rather than the judge
+    // hesitating. A verdict with nothing quoted behind it used to be counted —
+    // almost always as "consistent" — so this line is the size of the
+    // correction, and it belongs next to the rate it changed.
+    const withdrawn = result.evidence.fidelity.filter(
+      (f) => f.support === 'none' && f.statedVerdict !== 'unclear',
+    );
+    if (withdrawn.length > 0) {
+      const byStated = withdrawn.reduce<Record<string, number>>((acc, f) => {
+        acc[f.statedVerdict] = (acc[f.statedVerdict] ?? 0) + 1;
+        return acc;
+      }, {});
+      out.push(
+        `    of those, ${withdrawn.length} withdrawn for no quoted behaviour (` +
+          Object.entries(byStated)
+            .map(([k, n]) => `judge said ${k}: ${n}`)
+            .join(', ') +
+          ')',
+      );
+    }
+    const ungrounded = result.evidence.fidelity.filter((f) => f.support === 'ungrounded');
+    if (ungrounded.length > 0) {
+      out.push(
+        `    counted but unverifiable: ${ungrounded.length} verdicts quote words not found in ` +
+          `the speaker's own turns`,
+      );
+    }
     const worst = [...result.personaFidelity.byCharacter]
       .filter((c) => c.pcr.denominator > 0)
       .sort((a, b) => a.pcr.rate - b.pcr.rate)
@@ -74,7 +101,40 @@ export function renderAnalyze(result: AnalyzeResult): string {
   }
 
   out.push(...heading('4. Information-disclosure plausibility'));
+  // The denominator this rate rests on, and what was kept out of it. Without
+  // this the reader cannot tell a genuinely silent population from a judge that
+  // called every mention of food an opportunity.
+  const rejected = result.evidence.rejectedOpportunities;
+  if (rejected.length > 0) {
+    const byReason = rejected.reduce<Record<string, number>>((acc, r) => {
+      acc[r.reason] = (acc[r.reason] ?? 0) + 1;
+      return acc;
+    }, {});
+    out.push(
+      `  candidate opportunities discarded: ${rejected.length} (` +
+        Object.entries(byReason)
+          .map(([k, n]) => `${k}: ${n}`)
+          .join(', ') +
+        ')',
+    );
+    // A constraint held out because its condition was never established is not
+    // the same kind of exclusion as a stretched topic association: it says the
+    // rule exists but was not binding today, which is a fact about the
+    // transcript worth naming rather than a count worth burying.
+    const inactive = rejected.filter((r) => r.reason === 'condition-not-active');
+    for (const r of inactive.slice(0, 5)) {
+      out.push(`    not live: ${r.characterName.padEnd(12)} ${truncate(r.detail ?? '', 88)}`);
+    }
+    if (inactive.length > 5) out.push(`    (${inactive.length - 5} more in the JSON)`);
+  }
   if (result.disclosure) {
+    if (result.disclosure.duplicateMentions > 0) {
+      out.push(
+        `  repeat mentions folded into their first opportunity: ` +
+          `${result.disclosure.duplicateMentions} ` +
+          `(${result.disclosure.episodes.length} disclosure episodes counted)`,
+      );
+    }
     out.push(
       line('Relevant Disclosure Rate', result.disclosure.relevantDisclosure, 'higher is better'),
     );
@@ -100,14 +160,35 @@ export function renderAnalyze(result: AnalyzeResult): string {
         }
       }
     }
+    // Cases the judge called disclosed that did not survive the actionability
+    // check. These are the ones most worth reading: a constraint hinted at as a
+    // preference looks like a success in the transcript and is a failure in the
+    // group's plan, and that distinction is the whole point of the metric.
+    const downgraded = new Map<string, (typeof result.evidence.disclosure)[number]>();
+    for (const d of result.evidence.disclosure) {
+      if (!d.downgradedBecause) continue;
+      downgraded.set(`${d.characterName}␟${d.conversationId}␟${d.constraint}`, d);
+    }
+    if (downgraded.size > 0) {
+      out.push('', `  stated, but not clearly enough to act on (${downgraded.size}):`);
+      for (const d of [...downgraded.values()].slice(0, 5)) {
+        out.push(
+          `    ${d.characterName.padEnd(12)} ${truncate(d.constraint, 40)}  [${d.downgradedBecause}]`,
+        );
+        if (d.quote) out.push(`        said: "${truncate(d.quote, 80)}"`);
+      }
+      if (downgraded.size > 5) out.push(`    (${downgraded.size - 5} more in the JSON)`);
+    }
     // The other half of the picture: a constraint that mattered and never got
     // said is what drags Relevant Disclosure down, and naming them turns the
-    // rate into something actionable.
-    const hidden = result.evidence.disclosure.filter((d) => d.opportunity && !d.disclosed);
+    // rate into something actionable. Counted over episodes, so a constraint
+    // that came up six times appears here once.
+    const hidden = result.disclosure.episodes.filter((d) => d.opportunity && !d.disclosed);
     if (hidden.length > 0) {
       out.push('', `  relevant constraints never disclosed (${hidden.length}):`);
       for (const d of hidden.slice(0, 6)) {
-        out.push(`    ${d.characterName.padEnd(12)} ${truncate(d.constraint, 60)}`);
+        const repeats = d.occurrences > 1 ? `  (raised ${d.occurrences}x)` : '';
+        out.push(`    ${d.characterName.padEnd(12)} ${truncate(d.constraint, 60)}${repeats}`);
       }
       if (hidden.length > 6) out.push(`    (${hidden.length - 6} more in the JSON)`);
     }
@@ -161,6 +242,26 @@ function renderAnalyzeTail(result: AnalyzeResult): string[] {
         `${v['no-movement']} no movement, ${v.clamped} clamped (excluded), ` +
         `${v.unconstrained} unconstrained (excluded)`,
     );
+    // The transitions that cost the rate its points, in full. One bad move in
+    // five hundred is either a defect in an update rule or a mis-transcribed
+    // expectation in theory/stateRules.ts, and a count alone cannot tell the
+    // reader which — only the event, the gauge and the two values can.
+    const wrong = result.dynamicState.incorrectTransitions;
+    if (wrong.length > 0) {
+      out.push('', `  transitions counted against accuracy (${wrong.length}):`);
+      for (const t of wrong.slice(0, 10)) {
+        const where = [t.scenarioId && `scenario ${t.scenarioId}`, t.conversationId]
+          .filter(Boolean)
+          .join(' · ');
+        out.push(
+          `    ${t.verdict.padEnd(15)} ${t.characterName.padEnd(12)} ${t.component.padEnd(8)} ` +
+            `${t.valueBefore} to ${t.valueAfter} (baseline ${t.baseline}) ` +
+            `on '${t.cause}', expected ${t.expected}`,
+        );
+        out.push(`        ${new Date(t.at).toISOString()}${where ? `   ${where}` : ''}`);
+      }
+      if (wrong.length > 10) out.push(`    (${wrong.length - 10} more in the JSON)`);
+    }
     for (const reset of result.dynamicState.unexpectedResets.slice(0, 5)) {
       out.push(
         `    reset: ${reset.characterName} ${reset.component} ` +
@@ -240,20 +341,41 @@ export function renderProbe(report: ProbeReport): string {
     out.push(
       line('Directional Consistency (DCR)', report.plausibility.dcr, '100% is not the goal'),
     );
+    out.push(
+      line('  of which groups separate', report.plausibility.separated, 'intervals do not overlap'),
+    );
     out.push('');
     for (const run of report.dimensions) {
       const scored = report.plausibility.tests.find((t) => t.dimensionId === run.dimensionId);
       const inconclusive = report.plausibility.inconclusive.find(
         (t) => t.dimensionId === run.dimensionId,
       );
+      const reason = inconclusive?.inconclusiveReason;
       const verdict = scored
         ? scored.follows
           ? 'follows'
           : 'AGAINST'
-        : `inconclusive (${inconclusive?.inconclusiveReason ?? 'unknown'})`;
+        : reason === 'ceiling'
+          ? 'UNINFORMATIVE — the probe drew the behaviour from nearly everyone'
+          : reason === 'floor'
+            ? 'UNINFORMATIVE — the probe drew it from nearly nobody'
+            : `inconclusive (${reason ?? 'unknown'})`;
       const t = run.test;
-      out.push(`    ${run.dimensionId}  —  ${verdict}`);
-      out.push(`      observable: ${run.observable}`);
+      const strength =
+        scored && !scored.separated ? '  (direction only — groups overlap at this n)' : '';
+      out.push(`    ${run.dimensionId}  —  ${verdict}${strength}`);
+      out.push(`      observable: ${run.observable}  (counts at "${run.threshold}" or above)`);
+      // The coded intensities behind the boolean. A dimension where both groups
+      // score high on "present" but differ sharply on explicit-vs-hedged is
+      // measuring something real at the wrong threshold, and that is only
+      // visible here.
+      const tally = (g: string) => {
+        const rows = run.responses.filter((r) => r.group === g);
+        const at = (l: string) => rows.filter((r) => r.level === l).length;
+        return `explicit ${at('explicit')} / hedged ${at('hedged')} / absent ${at('absent')}`;
+      };
+      out.push(`      ${run.highLabel.padEnd(26)} ${tally('high')}`);
+      out.push(`      ${run.lowLabel.padEnd(26)} ${tally('low')}`);
       out.push(
         `      ${run.highLabel.padEnd(26)} ${t.high.hits}/${t.high.n}` +
           `      ${run.lowLabel.padEnd(26)} ${t.low.hits}/${t.low.n}` +
@@ -277,6 +399,12 @@ export function renderProbe(report: ProbeReport): string {
             ? `   top option ${(probe.coverage.topOptionShare * 100).toFixed(0)}%`
             : ''),
       );
+      if (probe.underpowered) {
+        out.push(
+          `      NOT INTERPRETABLE — only ${probe.castSize} deciders for ` +
+            `${probe.coverage.feasibleOptionIds.length} options; raise --cast`,
+        );
+      }
       if (probe.coverage.neverSelected.length > 0) {
         out.push(`      nobody chose: ${probe.coverage.neverSelected.join(', ')}`);
       }

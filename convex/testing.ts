@@ -13,8 +13,7 @@ import schema from './schema';
 import { DELETE_BATCH_SIZE } from './constants';
 import { kickEngine, startEngine, stopEngine } from './aiTown/main';
 import { insertInput } from './aiTown/insertInput';
-import { fetchEmbedding } from './util/llm';
-import { chatCompletion } from './util/llm';
+import { trackedChatCompletion, trackedFetchEmbedding } from './util/llmTrack';
 import { startConversationMessage } from './agent/conversation';
 import { GameId } from './aiTown/ids';
 import { point } from './util/types';
@@ -303,20 +302,24 @@ export const fixMapTilesetUrl = mutation({
 
 export const testEmbedding = internalAction({
   args: { input: v.string() },
-  handler: async (_ctx, args) => {
-    return await fetchEmbedding(args.input);
+  handler: async (ctx, args) => {
+    return await trackedFetchEmbedding(ctx, { operation: 'testing.embedding' }, args.input);
   },
 });
 
 export const testCompletion = internalAction({
   args: {},
   handler: async (ctx, args) => {
-    return await chatCompletion({
-      messages: [
-        { content: 'You are helpful', role: 'system' },
-        { content: 'Where is pizza?', role: 'user' },
-      ],
-    });
+    return await trackedChatCompletion(
+      ctx,
+      { operation: 'testing.completion' },
+      {
+        messages: [
+          { content: 'You are helpful', role: 'system' },
+          { content: 'Where is pizza?', role: 'user' },
+        ],
+      },
+    );
   },
 });
 

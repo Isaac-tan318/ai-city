@@ -125,8 +125,20 @@ export type DirectionalTestResult = DirectionalTest & {
   // supports nor contradicts the prediction, so it is excluded from DCR rather
   // than scored as a failure.
   follows?: boolean;
-  inconclusiveReason?: 'empty-group' | 'tie';
+  inconclusiveReason?: 'empty-group' | 'tie' | 'ceiling' | 'floor';
+  // True when the two group rates are distinguishable at these sample sizes —
+  // their 95% intervals do not overlap. A test can follow the predicted
+  // direction without being separated, and that is the common case on a cast
+  // this size; it means "consistent with", not "evidence for".
+  separated?: boolean;
+  highInterval?: { lo: number; hi: number };
+  lowInterval?: { lo: number; hi: number };
 };
+
+// Above this in both groups, the probe elicited the behaviour from nearly
+// everyone and cannot discriminate; below the complement, from nearly nobody.
+export const CEILING_THRESHOLD = 0.9;
+export const FLOOR_THRESHOLD = 0.1;
 
 export function scoreDirectionalTest(test: DirectionalTest): DirectionalTestResult {
   const highRate = test.high.n === 0 ? NaN : round4(test.high.hits / test.high.n);
@@ -134,14 +146,30 @@ export function scoreDirectionalTest(test: DirectionalTest): DirectionalTestResu
   if (test.high.n === 0 || test.low.n === 0) {
     return { ...test, highRate, lowRate, inconclusiveReason: 'empty-group' };
   }
+  // Saturation is diagnosed before the comparison, because a difference
+  // measured between 0.95 and 1.0 is a measurement artefact rather than a
+  // behavioural finding — and reporting it as a pass would be worse than
+  // reporting nothing.
+  if (highRate >= CEILING_THRESHOLD && lowRate >= CEILING_THRESHOLD) {
+    return { ...test, highRate, lowRate, inconclusiveReason: 'ceiling' };
+  }
+  if (highRate <= FLOOR_THRESHOLD && lowRate <= FLOOR_THRESHOLD) {
+    return { ...test, highRate, lowRate, inconclusiveReason: 'floor' };
+  }
   if (highRate === lowRate) {
     return { ...test, highRate, lowRate, inconclusiveReason: 'tie' };
   }
   const follows = test.expected === 'high<low' ? highRate < lowRate : highRate > lowRate;
-  return { ...test, highRate, lowRate, follows };
+  const highInterval = wilson(test.high.hits, test.high.n);
+  const lowInterval = wilson(test.low.hits, test.low.n);
+  const separated = highInterval.hi < lowInterval.lo || lowInterval.hi < highInterval.lo;
+  return { ...test, highRate, lowRate, follows, separated, highInterval, lowInterval };
 }
 
 export type PlausibilityResult = {
+  // Of the conclusive tests, how many actually separate the two groups rather
+  // than merely leaning the right way. Reported beside DCR, never folded in.
+  separated: Rate;
   // DCR = tests that follow the expected behavioural direction / total tests.
   // The framework is explicit that 100% is not the goal; individual NPCs may
   // legitimately depart from the population tendency.
@@ -155,6 +183,7 @@ export function directionalConsistency(tests: DirectionalTest[]): PlausibilityRe
   const conclusive = scored.filter((t) => t.follows !== undefined);
   return {
     dcr: rate(conclusive.filter((t) => t.follows).length, conclusive.length),
+    separated: rate(conclusive.filter((t) => t.separated).length, conclusive.length),
     tests: conclusive,
     inconclusive: scored.filter((t) => t.follows === undefined),
   };
@@ -307,7 +336,79 @@ export type DisclosureRecord = {
   opportunity: boolean;
   // Was it actually stated, at any point?
   disclosed: boolean;
+  // Where in the transcript the opportunity arose, when known. Only used to
+  // decide which of several repeats is "the first", so an episode is anchored
+  // at the moment the constraint first became live.
+  messageIndex?: number;
 };
+
+// One constraint, live once, in one conversation: the unit Relevant Disclosure
+// is actually defined over.
+export type DisclosureEpisode = DisclosureRecord & {
+  // How many raw opportunities were folded into this episode. 1 means it came
+  // up once; 6 means the same constraint was re-flagged five more times as the
+  // same subject kept being mentioned.
+  occurrences: number;
+};
+
+const constraintKey = (constraint: string) =>
+  constraint
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
+// Collapse repeated opportunities on the same constraint, for the same person,
+// in the same conversation into one disclosure case.
+//
+// Relevant Disclosure asks whether a constraint that mattered was ever stated.
+// That question has one answer per constraint per conversation, not one per
+// mention. A transcript where grilled meat is proposed in six consecutive turns
+// puts Ratna's halal rule on the table once; scoring it six times does not
+// measure her six times, it counts one behaviour six times and then reports a
+// confidence interval as though six independent observations had been made.
+// Whichever way the case went, the rate and its interval are both wrong.
+//
+// The episode is anchored at the FIRST opportunity — that is when the constraint
+// became live and the clock on disclosing it started. It counts as disclosed if
+// it was stated anywhere in the conversation: a person who raised it early and
+// then let the subject repeat has disclosed it, and re-stating it is not owed.
+export function collapseDisclosureEpisodes(records: DisclosureRecord[]): {
+  episodes: DisclosureEpisode[];
+  duplicates: number;
+} {
+  const groups = new Map<string, DisclosureRecord[]>();
+  const order: string[] = [];
+  for (const record of records) {
+    const key = `${record.characterName}␟${record.conversationId}␟${constraintKey(
+      record.constraint,
+    )}`;
+    const list = groups.get(key);
+    if (list) list.push(record);
+    else {
+      groups.set(key, [record]);
+      order.push(key);
+    }
+  }
+
+  const episodes: DisclosureEpisode[] = [];
+  let duplicates = 0;
+  for (const key of order) {
+    const list = groups.get(key)!;
+    // Earliest by transcript position, falling back to the order they arrived
+    // in when the judge cited no line.
+    const first = [...list].sort(
+      (a, b) => (a.messageIndex ?? Number.MAX_SAFE_INTEGER) - (b.messageIndex ?? Number.MAX_SAFE_INTEGER),
+    )[0];
+    duplicates += list.length - 1;
+    episodes.push({
+      ...first,
+      opportunity: list.some((r) => r.opportunity),
+      disclosed: list.some((r) => r.disclosed),
+      occurrences: list.length,
+    });
+  }
+  return { episodes, duplicates };
+}
 
 // One conversation x participant. `prematureDisclosure` is true when private
 // information was volunteered in their opening turns without being asked and
@@ -320,11 +421,17 @@ export type InteractionRecord = {
 
 export type DisclosureResult = {
   // Relevant Disclosure Rate: high is desirable — a constraint that matters
-  // should not stay hidden forever.
+  // should not stay hidden forever. Counted over episodes, not mentions.
   relevantDisclosure: Rate;
   // Premature Full-Disclosure Rate: low is desirable — an NPC should not open
   // every conversation by reciting its private constraints.
   prematureDisclosure: Rate;
+  // The collapsed unit of analysis, kept so the rate can be traced back.
+  episodes: DisclosureEpisode[];
+  // Repeat mentions folded away by the collapse. Reported because a large
+  // number here means the opportunity judge is re-flagging one subject, which
+  // is worth knowing even though it no longer moves the rate.
+  duplicateMentions: number;
   byCharacter: { name: string; relevantDisclosure: Rate; prematureDisclosure: Rate }[];
 };
 
@@ -332,7 +439,8 @@ export function disclosurePlausibility(
   disclosures: DisclosureRecord[],
   interactions: InteractionRecord[],
 ): DisclosureResult {
-  const opportunities = disclosures.filter((d) => d.opportunity);
+  const { episodes, duplicates } = collapseDisclosureEpisodes(disclosures);
+  const opportunities = episodes.filter((d) => d.opportunity);
   const names = [
     ...new Set([
       ...disclosures.map((d) => d.characterName),
@@ -341,6 +449,8 @@ export function disclosurePlausibility(
   ].sort();
   return {
     relevantDisclosure: rate(opportunities.filter((d) => d.disclosed).length, opportunities.length),
+    episodes,
+    duplicateMentions: duplicates,
     prematureDisclosure: rate(
       interactions.filter((i) => i.prematureDisclosure).length,
       interactions.length,
@@ -379,6 +489,11 @@ export type StateTransition = {
   // Set when the transition crosses a scenario boundary — the framework asks
   // specifically about continuity *across* scenarios.
   crossScenario: boolean;
+  // Where the event came from, when the log carries it. Not used in any count;
+  // carried so a transition the rules say is wrong can be looked up in the
+  // world it happened in rather than merely tallied.
+  scenarioId?: string;
+  conversationId?: string;
 };
 
 export type TransitionVerdict =
@@ -427,6 +542,8 @@ export function isReset(t: StateTransition, threshold: number): boolean {
   return gapAfter < gapBefore && Math.abs(t.valueAfter - t.valueBefore) > threshold;
 }
 
+export type ScoredTransition = StateTransition & { verdict: TransitionVerdict };
+
 export type DynamicStateResult = {
   // State Transition Accuracy: updates with the correct direction / all
   // expected updates.
@@ -435,6 +552,12 @@ export type DynamicStateResult = {
   unexpectedResetRate: Rate;
   verdicts: Record<TransitionVerdict, number>;
   unexpectedResets: StateTransition[];
+  // Every transition that counted against accuracy, with the event that caused
+  // it and the values either side. One wrong move in five hundred is either a
+  // real defect in an update rule or a mis-transcribed expectation in
+  // theory/stateRules.ts, and there is no way to tell which from a count — so
+  // the failures travel with the rate instead of being summarised away.
+  incorrectTransitions: ScoredTransition[];
 };
 
 export function dynamicStateValidity(
@@ -448,7 +571,14 @@ export function dynamicStateValidity(
     clamped: 0,
     unconstrained: 0,
   };
-  for (const t of transitions) verdicts[classifyTransition(t)]++;
+  const incorrectTransitions: ScoredTransition[] = [];
+  for (const t of transitions) {
+    const verdict = classifyTransition(t);
+    verdicts[verdict]++;
+    if (verdict === 'wrong-direction' || verdict === 'no-movement') {
+      incorrectTransitions.push({ ...t, verdict });
+    }
+  }
 
   // Only transitions with a stated expectation and a real chance to move count.
   const scored = verdicts.correct + verdicts['wrong-direction'] + verdicts['no-movement'];
@@ -464,6 +594,7 @@ export function dynamicStateValidity(
     unexpectedResetRate: rate(unexpectedResets.length, crossScenario.length),
     verdicts,
     unexpectedResets,
+    incorrectTransitions,
   };
 }
 

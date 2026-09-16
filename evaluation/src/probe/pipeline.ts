@@ -31,15 +31,26 @@ import type { Judge } from '../llm';
 import { classify, DIMENSIONS, type Dimension, type Group } from '../theory/registry';
 import { CHOICE_PROBES, type ChoiceProbe } from '../theory/probes';
 import { assessFeasibility } from '../judges/choiceCoding';
-import { codeBehaviour } from '../judges/behaviourCoding';
+import { codeBehaviour, type BehaviourLevel } from '../judges/behaviourCoding';
 import { checkNeutrality, type NeutralityReport } from '../neutrality';
 import { runProbe, type ProbeResult } from './runner';
 
 export type ProbeOptions = {
   // Restrict to one dimension by id, for a cheap run.
   dimensionId?: string;
-  // Cap on characters per group. Undefined runs the whole cast.
+  // Cap on characters per attribute group, for the theory dimensions.
+  // Undefined runs everyone who carries the attribute.
   perGroup?: number;
+  // Separate cap for the choice probes, which have no high/low groups at all.
+  //
+  // These used to share --per-group, and it quietly wrecked Component 3:
+  // --per-group 4 sliced the cast to the four alphabetically-first characters,
+  // so a four-option menu could cover at most 4 picks (2/4 coverage looked like
+  // polarization but was sample size), and those four had four different
+  // nationalities, so within-group diversity had zero eligible pairs. When it
+  // is set, the sample is drawn across background groups rather than off the
+  // front of the alphabet.
+  castSize?: number;
   // Skip the choice probes (Component 3) or the theory probes (Component 2).
   skipChoice: boolean;
   skipTheory: boolean;
@@ -54,7 +65,16 @@ export type DimensionRun = {
   highLabel: string;
   lowLabel: string;
   groups: { high: string[]; low: string[]; unclassified: string[] };
-  responses: { name: string; group: Group; response: string; present: boolean }[];
+  threshold: BehaviourLevel;
+  responses: {
+    name: string;
+    group: Group;
+    response: string;
+    // The graded intensity, kept beside the boolean so a surprising rate can be
+    // re-read at a different threshold without paying for the run again.
+    level: BehaviourLevel;
+    present: boolean;
+  }[];
   test: DirectionalTest;
 };
 
@@ -65,6 +85,12 @@ export type ChoiceProbeRun = {
   choices: ChoiceRecord[];
   // Characters whose reply did not commit to any option on the menu.
   abstained: string[];
+  // How many characters were actually put in front of this menu, and whether
+  // that is enough for the coverage figure to mean anything. With fewer
+  // deciders than options, full coverage is impossible by construction and a
+  // low one says nothing about the population.
+  castSize: number;
+  underpowered: boolean;
 };
 
 export type ProbeReport = {
@@ -100,7 +126,7 @@ export async function runProbes(
   if (!options.skipChoice) {
     for (const probe of CHOICE_PROBES) {
       choiceProbes.push(
-        await runChoiceProbe(judge, profiles, probe, options.backgroundAxis, options.perGroup),
+        await runChoiceProbe(judge, profiles, probe, options.backgroundAxis, options.castSize),
       );
     }
   }
@@ -146,19 +172,35 @@ async function runDimension(
   const responses: DimensionRun['responses'] = [];
   await Promise.all(
     results.map(async ({ character, group, probe }) => {
-      if (!probe?.response) return;
+      // Only a failed generation is skipped. A character who chose to say
+      // nothing is an observation — coded 'absent' without spending a call,
+      // since there is nothing for a coder to weigh — and dropping them would
+      // silently remove exactly the people the theory predicts will stay quiet.
+      if (!probe) return;
+      if (!probe.response) {
+        responses.push({
+          name: character.name,
+          group,
+          response: '',
+          level: 'absent',
+          present: false,
+        });
+        return;
+      }
       const coded = await codeBehaviour(judge, {
         dimensionId: dimension.id,
         characterName: character.name,
         situation: dimension.agentFacing.situation,
         observable: dimension.observable,
         response: probe.response,
+        threshold: dimension.threshold,
       });
       if (!coded) return;
       responses.push({
         name: character.name,
         group,
         response: probe.response,
+        level: coded.level,
         present: coded.present,
       });
     }),
@@ -169,6 +211,7 @@ async function runDimension(
     dimensionId: dimension.id,
     attribute: dimension.attribute,
     observable: dimension.observable,
+    threshold: dimension.threshold,
     highLabel: dimension.analysisOnly.highLabel,
     lowLabel: dimension.analysisOnly.lowLabel,
     groups: {
@@ -192,14 +235,50 @@ async function runDimension(
   };
 }
 
+// Take a sample that keeps background groups intact. Slicing off the front of
+// the alphabet is the one thing that must not happen here: within-group
+// diversity needs characters who SHARE a background, and an alphabetical head
+// is close to a guarantee that nobody does.
+function sampleAcrossBackgrounds(
+  profiles: ProfileIndex,
+  backgroundAxis: BackgroundAxis,
+  size: number,
+): CharacterRecord[] {
+  const groups = new Map<string, CharacterRecord[]>();
+  for (const character of profiles.all()) {
+    const key = profiles.background(character.name, backgroundAxis);
+    const list = groups.get(key) ?? [];
+    list.push(character);
+    groups.set(key, list);
+  }
+  // Largest groups first, taken WHOLE before moving on.
+  //
+  // The obvious sampler — one from each group, then a second from each — is
+  // exactly wrong here. Within-group diversity compares people who share a
+  // background, so it needs depth inside a group, not breadth across them.
+  // Round-robin over this cast produced fourteen characters from thirteen
+  // different nationalities and therefore zero comparable pairs, which reads in
+  // the report as "no diversity measured" when it really means "nobody was ever
+  // put next to anyone comparable".
+  const ordered = [...groups.values()].sort((a, b) => b.length - a.length);
+  const out: CharacterRecord[] = [];
+  for (const group of ordered) {
+    if (out.length >= size) break;
+    out.push(...group.slice(0, size - out.length));
+  }
+  return out;
+}
+
 async function runChoiceProbe(
   judge: Judge,
   profiles: ProfileIndex,
   probe: ChoiceProbe,
   backgroundAxis: BackgroundAxis,
-  perCast?: number,
+  castSize?: number,
 ): Promise<ChoiceProbeRun> {
-  const cast = perCast ? profiles.all().slice(0, perCast) : profiles.all();
+  const cast = castSize
+    ? sampleAcrossBackgrounds(profiles, backgroundAxis, castSize)
+    : profiles.all();
 
   const results = await Promise.all(
     cast.map(async (character) => {
@@ -240,6 +319,10 @@ async function runChoiceProbe(
     });
   }
 
+  // Two deciders per option is the point below which a gap in coverage is more
+  // likely to be sampling than preference.
+  const underpowered = selections.length < probe.options.length * 2;
+
   return {
     probeId: probe.id,
     name: probe.name,
@@ -249,5 +332,7 @@ async function runChoiceProbe(
     ),
     choices,
     abstained: abstained.sort(),
+    castSize: cast.length,
+    underpowered,
   };
 }

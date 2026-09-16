@@ -1,6 +1,12 @@
 import { v } from 'convex/values';
 import { internalAction, internalMutation, internalQuery } from '../_generated/server';
-import { parseTimeOfDay, isWeekday, dayOfWeekName } from './gameTime';
+import { parseTimeOfDay, formatTimeOfDay, isWeekday, dayOfWeekName } from './gameTime';
+import {
+  hasNightShiftDuty,
+  sleepWindowFor,
+  NIGHT_SHIFT_START,
+  POST_NIGHT_SLEEP_END,
+} from '../../data/routines';
 import { WorldMap, serializedWorldMap } from './worldMap';
 import { reflectOnMemories, rememberConversation, rememberScenarioOutcome } from '../agent/memory';
 import { GameId, agentId, conversationId, playerId } from './ids';
@@ -35,7 +41,7 @@ import type { SerializedAgent } from './agent';
 import { api, internal } from '../_generated/api';
 import { sleep } from '../util/sleep';
 import { serializedPlayer } from './player';
-import { chatCompletion } from '../util/llm';
+import { trackedChatCompletion } from '../util/llmTrack';
 import {
   CITY_LOCATIONS,
   CityLocation,
@@ -257,10 +263,14 @@ export const agentExtractScenarioProfile = internalAction({
 
     let scenarioProfile = '';
     try {
-      const { content } = await chatCompletion({
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 160,
-      });
+      const { content } = await trackedChatCompletion(
+        ctx,
+        { operation: 'agent.scenarioProfile', worldId: args.worldId, subject: name },
+        {
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 160,
+        },
+      );
       scenarioProfile = content.trim();
     } catch (err) {
       // Leave scenarioProfile unset on failure. The trigger guard in Agent.tick
@@ -626,13 +636,16 @@ function fallbackSchedule(
       description: `at ${workplace.name} for the afternoon`,
     });
   }
+  // Deliberately stops at "home for the evening": the nightly sleep block is a
+  // fixed obligation merged in afterwards (data/routines.ts), and a second one
+  // invented here would put the character to bed at a time of its own choosing.
   steps.push({
-    startMinute: 22 * 60,
+    startMinute: 19 * 60,
     locationId: 'home',
     destination: homeLoc,
-    activity: 'going to sleep',
-    emoji: '😴',
-    description: 'back home for the night',
+    activity: 'winding down at home',
+    emoji: '🏠',
+    description: 'back home for the evening',
   });
   return steps;
 }
@@ -749,12 +762,22 @@ export const agentPlanDay = internalAction({
     const workStr = work
       ? `Workplace: ${work.location.name} (use location_id "${work.location.id}") — ${work.activity}.`
       : '';
+    // Sleep and the night shift are fixed obligations merged in afterwards (see
+    // data/routines.ts), so the planner is told the waking window it is filling
+    // and asked to stay out of it rather than being invited to invent a bedtime.
+    const nightDuty = hasNightShiftDuty(args.playerName, args.dayNumber);
+    const { bed, wake } = sleepWindowFor(args.playerName);
     const workRule =
-      weekday && work
-        ? `Today is a WEEKDAY: ${args.playerName} goes to work. Schedule a work block at "${work.location.id}" covering roughly 09:00–17:00 (you may split it around a short lunch elsewhere), then head home afterwards.`
-        : work
-          ? `Today is a WEEKEND: no work shift. Fill the day with rest, errands, and social time that fit the character.`
-          : '';
+      nightDuty && work
+        ? `Today ${args.playerName} is on the NIGHT SHIFT at "${work.location.id}" — on duty overnight and asleep through the middle of the day. There is no daytime work block. Plan only the hours they are up and off duty: roughly ${formatTimeOfDay(POST_NIGHT_SLEEP_END)} to ${formatTimeOfDay(NIGHT_SHIFT_START)}.`
+        : weekday && work
+          ? `Today is a WEEKDAY: ${args.playerName} goes to work. Schedule a work block at "${work.location.id}" covering roughly 09:00–17:00 (you may split it around a short lunch elsewhere), then head home afterwards.`
+          : work
+            ? `Today is a WEEKEND: no work shift. Fill the day with rest, errands, and social time that fit the character.`
+            : '';
+    const sleepRule = nightDuty
+      ? `Do NOT schedule sleep, waking up, or going to bed — the night shift and the daytime sleep that follows it are added for you. Every entry must fall inside the waking window above.`
+      : `${args.playerName} sleeps from ${formatTimeOfDay(bed)} until ${formatTimeOfDay(wake)}. Do NOT schedule sleep, going to bed, or waking up — those blocks are added for you. Every entry must fall inside the waking hours, and the last one should have them home and winding down before ${formatTimeOfDay(bed)}.`;
     const replanNote = args.existingSchedule
       ? `\nThis is a RE-PLAN (current time: ${args.currentTimeStr}). A conversation may have changed your plans, or the previous schedule was disrupted. Produce a revised schedule for the REST of today only — keep entries whose start_time has already passed, and revise the rest.\nIMPORTANT: If in a recent conversation you agreed to meet someone or do something at a particular place and/or time, you MUST add a schedule entry for it (pick a sensible start_time if none was stated, and map the place to the closest location_id from the list above). Do not drop commitments you made.`
       : '';
@@ -783,7 +806,8 @@ export const agentPlanDay = internalAction({
       ``,
       `Produce a believable daily schedule of 4–7 entries that fits this character.`,
       `Each entry needs: start_time (24h "HH:MM"), location_id, activity (short phrase), emoji (one), description (one sentence).`,
-      `Keep timings consistent and realistic: wake at home around 07:00, take meals at regular times, and the FINAL entry must be "going to sleep" at home (location_id "home") around 22:00.`,
+      `Keep timings consistent and realistic, and take meals at regular times.`,
+      sleepRule,
       workRule,
       `If recent memories mention plans or arrangements made in conversation, honour them.`,
       `Pick locations that suit the character's personality and goal.`,
@@ -794,7 +818,7 @@ export const agentPlanDay = internalAction({
       ``,
       `Respond ONLY with strict JSON of the form:`,
       args.scenarioInstruction
-        ? `{"reaction":{"location_id":"mbs","activity":"hurrying to shelter","emoji":"🏃","description":"rushing indoors to Marina Bay Sands to take cover"},"schedule":[{"start_time":"23:30","location_id":"home","activity":"going to sleep","emoji":"🌙","description":"settling down after the chaos"}]}`
+        ? `{"reaction":{"location_id":"mbs","activity":"hurrying to shelter","emoji":"🏃","description":"rushing indoors to Marina Bay Sands to take cover"},"schedule":[{"start_time":"20:30","location_id":"home","activity":"sitting with the news on","emoji":"📺","description":"back home, still shaken by the afternoon"}]}`
         : `{"schedule":[{"start_time":"07:30","location_id":"shophouses","activity":"opening the cafe","emoji":"☕","description":"setting up for the morning rush"}]}`,
     ]
       .filter(Boolean)
@@ -803,11 +827,15 @@ export const agentPlanDay = internalAction({
     let parsed: ScheduleStep[] | null = null;
     let reaction: ScheduleStep | null = null;
     try {
-      const { content } = await chatCompletion({
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 800,
-        response_format: { type: 'json_object' },
-      });
+      const { content } = await trackedChatCompletion(
+        ctx,
+        { operation: 'agent.planDay', worldId: args.worldId, subject: args.playerName },
+        {
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 800,
+          response_format: { type: 'json_object' },
+        },
+      );
       const json = extractJson(content);
       parsed = parseSchedule(json, args.home);
       // For a scenario re-plan, the LLM returns a separate "reaction" object: the
@@ -907,10 +935,14 @@ export const agentRegenerateSelfSummary = internalAction({
 
     let summary = '';
     try {
-      const { content } = await chatCompletion({
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 250,
-      });
+      const { content } = await trackedChatCompletion(
+        ctx,
+        { operation: 'agent.selfSummary', worldId: args.worldId, subject: args.playerName },
+        {
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 250,
+        },
+      );
       summary = content.trim();
     } catch (err) {
       console.error(
@@ -1027,11 +1059,15 @@ export const agentReact = internalAction({
 
     let parsed: any = null;
     try {
-      const { content } = await chatCompletion({
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 200,
-        response_format: { type: 'json_object' },
-      });
+      const { content } = await trackedChatCompletion(
+        ctx,
+        { operation: 'agent.react', worldId: args.worldId, subject: args.playerName },
+        {
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 200,
+          response_format: { type: 'json_object' },
+        },
+      );
       parsed = extractJson(content);
     } catch (err) {
       // This fires often; a failure must be cheap and inert, never a throw that
@@ -1233,11 +1269,15 @@ export const agentDecomposeStep = internalAction({
 
     let steps: { startMinute: number; activity: string; emoji?: string }[] = [];
     try {
-      const { content } = await chatCompletion({
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 400,
-        response_format: { type: 'json_object' },
-      });
+      const { content } = await trackedChatCompletion(
+        ctx,
+        { operation: 'agent.decomposeStep', worldId: args.worldId, subject: args.playerName },
+        {
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 400,
+          response_format: { type: 'json_object' },
+        },
+      );
       steps = parseSubSteps(extractJson(content), args.startMinute, args.endMinute);
     } catch (err) {
       console.error(`agentDecomposeStep failed for ${args.playerName}: ${(err as Error).message}`);

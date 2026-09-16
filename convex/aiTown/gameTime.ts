@@ -82,6 +82,15 @@ export function formatGameTimestamp(ts: number, worldStartTime: number | undefin
   return `Day ${gt.dayNumber}, ${gt.timeStr}`;
 }
 
+// minutes-into-day → "HH:MM" (24h). The inverse of parseTimeOfDay, for telling
+// the day planner the window it is filling in the same notation it answers in.
+export function formatTimeOfDay(minutes: number): string {
+  const m = ((Math.round(minutes) % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+  return `${Math.floor(m / 60)
+    .toString()
+    .padStart(2, '0')}:${(m % 60).toString().padStart(2, '0')}`;
+}
+
 // "HH:MM" (24h) → minutes-into-day; tolerant of "H:MM" and "HH:MM AM/PM".
 export function parseTimeOfDay(s: string): number | null {
   const m = s.trim().match(/^(\d{1,2}):(\d{2})\s*([AaPp][Mm])?$/);

@@ -12,9 +12,10 @@ import { z } from 'zod';
 import type { CharacterRecord } from '../corpus/profiles';
 import { renderFullProfile } from '../corpus/profiles';
 import type { Conversation } from '../corpus/normalize';
-import type { GradedOpportunity } from '../metrics';
+import type { FidelityVerdict, GradedOpportunity } from '../metrics';
 import type { Judge } from '../llm';
 import { renderTranscript, type Opportunity } from './opportunities';
+import { quoteAppearsIn } from './quoting';
 
 export const FidelitySchema = z.object({
   verdicts: z
@@ -28,9 +29,20 @@ export const FidelitySchema = z.object({
     .default([]),
 });
 
+// How well a verdict is backed by something the person actually said.
+//   quoted     — the evidence is in their own turns.
+//   ungrounded — the judge offered words that are not in their turns. Counted,
+//                because judges paraphrase, but flagged so it can be audited.
+//   none       — no evidence at all. Not counted either way.
+export type EvidenceSupport = 'quoted' | 'ungrounded' | 'none';
+
 export type FidelityJudgement = GradedOpportunity & {
   attribute: string;
   evidence: string;
+  support: EvidenceSupport;
+  // What the judge answered before the evidence check. Equal to `verdict`
+  // except where an unsupported verdict was withdrawn to an abstention.
+  statedVerdict: FidelityVerdict;
 };
 
 export async function gradeOpportunities(
@@ -68,7 +80,7 @@ export async function gradeOpportunities(
     listed,
     ``,
     `For each numbered moment, decide how ${character.name} actually behaved:`,
-    `  "consistent"  — what they said (or their silence) fits the characteristic at stake.`,
+    `  "consistent"  — something they SAID fits the characteristic at stake.`,
     `  "contradicts" — what they said is incompatible with it. For an ABSOLUTE CONSTRAINT this ` +
       `means agreeing to, proposing, or accepting something the constraint forbids. Note that ` +
       `NOT MENTIONING a constraint is not a contradiction: staying quiet about a restriction is ` +
@@ -77,7 +89,11 @@ export async function gradeOpportunities(
     ``,
     `Judge against the profile above, including the private facts, not against what would be ` +
       `polite or sensible in general.`,
-    `Quote the words you relied on in "evidence", or leave it empty for a silence.`,
+    `Every verdict must rest on words ${character.name} actually said: quote them in "evidence", ` +
+      `copied from their own lines in the transcript above.`,
+    `If they said nothing that bears on the moment — they stayed silent, or changed the subject — ` +
+      `the answer is "unclear" with empty evidence. Silence is not evidence that they behaved ` +
+      `consistently; it is the absence of evidence either way, and it is scored as neither.`,
     ``,
     `Reply with ONLY strict JSON, no prose:`,
     `{"verdicts":[{"index":0,"verdict":"consistent","evidence":"I only eat halal"}]}`,
@@ -90,19 +106,39 @@ export async function gradeOpportunities(
   );
   if (!parsed) return [];
 
+  // The person's own lines. A verdict is about what THEY did, so evidence drawn
+  // from somebody else's turn does not support it.
+  const ownLines = conversation.messages
+    .filter((m) => m.author === character.name)
+    .map((m) => m.text);
+
   const out: FidelityJudgement[] = [];
   for (const v of parsed.verdicts) {
     const opportunity = gradable[v.index];
     // A judge that invents an index is judging something that was not asked
     // about; dropping it is safer than mapping it onto the wrong opportunity.
     if (!opportunity) continue;
+    const evidence = v.evidence.trim();
+    // An empty evidence field is a verdict with nothing behind it. Under the
+    // old wording silence counted as "consistent", which made PCR partly a
+    // measure of how often the subject was dropped: an NPC that said nothing
+    // relevant scored the same as one that answered in character. A verdict
+    // nobody can quote is withdrawn to an abstention instead — reported beside
+    // PCR rather than folded into it, in either direction.
+    const support: EvidenceSupport = !evidence
+      ? 'none'
+      : quoteAppearsIn(evidence, ownLines)
+        ? 'quoted'
+        : 'ungrounded';
     out.push({
       characterName: character.name,
       conversationId: conversation.id,
       kind: opportunity.kind === 'hardConstraint' ? 'hardConstraint' : 'persona',
-      verdict: v.verdict,
+      verdict: support === 'none' ? 'unclear' : v.verdict,
+      statedVerdict: v.verdict,
       attribute: opportunity.attribute,
-      evidence: v.evidence.trim(),
+      evidence,
+      support,
     });
   }
   // Anything the judge silently skipped is an abstention, not a free pass.
@@ -113,8 +149,10 @@ export async function gradeOpportunities(
       conversationId: conversation.id,
       kind: gradable[i].kind === 'hardConstraint' ? 'hardConstraint' : 'persona',
       verdict: 'unclear',
+      statedVerdict: 'unclear',
       attribute: gradable[i].attribute,
       evidence: '(judge returned no verdict for this moment)',
+      support: 'none',
     });
   }
   return out;

@@ -53,6 +53,34 @@ export const EXPERIMENT_VOCABULARY = [
   'you will tend to',
 ];
 
+// Phrasing that tells an agent to disclose something.
+//
+// Component 4 measures whether a character raises a private constraint at a
+// sensible moment. The moment a prompt says "make sure to mention your dietary
+// rule", that measurement is over: Relevant Disclosure goes to ~100%, Premature
+// Disclosure follows it up, and neither number means anything any more.
+//
+// Making a constraint *salient* in an agent's own profile is allowed — the
+// framework permits stating stable profile attributes, and presentation is not
+// instruction. Telling the agent what to do with it is not. The line is thin
+// enough, and tempting enough to cross while chasing a disclosure rate, that it
+// is worth a standing check rather than a comment nobody re-reads.
+export const DISCLOSURE_DIRECTIVES = [
+  'make sure to mention',
+  'be sure to mention',
+  'be sure to tell',
+  'remember to mention',
+  'you should mention',
+  'always mention',
+  'you must mention',
+  'tell them about your',
+  'speak up about',
+  'raise your dietary',
+  'disclose your',
+  'state your restriction',
+  'let them know about your',
+];
+
 export type NeutralityFinding = {
   severity: 'fail' | 'warning';
   scope: 'probe-text' | 'import-boundary' | 'simulation-source';
@@ -182,6 +210,19 @@ export function checkNeutrality(): NeutralityReport {
         severity: 'warning',
         scope: 'simulation-source',
         dimensionId: '-',
+        where: relative,
+        term: phrase,
+        excerpt: excerptAround(source, phrase),
+      });
+    }
+    // A disclosure directive in an agent-facing prompt invalidates Component 4
+    // outright rather than merely warranting a look, so it fails the lint.
+    for (const phrase of DISCLOSURE_DIRECTIVES) {
+      if (!lower.includes(phrase)) continue;
+      findings.push({
+        severity: 'fail',
+        scope: 'simulation-source',
+        dimensionId: 'disclosure',
         where: relative,
         term: phrase,
         excerpt: excerptAround(source, phrase),

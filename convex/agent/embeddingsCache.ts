@@ -2,16 +2,18 @@ import { v } from 'convex/values';
 import { ActionCtx, internalMutation, internalQuery } from '../_generated/server';
 import { internal } from '../_generated/api';
 import { Id } from '../_generated/dataModel';
-import { fetchEmbeddingBatch } from '../util/llm';
+import { trackedFetchEmbeddingBatch } from '../util/llmTrack';
 
 const selfInternal = internal.agent.embeddingsCache;
 
-export async function fetch(ctx: ActionCtx, text: string) {
-  const result = await fetchBatch(ctx, [text]);
+export async function fetch(ctx: ActionCtx, text: string, operation?: string) {
+  const result = await fetchBatch(ctx, [text], operation);
   return result.embeddings[0];
 }
 
-export async function fetchBatch(ctx: ActionCtx, texts: string[]) {
+// `operation` labels the usage row for whatever asked for the embedding. Only
+// cache misses reach the provider, so only those are logged.
+export async function fetchBatch(ctx: ActionCtx, texts: string[], operation?: string) {
   const start = Date.now();
 
   const textHashes = await Promise.all(texts.map((text) => hashText(text)));
@@ -26,7 +28,11 @@ export async function fetchBatch(ctx: ActionCtx, texts: string[]) {
   if (cacheResults.length < texts.length) {
     const missingIndexes = [...results.keys()].filter((i) => !results[i]);
     const missingTexts = missingIndexes.map((i) => texts[i]);
-    const response = await fetchEmbeddingBatch(missingTexts);
+    const response = await trackedFetchEmbeddingBatch(
+      ctx,
+      { operation: operation ?? 'embeddings.cacheMiss' },
+      missingTexts,
+    );
     if (response.embeddings.length !== missingIndexes.length) {
       throw new Error(
         `Expected ${missingIndexes.length} embeddings, got ${response.embeddings.length}`,

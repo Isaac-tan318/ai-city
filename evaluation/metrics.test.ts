@@ -4,6 +4,7 @@ import {
   GradedOpportunity,
   StateTransition,
   classifyTransition,
+  collapseDisclosureEpisodes,
   directionalConsistency,
   disclosurePlausibility,
   dynamicStateValidity,
@@ -276,6 +277,108 @@ describe('Component 4 — disclosure plausibility', () => {
     expect(result.relevantDisclosure.rate).toBe(1);
   });
 
+  test('one constraint raised repeatedly in one conversation is one disclosure case', () => {
+    // Ratna's halal rule, re-flagged on six consecutive turns because grilled
+    // meat kept being mentioned. That is one constraint becoming live once.
+    const mentions = [1, 2, 3, 4, 5, 7].map((messageIndex) => ({
+      characterName: 'Ratna',
+      conversationId: 'c:2369',
+      constraint: 'Halal only — no pork',
+      opportunity: true,
+      disclosed: false,
+      messageIndex,
+    }));
+    const result = disclosurePlausibility(mentions, []);
+    expect(result.relevantDisclosure.denominator).toBe(1);
+    expect(result.duplicateMentions).toBe(5);
+    expect(result.episodes[0].occurrences).toBe(6);
+    expect(result.episodes[0].messageIndex).toBe(1);
+  });
+
+  test('an episode counts as disclosed if it was stated at any of its mentions', () => {
+    const at = (messageIndex: number, disclosed: boolean) => ({
+      characterName: 'Ratna',
+      conversationId: 'c1',
+      constraint: 'Halal only',
+      opportunity: true,
+      disclosed,
+      messageIndex,
+    });
+    const result = disclosurePlausibility([at(1, false), at(4, true), at(6, false)], []);
+    expect(result.relevantDisclosure.numerator).toBe(1);
+    expect(result.relevantDisclosure.denominator).toBe(1);
+  });
+
+  test('the same constraint in a different conversation is a different case', () => {
+    const inConversation = (conversationId: string, disclosed: boolean) => ({
+      characterName: 'Ratna',
+      conversationId,
+      constraint: 'No alcohol',
+      opportunity: true,
+      disclosed,
+      messageIndex: 0,
+    });
+    const result = disclosurePlausibility(
+      [inConversation('c1', true), inConversation('c2', false)],
+      [],
+    );
+    expect(result.relevantDisclosure.denominator).toBe(2);
+    expect(result.duplicateMentions).toBe(0);
+  });
+
+  test('two different constraints in one conversation stay separate', () => {
+    const constraint = (name: string) => ({
+      characterName: 'Ratna',
+      conversationId: 'c1',
+      constraint: name,
+      opportunity: true,
+      disclosed: false,
+      messageIndex: 0,
+    });
+    const result = disclosurePlausibility(
+      [constraint('Halal only — no pork'), constraint('No alcohol')],
+      [],
+    );
+    expect(result.relevantDisclosure.denominator).toBe(2);
+  });
+
+  test('a constraint written two ways collapses to one case', () => {
+    // The judge quotes from the profile and does not always punctuate it the
+    // same way twice; "Halal only, no pork" and "Halal only — no pork" are the
+    // same rule and must not be counted as two.
+    const { episodes } = collapseDisclosureEpisodes([
+      {
+        characterName: 'Ratna',
+        conversationId: 'c1',
+        constraint: 'Halal only — no pork',
+        opportunity: true,
+        disclosed: false,
+      },
+      {
+        characterName: 'Ratna',
+        conversationId: 'c1',
+        constraint: 'halal only, no pork',
+        opportunity: true,
+        disclosed: false,
+      },
+    ]);
+    expect(episodes).toHaveLength(1);
+  });
+
+  test('per-character rates are over episodes too', () => {
+    const mention = (messageIndex: number) => ({
+      characterName: 'Ratna',
+      conversationId: 'c1',
+      constraint: 'Halal only',
+      opportunity: true,
+      disclosed: true,
+      messageIndex,
+    });
+    const result = disclosurePlausibility([mention(1), mention(2), mention(3)], []);
+    const hers = result.byCharacter.find((c) => c.name === 'Ratna')!;
+    expect(hers.relevantDisclosure.denominator).toBe(1);
+  });
+
   test('premature disclosure is measured per interaction, not per constraint', () => {
     const result = disclosurePlausibility(
       [],
@@ -385,11 +488,143 @@ describe('Component 5 — dynamic state validity', () => {
     expect(result.unexpectedResets[0].cause).toBe('conversationFeelings');
   });
 
+  test('every transition counted against accuracy comes back with its event', () => {
+    const result = dynamicStateValidity(
+      [
+        trans(),
+        trans({ at: 2, valueAfter: 15, scenarioId: 's:9', conversationId: 'c:41' }),
+        trans({ at: 3, valueAfter: 20 }),
+        trans({ at: 4, expected: 'unconstrained', cause: 'manualOverride' }),
+      ],
+      { resetThreshold: 25, validResetCauses: [] },
+    );
+    expect(result.stateTransitionAccuracy.numerator).toBe(1);
+    expect(result.stateTransitionAccuracy.denominator).toBe(3);
+    // One wrong-direction and one no-movement, each carrying the event that
+    // produced it — not just a count.
+    expect(result.incorrectTransitions.map((t) => t.verdict)).toEqual([
+      'wrong-direction',
+      'no-movement',
+    ]);
+    const wrong = result.incorrectTransitions[0];
+    expect(wrong).toMatchObject({
+      characterName: 'A',
+      component: 'fatigue',
+      cause: 'activity',
+      expected: 'up',
+      valueBefore: 20,
+      valueAfter: 15,
+      scenarioId: 's:9',
+      conversationId: 'c:41',
+    });
+  });
+
+  test('a clean run reports no incorrect transitions', () => {
+    const result = dynamicStateValidity([trans(), trans({ at: 2 })], {
+      resetThreshold: 25,
+      validResetCauses: [],
+    });
+    expect(result.incorrectTransitions).toEqual([]);
+  });
+
   test('a well-behaved run reports the desired zero reset rate', () => {
     const result = dynamicStateValidity([trans({ crossScenario: true })], {
       resetThreshold: 25,
       validResetCauses: ['dailyDecay'],
     });
     expect(result.unexpectedResetRate.rate).toBe(0);
+  });
+});
+
+describe('Component 2 — saturation is distinguished from a null result', () => {
+  const sat = (high: number, low: number): DirectionalTest => ({
+    dimensionId: 'conflict-avoidance',
+    observable: 'immediate objection',
+    expected: 'high<low',
+    high: { n: 10, hits: high },
+    low: { n: 10, hits: low },
+  });
+
+  test('everyone doing it is a ceiling, not a tie', () => {
+    const scored = scoreDirectionalTest(sat(10, 10));
+    expect(scored.inconclusiveReason).toBe('ceiling');
+  });
+
+  test('nobody doing it is a floor', () => {
+    expect(scoreDirectionalTest(sat(0, 0)).inconclusiveReason).toBe('floor');
+  });
+
+  test('a difference measured at the ceiling is an artefact, not a pass', () => {
+    // 9.5/10 vs 10/10 follows the predicted direction arithmetically, but the
+    // probe compelled the behaviour from nearly everyone, so it cannot support
+    // the conclusion. This is the case the old code scored as a pass.
+    const scored = scoreDirectionalTest({ ...sat(10, 10), high: { n: 20, hits: 19 } });
+    expect(scored.follows).toBeUndefined();
+    expect(scored.inconclusiveReason).toBe('ceiling');
+  });
+
+  test('a mid-range tie is still just a tie', () => {
+    expect(scoreDirectionalTest(sat(5, 5)).inconclusiveReason).toBe('tie');
+  });
+
+  test('a real mid-range difference still scores normally', () => {
+    const scored = scoreDirectionalTest(sat(2, 7));
+    expect(scored.follows).toBe(true);
+    expect(scored.inconclusiveReason).toBeUndefined();
+  });
+
+  test('saturated tests stay out of the DCR denominator', () => {
+    const result = directionalConsistency([sat(10, 10), sat(2, 7)]);
+    expect(result.dcr.denominator).toBe(1);
+    expect(result.inconclusive[0].inconclusiveReason).toBe('ceiling');
+  });
+});
+
+describe('Component 2 — following the direction is not the same as separating', () => {
+  test('a thin margin follows the prediction but does not separate', () => {
+    // 3/6 against 2/5 leans the right way and is indistinguishable from chance.
+    const scored = scoreDirectionalTest({
+      dimensionId: 'social-power',
+      observable: 'proposes a resolution',
+      expected: 'high>low',
+      high: { n: 6, hits: 3 },
+      low: { n: 5, hits: 2 },
+    });
+    expect(scored.follows).toBe(true);
+    expect(scored.separated).toBe(false);
+  });
+
+  test('a wide margin at adequate n does separate', () => {
+    const scored = scoreDirectionalTest({
+      dimensionId: 'payment-norm',
+      observable: 'accepts being treated',
+      expected: 'high<low',
+      high: { n: 20, hits: 1 },
+      low: { n: 20, hits: 18 },
+    });
+    expect(scored.follows).toBe(true);
+    expect(scored.separated).toBe(true);
+  });
+
+  test('separation is reported beside DCR, never folded into it', () => {
+    const thin: DirectionalTest = {
+      dimensionId: 'a',
+      observable: 'x',
+      expected: 'high>low',
+      high: { n: 6, hits: 3 },
+      low: { n: 5, hits: 2 },
+    };
+    const wide: DirectionalTest = {
+      dimensionId: 'b',
+      observable: 'x',
+      expected: 'high<low',
+      high: { n: 20, hits: 1 },
+      low: { n: 20, hits: 18 },
+    };
+    const result = directionalConsistency([thin, wide]);
+    // Both follow the prediction; only one is evidence.
+    expect(result.dcr.numerator).toBe(2);
+    expect(result.separated.numerator).toBe(1);
+    expect(result.separated.denominator).toBe(2);
   });
 });

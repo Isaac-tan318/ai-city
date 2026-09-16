@@ -49,6 +49,11 @@ const TablesToVacuum: TableNames[] = [
   // per agent per game-day) and only useful to an offline evaluation run, so it
   // is safe on the same two-week window.
   'shortTermEvents',
+
+  // One row per LLM call. The usage page only ever reads recent windows, and the
+  // table is the highest-volume thing the town writes after observations, so it
+  // has no reason to outlive the same two-week horizon.
+  'llmCalls',
 ];
 
 // The perception stream is far higher volume than anything above and has a much

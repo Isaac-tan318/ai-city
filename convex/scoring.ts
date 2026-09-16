@@ -166,7 +166,15 @@ export function checkStoppingCriteria(
     blockedBy.push('stability');
   }
 
-  return { canDecide: blockedBy.length === 0, top, runnerUp, margin, drift, leaderChanged, blockedBy };
+  return {
+    canDecide: blockedBy.length === 0,
+    top,
+    runnerUp,
+    margin,
+    drift,
+    leaderChanged,
+    blockedBy,
+  };
 }
 
 // Human-readable rendering of why the focal agent can't commit yet, for the
@@ -219,10 +227,21 @@ export function affinityDeltaFromUtility(utility: number, hardTabooViolated: boo
 
 // --- Regret ------------------------------------------------------------------
 
+export type OptionScorePerAgent = {
+  playerId: string;
+  name: string;
+  hardTabooViolated: boolean;
+  totalIndividualUtility: number;
+};
+
 export type OptionScore = {
   optionId: string;
   title: string;
   groupUtility: number;
+  // The individual utilities the mean was taken over. Kept because a mean
+  // cannot be re-aggregated: max-min, average-without-misery and Nash all need
+  // the vector, and recomputing it later would mean re-running the evaluator.
+  perAgent?: OptionScorePerAgent[];
 };
 
 // How much better the group could have done. `selectedOptionId` must be present

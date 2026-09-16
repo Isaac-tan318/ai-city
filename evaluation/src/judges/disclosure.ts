@@ -21,9 +21,32 @@ import type { Conversation } from '../corpus/normalize';
 import type { DisclosureRecord, InteractionRecord } from '../metrics';
 import type { Judge } from '../llm';
 import { renderTranscript, type Opportunity } from './opportunities';
+import { quoteAppearsIn } from './quoting';
 
 // How many of a participant's own turns count as "the opening".
 export const OPENING_TURNS = 2;
+
+// How clearly the constraint came across, and therefore whether the group could
+// have acted on it.
+//
+//   explicit        — the restriction is named: "I only eat halal", "I'm fasting".
+//   actionable      — not named, but what is ruled in or out is stated plainly
+//                     enough to plan around: "I can't eat anything with pork in it".
+//   preference-only — a like, a dislike or a suggestion, with nothing to say a
+//                     restriction exists: "I'd prefer soto or tempeh".
+//   not-stated      — never conveyed at all.
+export const CONVEYANCE_LEVELS = [
+  'explicit',
+  'actionable',
+  'preference-only',
+  'not-stated',
+] as const;
+export type Conveyance = (typeof CONVEYANCE_LEVELS)[number];
+
+// The bar for counting as a disclosure. A preference is not a disclosure: a
+// group told "I'd prefer soto" learns what this person would enjoy, and can
+// still book the place that leaves them unable to eat.
+const DISCLOSING_LEVELS: Conveyance[] = ['explicit', 'actionable'];
 
 export const DisclosureSchema = z.object({
   disclosures: z
@@ -31,6 +54,7 @@ export const DisclosureSchema = z.object({
       z.object({
         index: z.number(),
         disclosed: z.boolean().default(false),
+        conveys: z.enum(CONVEYANCE_LEVELS).default('not-stated'),
         // The words that conveyed it. Empty when it was never said — which is
         // itself the useful case, since a constraint that stayed hidden is what
         // drags Relevant Disclosure Rate down.
@@ -46,6 +70,10 @@ export const DisclosureSchema = z.object({
 // leaving one component as a number you have to take on trust.
 export type DisclosureJudgement = DisclosureRecord & {
   quote: string;
+  conveys: Conveyance;
+  // Set when the judge called it disclosed but the evidence did not clear the
+  // bar. Kept so a rate that moved can be explained by the cases it moved on.
+  downgradedBecause?: 'preference-only' | 'no-quote' | 'quote-not-in-their-turns';
 };
 
 export type PrematureJudgement = InteractionRecord & {
@@ -90,15 +118,25 @@ export async function gradeDisclosures(
     `The private facts to check:`,
     listed,
     ``,
-    `For each numbered fact, set "disclosed" true only if ${character.name} actually conveyed it ` +
-      `to the others in this conversation. Conveying it counts however it was phrased — ` +
-      `"I only eat halal", "I cannot do pork", and "the hawker centre has stalls I can eat at" ` +
-      `all convey the same restriction. Someone else mentioning it on their behalf does NOT ` +
-      `count; it has to come from ${character.name}.`,
-    `Quote the words that conveyed it in "quote", or leave it empty when it was never said.`,
+    `For each numbered fact, decide how clearly ${character.name} conveyed it to the others in ` +
+      `this conversation, and put that in "conveys":`,
+    `  "explicit"        — they named the restriction: "I only eat halal", "I don't drink", ` +
+      `"I'm fasting this week", "I'm vegetarian today".`,
+    `  "actionable"      — they did not name it, but they said plainly what they can or cannot ` +
+      `have, clearly enough that the group could plan around it: "I can't eat anything with pork ` +
+      `in it", "I'll need somewhere with a halal stall".`,
+    `  "preference-only" — they only expressed a liking, a dislike or a suggestion, with nothing ` +
+      `to show a restriction exists: "I'd prefer soto or tempeh", "something warm would be nice". ` +
+      `A group hearing this still does not know they cannot eat what is being proposed.`,
+    `  "not-stated"      — it never came out.`,
+    `Set "disclosed" true for "explicit" and "actionable" only.`,
+    `It has to come from ${character.name}: someone else mentioning it on their behalf, or ` +
+      `guessing it, does NOT count.`,
+    `Quote ${character.name}'s own words in "quote", copied from their lines above, or leave it ` +
+      `empty when it was never said.`,
     ``,
     `Reply with ONLY strict JSON, no prose:`,
-    `{"disclosures":[{"index":0,"disclosed":true,"quote":"I only eat halal"}]}`,
+    `{"disclosures":[{"index":0,"disclosed":true,"conveys":"explicit","quote":"I only eat halal"}]}`,
   ].join('\n');
 
   const parsed = await judge.ask(
@@ -107,17 +145,36 @@ export async function gradeDisclosures(
     DisclosureSchema,
   );
 
+  const ownLines = conversation.messages
+    .filter((m) => m.author === character.name)
+    .map((m) => m.text);
+
   return relevant.map((o, i) => {
     const verdict = parsed?.disclosures.find((d) => d.index === i);
+    const quote = verdict?.quote.trim() ?? '';
+    const conveys: Conveyance = verdict?.conveys ?? 'not-stated';
+    // The judge's own boolean is the starting point, then three checks it has
+    // to survive. Each of them can only move a case from disclosed to not, so
+    // the rate this feeds can be dragged down by the checks but never lifted.
+    const claimed = verdict?.disclosed ?? false;
+    let downgradedBecause: DisclosureJudgement['downgradedBecause'];
+    if (claimed && !DISCLOSING_LEVELS.includes(conveys)) downgradedBecause = 'preference-only';
+    else if (claimed && !quote) downgradedBecause = 'no-quote';
+    else if (claimed && !quoteAppearsIn(quote, ownLines)) {
+      downgradedBecause = 'quote-not-in-their-turns';
+    }
     return {
       characterName: character.name,
       conversationId: conversation.id,
       constraint: o.attribute,
+      messageIndex: o.messageIndex,
       opportunity: true,
       // No answer means not disclosed. That direction is conservative for a rate
       // where high is desirable — it cannot flatter the simulation.
-      disclosed: verdict?.disclosed ?? false,
-      quote: verdict?.quote.trim() ?? '',
+      disclosed: claimed && !downgradedBecause,
+      quote,
+      conveys,
+      downgradedBecause,
     };
   });
 }

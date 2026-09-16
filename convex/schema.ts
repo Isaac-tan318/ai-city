@@ -161,6 +161,20 @@ export default defineSchema({
         optionId: v.string(),
         title: v.string(),
         groupUtility: v.number(),
+        // Per-participant utilities behind the group mean. Optional because
+        // rows written before this existed have only the mean, and an
+        // evaluation that is missing them is still a valid evaluation — the
+        // offline aggregation comparison reports itself as skipped instead.
+        perAgent: v.optional(
+          v.array(
+            v.object({
+              playerId,
+              name: v.string(),
+              hardTabooViolated: v.boolean(),
+              totalIndividualUtility: v.number(),
+            }),
+          ),
+        ),
       }),
     ),
     agentScores: v.array(
@@ -188,6 +202,41 @@ export default defineSchema({
   })
     .index('by_world', ['worldId', 'at'])
     .index('by_scenario', ['worldId', 'scenarioId']),
+
+  // One row per LLM API call the deployment makes — what it was for, which model
+  // answered, what it cost in tokens and how long it took. Written from the
+  // action that made the call (convex/util/llmTrack.ts), read by the usage page,
+  // which slices a time window and rolls the rows up by operation and by model.
+  //
+  // Failures are recorded too, with ok:false and zero tokens: a burst of retries
+  // or 4xx-ing calls is exactly what you want a usage page to make visible.
+  llmCalls: defineTable({
+    // Wall-clock completion time. Indexed rather than relying on _creationTime so
+    // the usage window is a first-class filter.
+    at: v.number(),
+    kind: v.union(v.literal('chat'), v.literal('embedding')),
+    // Call site label, e.g. 'conversation.continue' — the unit the usage page
+    // groups by, so you can see which loop is spending the tokens.
+    operation: v.string(),
+    model: v.string(),
+    provider: v.string(),
+    promptTokens: v.number(),
+    completionTokens: v.number(),
+    totalTokens: v.number(),
+    // True when the provider returned no usage block and the counts above are a
+    // chars/4 approximation. Surfaced in the UI rather than silently mixed in.
+    estimated: v.boolean(),
+    ms: v.number(),
+    retries: v.number(),
+    ok: v.boolean(),
+    error: v.optional(v.string()),
+    worldId: v.optional(v.id('worlds')),
+    // Whoever the call was on behalf of — usually an agent name, sometimes a
+    // scenario. Free text because not every call site has a player.
+    subject: v.optional(v.string()),
+  })
+    .index('by_at', ['at'])
+    .index('by_operation', ['operation', 'at']),
 
   ...agentTables,
   ...aiTownTables,

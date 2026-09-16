@@ -13,6 +13,8 @@ import {
   HUNGER_BASELINE,
   DEFAULT_BALANCE,
   FINANCIAL_COMFORT_THRESHOLD,
+  FATIGUE_SOCIAL_CUTOFF,
+  SLEEP_PRESSURE_PEAK,
 } from '../constants';
 
 // The four mutable gauges plus a timestamp for time-decay bookkeeping. Stored on
@@ -176,6 +178,38 @@ export function applyShortTermDeltas(
   return { shortTerm: st, net };
 }
 
+// --- Sleep pressure ---
+
+// The floor fatigue sits at given how long until this agent's next sleep block.
+// Zero for most of the day, ramping to SLEEP_PRESSURE_PEAK as bedtime approaches
+// and staying there for as long as they are in bed. This — not the per-step
+// accrual — is what makes an agent reliably exhausted at night: settling into a
+// step is the only thing that used to move fatigue, so an evening spent at home
+// left someone as fresh at midnight as they were at breakfast.
+//
+// `minutesUntilSleep` is undefined when there is no sleep block ahead in the
+// agent's day at all, which in practice means a night-shift worker on the first
+// evening of a run; they are at work, not overdue for bed, so the floor is 0.
+export function sleepPressureFloor(
+  minutesUntilSleep: number | undefined,
+  rampMinutes: number,
+): number {
+  if (minutesUntilSleep === undefined) return 0;
+  // Already in the sleep block: pinned at the peak until they wake, so a night
+  // is never the thing that quietly refreshes someone. Waking does that.
+  if (minutesUntilSleep <= 0) return SLEEP_PRESSURE_PEAK;
+  const ramp = Math.max(1, rampMinutes);
+  if (minutesUntilSleep >= ramp) return 0;
+  return clampGauge(SLEEP_PRESSURE_PEAK * (1 - minutesUntilSleep / ramp));
+}
+
+// Is this agent too far gone to be sociable? At/above the cutoff they won't
+// start, accept or join a conversation, and they excuse themselves from any
+// they are already in with a one-line goodnight.
+export function tooTiredToSocialize(fatigue: number): boolean {
+  return fatigue >= FATIGUE_SOCIAL_CUTOFF;
+}
+
 // Decay every gauge a step back toward its baseline (called once per game-day).
 export function decayTowardBaseline(st: ShortTerm, amount: number, now: number): ShortTerm {
   const step = (v: number, baseline: number) => {
@@ -217,9 +251,12 @@ export function shortTermSelfDescription(s: ShortTermSnapshot): string | undefin
   const stress = band(s.stress);
   if (stress === 'high') parts.push('very stressed');
   else if (stress === 'moderate') parts.push('rather stressed');
-  // Fatigue.
+  // Fatigue. The top band is split: "exhausted" reads as a rough day, which is
+  // not the same as barely being able to stay awake, and the difference is the
+  // whole point of the nightly ramp.
   const fatigue = band(s.fatigue);
-  if (fatigue === 'high') parts.push('exhausted');
+  if (s.fatigue >= FATIGUE_SOCIAL_CUTOFF) parts.push('barely able to keep your eyes open');
+  else if (fatigue === 'high') parts.push('exhausted');
   else if (fatigue === 'moderate') parts.push('tired');
   // Hunger.
   const hunger = band(s.hunger);

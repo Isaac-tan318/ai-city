@@ -33,7 +33,13 @@ import { internal } from '../_generated/api';
 import { movePlayer, pickParkWaypoint, stopPlayer } from './movement';
 import { insertInput } from './insertInput';
 import { point, Point } from '../util/types';
-import { computeGameTime, CYCLE_MS, isWeekday } from './gameTime';
+import {
+  computeGameTime,
+  gameMinutesUntil,
+  CYCLE_MS,
+  isWeekday,
+  type GameTime,
+} from './gameTime';
 import {
   ARRIVAL_RADIUS,
   SCENARIO_ARRIVAL_RADIUS,
@@ -80,7 +86,9 @@ import {
   defaultShortTerm,
   shortTermSelfDescription,
   shortTermSensitivity,
+  sleepPressureFloor,
   spend,
+  tooTiredToSocialize,
   SHORT_TERM_COMPONENTS,
   type ShortTerm,
   type ShortTermComponent,
@@ -103,6 +111,9 @@ import {
   STEP_WANDER_RADIUS,
   STEP_SETTLED_RADIUS,
   STEP_WANDER_INTERVAL_MS,
+  SLEEP_PRESSURE_INTERVAL_MS,
+  SLEEP_PRESSURE_RAMP_MINUTES,
+  FATIGUE_MAX_CONVERSATION_MESSAGES,
 } from '../constants';
 import {
   getLocationById,
@@ -118,7 +129,13 @@ import {
   observationText,
   observedFingerprint,
 } from './observation';
-import { pickContextualEvent, buildSickSchedule, isSleepStep } from '../../data/routines';
+import {
+  pickContextualEvent,
+  buildSickSchedule,
+  isSleepStep,
+  sleepWindowFor,
+  worksNightShift,
+} from '../../data/routines';
 
 export type ScheduleStep = {
   startMinute: number;
@@ -231,6 +248,15 @@ export class Agent {
   // can re-set its activity after a contextual micro-event expires). Keyed by
   // `${dayNumber}:${currentStepIndex}`.
   shortTermStepKey?: string;
+  // True while the agent is in a sleep block. Fatigue is held at its peak for the
+  // whole of it and reset on the way OUT — going to bed is what tiredness causes,
+  // so it can't also be the cure. Persisted rather than derived because the wake
+  // reset needs to know the step we just left was a sleep step, and the Game is
+  // rebuilt from the DB every ~30s.
+  asleep?: boolean;
+  // When the nightly sleep-pressure floor was last applied, so it runs on an
+  // interval rather than on every one of the ~62 ticks a second.
+  lastSleepPressureAt?: number;
   // Transient marker of the most recent short-term shift, for a brief map badge.
   lastShortTermChange?: { at: number; net: number };
   // --- Long-term promotion ---
@@ -331,6 +357,8 @@ export class Agent {
       shortTermCheckedForDay,
       lastMealDay,
       shortTermStepKey,
+      asleep,
+      lastSleepPressureAt,
       lastShortTermChange,
       learnedTraits,
       pin,
@@ -393,6 +421,8 @@ export class Agent {
     this.shortTermCheckedForDay = shortTermCheckedForDay;
     this.lastMealDay = lastMealDay;
     this.shortTermStepKey = shortTermStepKey;
+    this.asleep = asleep;
+    this.lastSleepPressureAt = lastSleepPressureAt;
     this.lastShortTermChange = lastShortTermChange;
     this.learnedTraits = learnedTraits;
     this.pin = pin;
@@ -495,6 +525,11 @@ export class Agent {
     this.tickObservations(game, now, player);
     this.maybeReflect(game, now);
     this.maybeReact(game, now, player);
+    // The sleep/wake fatigue clock. In the prelude for the same reason as
+    // perception: it writes no movement state and starts no operation, and it
+    // has to keep running while the agent is mid-conversation or held by a
+    // scenario — those are exactly the situations the ramp exists to end.
+    this.applySleepPressure(game, now);
     if (this.inProgressOperation) {
       if (now < this.inProgressOperation.started + ACTION_TIMEOUT) {
         // Wait on the operation to finish.
@@ -571,10 +606,15 @@ export class Agent {
     // If we have been wandering but haven't thought about something to do for
     // a while, do something.
     if (!conversation && !doingActivity && (!player.pathfinding || !recentlyAttemptedInvite)) {
+      // Too tired to talk: hand the op an empty candidate pool so it picks a
+      // solitary activity instead of an invitee. Cutting the op out entirely
+      // would leave the agent with nothing to do and no activity running, which
+      // is how you get someone standing motionless on a tile all night.
+      const tooTiredToInvite = this.tooTiredToTalk();
       this.startOperation(game, now, 'agentDoSomething', {
         worldId: game.worldId,
         player: player.serialize(),
-        otherFreePlayers: [...game.world.players.values()]
+        otherFreePlayers: tooTiredToInvite ? [] : [...game.world.players.values()]
           .filter((p) => p.id !== player.id)
           .filter(
             (p) => ![...game.world.conversations.values()].find((c) => c.participants.has(p.id)),
@@ -655,8 +695,18 @@ export class Agent {
           INVITE_ACCEPT_MIN_PROBABILITY +
           (INVITE_ACCEPT_MAX_PROBABILITY - INVITE_ACCEPT_MIN_PROBABILITY) *
             (inviterAffinity / MAX_AFFINITY);
-        if (pullsOffPost) {
-          console.log(`Agent ${player.id} declining off-post invite to ${conversation.id}`);
+        // Dead on their feet (or already in bed): turn down anyone but a human.
+        // Declined like the off-post case rather than the affinity one below —
+        // being too tired to talk tonight isn't a snub and shouldn't cost the
+        // inviter any goodwill. A human still gets through; the agent answers
+        // them, but sleepily and briefly (see FATIGUE_MAX_CONVERSATION_MESSAGES).
+        const tooTired = !!inviter && !inviter.human && this.tooTiredToTalk();
+        if (pullsOffPost || tooTired) {
+          console.log(
+            `Agent ${player.id} declining invite to ${conversation.id} (${
+              tooTired ? 'too tired' : 'off post'
+            })`,
+          );
           conversation.rejectInvite(game, now, player);
         } else if (!inviter || inviter.human || Math.random() < acceptProbability) {
           console.log(`Agent ${player.id} accepting invite to ${conversation.id}`);
@@ -861,6 +911,17 @@ export class Agent {
             tooLongDeadline < now ||
             conversation.numMessages > maxMessages ||
             wantsToDriftOff;
+        }
+        // Running on empty: exchange a line or two and turn in. This overrides
+        // the scenario branch as well — an agent on the point of falling asleep
+        // is not going to see a deliberation through, and keeping them in it is
+        // exactly how the town ended up holding 3 AM huddles. The leave message
+        // itself is the goodnight (see leaveConversationMessage).
+        if (
+          this.tooTiredToTalk() &&
+          conversation.numMessages >= FATIGUE_MAX_CONVERSATION_MESSAGES
+        ) {
+          shouldLeave = true;
         }
         if (shouldLeave) {
           console.log(`${player.id} leaving conversation ${conversation.id}.`);
@@ -1109,6 +1170,9 @@ export class Agent {
   maybeJoinNearbyConversation(game: Game, now: number, player: import('./player').Player): boolean {
     if (this.inProgressOperation) return false;
     if (game.world.playerConversation(player)) return false;
+    // Asleep, or too tired to be sociable — walking over to join a huddle is the
+    // last thing someone on their way to bed does.
+    if (this.tooTiredToTalk()) return false;
     // While heading to a scenario gathering, don't get absorbed into some unrelated
     // conversation on the way — keep walking to the spot.
     if (this.scenarioTarget) return false;
@@ -1258,6 +1322,7 @@ export class Agent {
       this.shortTermCheckedForDay = gt.dayNumber;
       this.updateShortTermForNewDay(game, gt.dayNumber, now);
     }
+
 
     // If sick and today's rest schedule isn't set up yet, stay home and rest —
     // skip the LLM planner entirely. Don't interrupt an active conversation.
@@ -1482,13 +1547,16 @@ export class Agent {
       this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN;
     // A sick agent keeps to themselves — don't initiate new conversations. Nor
     // does someone already mid-text-thread: they're occupied, and the op slot is
-    // needed for their reply.
+    // needed for their reply. Nor does someone who is asleep or on the edge of
+    // it: nobody starts a chat on their way to bed, and an agent who did would
+    // hold the whole town up past its bedtime waiting for a reply.
     if (
       !conversation &&
       !onInviteCooldown &&
       !justChatted &&
       !this.inProgressOperation &&
-      this.health !== 'sick'
+      this.health !== 'sick' &&
+      !this.tooTiredToTalk()
     ) {
       const freePlayers = [...game.world.players.values()].filter(
         (p) =>
@@ -1584,8 +1652,7 @@ export class Agent {
         // workers whose workplace is the 'restaurant' and whose text mentions food.
         const isOwnWorkplace = !!workLeashAnchor(player.name, step);
         // Profile-derived fatigue reactivity (fit → tires slower, frail → faster).
-        const fatigueMultiplier =
-          shortTermSensitivity(game.agentDescriptions.get(this.id)?.profile).fatigue ?? 1;
+        const fatigueMultiplier = this.fatigueMultiplier(game);
         this.accrueStepShortTerm(
           game,
           step,
@@ -2007,6 +2074,8 @@ export class Agent {
       shortTermCheckedForDay: this.shortTermCheckedForDay,
       lastMealDay: this.lastMealDay,
       shortTermStepKey: this.shortTermStepKey,
+      asleep: this.asleep,
+      lastSleepPressureAt: this.lastSleepPressureAt,
       lastShortTermChange: this.lastShortTermChange,
       learnedTraits: this.learnedTraits,
       pin: this.pin,
@@ -2119,9 +2188,131 @@ export class Agent {
     this.balance = spend(afterPay, DAILY_EXPENSES).balance;
   }
 
+  // --- The sleep/wake cycle ---
+
+  // The schedule step this agent is on right now, if it has a plan at all.
+  currentStep(): ScheduleStep | undefined {
+    if (!this.schedule || this.currentStepIndex === undefined) return undefined;
+    return this.schedule[this.currentStepIndex];
+  }
+
+  // Is the agent in bed? The schedule step is the single source of truth (the
+  // same rule the scenario manager uses), so nothing can be asleep and out
+  // walking at the same time.
+  isAsleep(): boolean {
+    const step = this.currentStep();
+    return !!step && isSleepStep(step);
+  }
+
+  // Past the point of being sociable — see FATIGUE_SOCIAL_CUTOFF. Asleep counts
+  // too, for the obvious reason: the gauges lag the schedule by up to one
+  // sleep-pressure interval, and nobody should be invited out of bed in between.
+  tooTiredToTalk(): boolean {
+    return this.isAsleep() || tooTiredToSocialize(this.shortTerm?.fatigue ?? FATIGUE_BASELINE);
+  }
+
+  // How reactive this agent's fatigue is, from their durable profile: an athletic
+  // character tires slower, a frail or chronically-tired one faster.
+  fatigueMultiplier(game: Game): number {
+    return shortTermSensitivity(game.agentDescriptions.get(this.id)?.profile).fatigue ?? 1;
+  }
+
+  // Game-minutes until this agent's next sleep block begins, or 0 while they are
+  // in one. Undefined only for someone with no bed ahead of them at all — a
+  // night-shift worker clocking on: they are on their way to work, not overdue.
+  //
+  // Reading "bedtime" off the agent's own schedule rather than off the clock is
+  // what makes one rule serve everybody: the night-shift roster's sleep block
+  // sits in the middle of the day, so their ramp lands in the early hours with
+  // no special-casing here.
+  minutesUntilSleep(gt: GameTime, characterName: string | undefined): number | undefined {
+    const step = this.currentStep();
+    if (step && isSleepStep(step)) return 0;
+    if (this.schedule && this.currentStepIndex !== undefined) {
+      for (let i = this.currentStepIndex + 1; i < this.schedule.length; i++) {
+        if (isSleepStep(this.schedule[i])) {
+          return Math.max(0, this.schedule[i].startMinute - gt.minutesIntoDay);
+        }
+      }
+    }
+    // No sleep left in TODAY's schedule. For a night owl whose block sits after
+    // midnight that is an artefact of the day boundary, not a night off — their
+    // 1 AM bedtime is at the top of today's list, already behind them — so wrap
+    // to their declared bedtime rather than leaving them unpressured all night.
+    if (!characterName) return undefined;
+    if (worksNightShift(characterName, gt.dayNumber)) return undefined;
+    return gameMinutesUntil(sleepWindowFor(characterName).bed, gt.minutesIntoDay);
+  }
+
+  // The whole fatigue clock, run on an interval: notice the agent crossing into
+  // or out of sleep, and hold fatigue at the floor the approaching night demands.
+  //
+  // Time-driven rather than step-driven on purpose. Per-step accrual alone made
+  // tiredness a function of how busy the day was and nothing else, so an agent
+  // who had pottered about at home was as fresh at midnight as at breakfast and
+  // would happily strike up a chat at 2 AM. It also fires whether or not the
+  // agent ever reached the bed, which a step-settle hook cannot promise — and an
+  // agent stuck at 95 fatigue because they never arrived home would never
+  // socialise again.
+  applySleepPressure(game: Game, now: number) {
+    if (this.lastSleepPressureAt && now < this.lastSleepPressureAt + SLEEP_PRESSURE_INTERVAL_MS) {
+      return;
+    }
+    this.lastSleepPressureAt = now;
+    const gt = computeGameTime(now, game.world.worldStartTime);
+    const before = this.shortTerm ?? defaultShortTerm(now);
+
+    // Waking up: the one thing that clears a night's fatigue. Going to BED does
+    // not — you don't stop being tired by getting into bed, and making the sleep
+    // block itself the reset meant an agent was at their freshest all evening
+    // and then instantly restored the moment they turned in.
+    if (this.isAsleep()) {
+      this.asleep = true;
+    } else if (this.asleep) {
+      delete this.asleep;
+      this.shortTerm = { ...before, fatigue: FATIGUE_BASELINE, updatedAt: now };
+      game.emitShortTermEvent({
+        at: now,
+        playerId: this.playerId,
+        component: 'fatigue',
+        delta: FATIGUE_BASELINE - before.fatigue,
+        valueBefore: before.fatigue,
+        valueAfter: FATIGUE_BASELINE,
+        cause: 'rest',
+        reason: 'waking up',
+        scenarioId: this.scenarioId,
+      });
+      // Nothing left to floor: they have hours before the next sleep block.
+      return;
+    }
+
+    // A frail character starts flagging earlier in the evening (a longer ramp);
+    // an athletic one holds out until closer to bedtime.
+    const ramp = SLEEP_PRESSURE_RAMP_MINUTES * this.fatigueMultiplier(game);
+    const name = game.playerDescriptions.get(this.playerId)?.name;
+    const floor = sleepPressureFloor(this.minutesUntilSleep(gt, name), ramp);
+    // Only ever pushes fatigue UP, so a hard day still stacks on top of the floor
+    // and nothing here can quietly refresh someone.
+    if (before.fatigue >= floor) return;
+    this.shortTerm = { ...before, fatigue: clampGauge(floor), updatedAt: now };
+    game.emitShortTermEvent({
+      at: now,
+      playerId: this.playerId,
+      component: 'fatigue',
+      delta: this.shortTerm.fatigue - before.fatigue,
+      valueBefore: before.fatigue,
+      valueAfter: this.shortTerm.fatigue,
+      cause: 'sleepPressure',
+      reason: this.isAsleep() ? 'asleep' : 'the night wearing on',
+      scenarioId: this.scenarioId,
+    });
+  }
+
   // Short-term accrual when the agent settles into a schedule step: reset hunger on
-  // a meal (and pay for it) or fatigue on sleep; otherwise fatigue/hunger creep up,
-  // more for a demanding "work" block. `gameMinutesInStep` sizes the hunger creep.
+  // a meal (and pay for it); otherwise fatigue and hunger creep up, more for a
+  // demanding "work" block. Sleep is not handled here — the sleep/wake clock
+  // (applySleepPressure) owns both the night's peak and the waking reset.
+  // `gameMinutesInStep` sizes the hunger creep.
   // `isOwnWorkplace` marks a shift at the agent's OWN workplace (so a hawker worker
   // at the 'restaurant' counts as work, never a meal); `fatigueMultiplier` is the
   // profile-derived reactivity (fit tires slower, frail faster).
@@ -2136,10 +2327,9 @@ export class Agent {
   ) {
     const before = this.shortTerm ?? defaultShortTerm(now);
     const st = { ...before };
-    // The two gauges this step can move carry different causes — sleeping is
-    // rest, eating is a meal, everything else is activity — so they are tracked
-    // separately rather than logged under one label for the whole step.
-    let fatigueCause: 'rest' | 'activity' = 'activity';
+    // Hunger's cause varies by step (a meal, or just time passing); fatigue's
+    // does not, since the only thing that lowers it — waking up — is the sleep
+    // clock's job rather than this one's.
     let hungerCause: 'meal' | 'activity' = 'activity';
     const text = `${step.activity} ${step.description}`.toLowerCase();
     const isHome = step.locationId === 'home' || step.locationId === 'hdb';
@@ -2153,8 +2343,10 @@ export class Agent {
       );
     let resetHunger = false;
     if (isSleep) {
-      st.fatigue = FATIGUE_BASELINE;
-      fatigueCause = 'rest';
+      // Nothing to do: they're in bed, not eating and not at work, and fatigue
+      // is the sleep/wake clock's business now (Agent.applySleepPressure). It is
+      // held at the night's peak through the block and reset on the way OUT —
+      // turning in is what tiredness causes, so it can't also be its cure.
     } else if (isMeal) {
       // Eating OUT: resets hunger and costs money — but only if they can actually
       // cover it. An agent who can't afford the stall eats at home instead: hunger
@@ -2190,17 +2382,22 @@ export class Agent {
     }
     st.updatedAt = now;
     this.shortTerm = st;
-    game.emitShortTermEvent({
-      at: now,
-      playerId: this.playerId,
-      component: 'fatigue',
-      delta: st.fatigue - before.fatigue,
-      valueBefore: before.fatigue,
-      valueAfter: st.fatigue,
-      cause: fatigueCause,
-      reason: step.activity,
-      scenarioId: this.scenarioId,
-    });
+    // Turning in no longer moves fatigue at all, so there is no transition to
+    // log for it — an event with a zero delta would just read as the rule
+    // failing to fire. Every other step still logs one.
+    if (!isSleep) {
+      game.emitShortTermEvent({
+        at: now,
+        playerId: this.playerId,
+        component: 'fatigue',
+        delta: st.fatigue - before.fatigue,
+        valueBefore: before.fatigue,
+        valueAfter: st.fatigue,
+        cause: 'activity',
+        reason: step.activity,
+        scenarioId: this.scenarioId,
+      });
+    }
     game.emitShortTermEvent({
       at: now,
       playerId: this.playerId,
@@ -2288,6 +2485,10 @@ export const serializedAgent = {
   lastMealDay: v.optional(v.number()),
   // Per-step accrual guard (`${dayNumber}:${currentStepIndex}`).
   shortTermStepKey: v.optional(v.string()),
+  // In a sleep block right now; cleared on waking, which is what resets fatigue.
+  asleep: v.optional(v.boolean()),
+  // Throttle for the nightly sleep-pressure floor (see Agent.applySleepPressure).
+  lastSleepPressureAt: v.optional(v.number()),
   // Most recent short-term shift, for a transient map indicator.
   lastShortTermChange: v.optional(v.object({ at: v.number(), net: v.number() })),
   // Durable self-learned traits promoted from reflection (separate from profile).

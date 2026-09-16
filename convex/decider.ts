@@ -30,7 +30,7 @@ import {
 import { api } from './_generated/api';
 import { playerId } from './aiTown/ids';
 import { MAX_DECISION_OPTIONS } from './constants';
-import { chatCompletion } from './util/llm';
+import { trackedChatCompletion } from './util/llmTrack';
 import { parseLLMJson } from './util/llmJson';
 import { countNewFacts, dropResolved, mergeFacts } from './util/factMerge';
 import { CITY_LOCATIONS } from '../data/cityLocations';
@@ -363,11 +363,15 @@ export async function generateOptionsFor(
     .filter(Boolean)
     .join('\n');
 
-  const { content } = await chatCompletion({
-    messages: [{ role: 'user', content: prompt }],
-    max_tokens: 1200,
-    response_format: { type: 'json_object' },
-  });
+  const { content } = await trackedChatCompletion(
+    ctx,
+    { operation: 'decider.generateOptions', subject: data.name },
+    {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 1200,
+      response_format: { type: 'json_object' },
+    },
+  );
 
   const parsed = parseLLMJson(
     content,
@@ -491,11 +495,15 @@ export async function extractMemoriesFor(
     .filter(Boolean)
     .join('\n');
 
-  const { content } = await chatCompletion({
-    messages: [{ role: 'user', content: prompt }],
-    max_tokens: 900,
-    response_format: { type: 'json_object' },
-  });
+  const { content } = await trackedChatCompletion(
+    ctx,
+    { operation: 'decider.extractMemories', worldId, subject: data.name },
+    {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 900,
+      response_format: { type: 'json_object' },
+    },
+  );
 
   const parsed = parseLLMJson(
     content,

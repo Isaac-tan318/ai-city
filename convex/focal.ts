@@ -43,7 +43,8 @@ import {
   OptionEstimate,
   TopScoreSnapshot,
 } from './scoring';
-import { chatCompletion, LLMMessage } from './util/llm';
+import { LLMMessage } from './util/llm';
+import { trackedChatCompletion } from './util/llmTrack';
 import { parseLLMJson } from './util/llmJson';
 
 const selfInternal = internal.focal;
@@ -237,11 +238,15 @@ export async function focalDecision(
     llmMessages.push(...(await previousMessages(ctx, worldId, convId)));
   }
 
-  const { content } = await chatCompletion({
-    messages: llmMessages,
-    max_tokens: 900,
-    response_format: { type: 'json_object' },
-  });
+  const { content } = await trackedChatCompletion(
+    ctx,
+    { operation: 'focal.decision', worldId, subject: data.selfName },
+    {
+      messages: llmMessages,
+      max_tokens: 900,
+      response_format: { type: 'json_object' },
+    },
+  );
   return parseLLMJson(content, FocalActionSchema, `focalDecision/${data.scenarioName}`);
 }
 

@@ -52,8 +52,9 @@ export const CHOICE_PROBES: ChoiceProbe[] = [
         optionId: 'beach',
         title: 'East Coast Park',
         details:
-          'Rent bicycles along the coast, then a drink at one of the beachfront places. ' +
-          'About S$20 a head, hot and open, three hours including travel.',
+          'Rent bicycles along the coast in the late afternoon once it cools, then a drink at ' +
+          'one of the beachfront places. About S$12 a head, sea breeze, roughly two hours. The ' +
+          'only option involving any exercise.',
       },
     ],
   },

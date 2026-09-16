@@ -20,6 +20,10 @@ const idleDay = (x: number, y: number) => [
   },
 ];
 
+// The step in effect at a given game-minute: the last one that has started.
+const stepAt = <T extends { startMinute: number }>(schedule: T[], minute: number): T =>
+  [...schedule].reverse().find((s) => s.startMinute <= minute)!;
+
 describe('the wider cast', () => {
   it('adds 17 agents on top of the original 8', () => {
     expect(Descriptions).toHaveLength(25);
@@ -56,8 +60,12 @@ describe('the wider cast', () => {
   it('leaves Bernard free all day — he is retired', () => {
     const home = homeFor('Bernard')!;
     const schedule = mergeFixedObligations('Bernard', 1, idleDay(home.x, home.y));
-    expect(schedule).toHaveLength(1);
-    expect(schedule[0].locationId).toBe('home');
+    // No work block anywhere: every step is at home, and the only ones the
+    // merge added are the night's sleep and the getting-up that follows it.
+    expect(schedule.every((s) => s.destination.x === home.x && s.destination.y === home.y)).toBe(
+      true,
+    );
+    expect(stepAt(schedule, 10 * 60).activity).toBe('pottering about');
   });
 
   it('sends the Muslim characters home for Friday prayer', () => {

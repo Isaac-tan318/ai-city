@@ -70,10 +70,20 @@ export function expectedMove(
       if (component === 'hunger') return 'down';
       return undefined;
 
-    // Sleeping resets fatigue to its baseline. A legitimate reset, so a large
+    // Waking up resets fatigue to its baseline. A legitimate reset, so a large
     // jump here is expected rather than state being discarded between scenarios.
+    // Note this fires on the way OUT of a sleep block, not on the way in: going
+    // to bed leaves fatigue where the evening put it.
     case 'rest':
       if (component === 'fatigue') return 'down';
+      return undefined;
+
+    // The nightly ramp (Agent.applySleepPressure) floors fatigue upward as the
+    // agent's own bedtime nears and holds it there while they sleep. It only
+    // ever pushes up — a hard day stacks on top of the floor, and nothing here
+    // can refresh someone; that is what waking is for.
+    case 'sleepPressure':
+      if (component === 'fatigue') return 'up';
       return undefined;
 
     // SICK_STRESS_PER_DAY and SICK_MOOD_PENALTY_PER_DAY, applied on the daily

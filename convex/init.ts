@@ -12,6 +12,9 @@ import { seedGroundTruthProfiles } from './groundTruth';
 
 const init = mutation({
   args: {
+    // Cap on how many of the MISSING characters to create in this run. Left out,
+    // `init` brings the world up to the full `Descriptions` roster; it is safe to
+    // re-run, and a no-op once everyone is present.
     numAgents: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
@@ -23,18 +26,17 @@ const init = mutation({
       );
       return;
     }
-    const shouldCreate = await shouldCreateAgents(
-      ctx.db,
-      worldStatus.worldId,
-      worldStatus.engineId,
-    );
-    if (shouldCreate) {
-      const toCreate = args.numAgents !== undefined ? args.numAgents : Descriptions.length;
-      for (let i = 0; i < toCreate; i++) {
-        await insertInput(ctx, worldStatus.worldId, 'createAgent', {
-          descriptionIndex: i % Descriptions.length,
-        });
-      }
+    const missing = await missingDescriptionIndexes(ctx.db, worldStatus.worldId);
+    const toCreate = args.numAgents !== undefined ? missing.slice(0, args.numAgents) : missing;
+    for (const descriptionIndex of toCreate) {
+      await insertInput(ctx, worldStatus.worldId, 'createAgent', { descriptionIndex });
+    }
+    if (toCreate.length > 0) {
+      console.log(
+        `Queued ${toCreate.length} agent(s): ${toCreate
+          .map((i) => Descriptions[i].name)
+          .join(', ')}`,
+      );
     }
     // Seed the decision engine's hidden ground truth. Agents are created through
     // queued engine inputs, so on a fresh world there are no playerDescriptions
@@ -93,27 +95,47 @@ async function getOrCreateDefaultWorld(ctx: MutationCtx) {
   return { worldStatus, engine };
 }
 
-async function shouldCreateAgents(
+// Which entries of `Descriptions` have no agent in this world yet, as indexes
+// into that array.
+//
+// This used to be a yes/no `shouldCreateAgents`, which answered no the moment the
+// world held a single agent. That made the roster size permanent: growing
+// `Descriptions` did nothing to a world that already existed, and the only way to
+// see the new characters was `wipeAllTables` — throwing away every memory,
+// conversation, relationship and usage row to gain a few residents. Asking which
+// ones are missing instead covers both cases with the same code: an empty world
+// is missing all of them, and a world grown from 25 to 50 is missing exactly the
+// 25 that were appended.
+//
+// Matched by NAME rather than by index, because the index is only a pointer into
+// an array that has been appended to twice.
+//
+// This deliberately does NOT look at the input queue to see who is already on
+// their way in. That table is written several times a second by a running
+// engine, and a mutation that reads it loses the optimistic-concurrency race
+// almost every time — which would hang `convex dev --run init --until-success`
+// (i.e. `npm run dev`) against a busy world. Re-running `init` before the queue
+// drains therefore queues some characters twice, and the `createAgent` handler
+// in aiTown/agentInputs.ts is what makes that harmless.
+async function missingDescriptionIndexes(
   db: DatabaseReader,
   worldId: Id<'worlds'>,
-  engineId: Id<'engines'>,
-) {
+): Promise<number[]> {
   const world = await db.get(worldId);
   if (!world) {
     throw new Error(`Invalid world ID: ${worldId}`);
   }
-  if (world.agents.length > 0) {
-    return false;
-  }
-  const unactionedJoinInputs = await db
-    .query('inputs')
-    .withIndex('byInputNumber', (q) => q.eq('engineId', engineId))
-    .order('asc')
-    .filter((q) => q.eq(q.field('name'), 'createAgent'))
-    .filter((q) => q.eq(q.field('returnValue'), undefined))
-    .first();
-  if (unactionedJoinInputs) {
-    return false;
-  }
-  return true;
+  const playerDescriptions = await db
+    .query('playerDescriptions')
+    .withIndex('worldId', (q) => q.eq('worldId', worldId))
+    .collect();
+  // A description outlives the player it belonged to (they are archived, not
+  // deleted), so only the ones still in the world count as present.
+  const livePlayerIds = new Set(world.players.map((p) => p.id));
+  const present = new Set(
+    playerDescriptions.filter((d) => livePlayerIds.has(d.playerId)).map((d) => d.name),
+  );
+  return Descriptions.map((d, i) => [d, i] as const)
+    .filter(([d]) => !present.has(d.name))
+    .map(([, i]) => i);
 }

@@ -109,8 +109,10 @@ describe('the night-shift roster', () => {
   });
 
   it('has Nurul on the ward at midnight while the town sleeps', () => {
-    // She clocks on at 22:00 Tuesday and is still there through Wednesday's
-    // small hours — the two halves of one night, across two game-days.
+    // She clocks on at 22:00 and is still there through the small hours. Both
+    // halves of one night sit on the SAME game-day, because a game-day runs
+    // 06:00 → 06:00: Tuesday's 22:00 block is followed by Tuesday's 00:00 one.
+    // She is rostered for Wednesday night too, so Wednesday looks the same.
     const tuesday = scheduleFor('Nurul', TUESDAY);
     const wednesday = scheduleFor('Nurul', WEDNESDAY);
     expect(stepAt(tuesday, NIGHT_SHIFT_START).locationId).toBe('changi_hospital');
@@ -137,9 +139,79 @@ describe('the night-shift roster', () => {
   it('puts her back on an ordinary night once the run ends', () => {
     // Thursday: off the ward at 06:00, day sleep, and then a normal bedtime —
     // the evening block must come back rather than leaving her up all night.
+    //
+    // A game-day runs 06:00 → 06:00, so Thursday's own small hours are the ones
+    // that FOLLOW Thursday evening — an ordinary night at home. The tail of
+    // Wednesday night's shift lives on Wednesday's schedule, asserted above.
     const thursday = scheduleFor('Nurul', THURSDAY);
-    expect(stepAt(thursday, 2 * 60).locationId).toBe('changi_hospital');
+    expect(stepAt(thursday, 6 * 60).activity).toBe('heading home after the night shift');
     expect(isSleepStep(stepAt(thursday, 23 * 60))).toBe(true);
+    expect(isSleepStep(stepAt(thursday, 2 * 60))).toBe(true);
+    expect(stepAt(thursday, 2 * 60).locationId).not.toBe('changi_hospital');
+  });
+});
+
+// The engine does not read a schedule as a list — it walks the game clock and
+// asks which block is in effect. That clock starts its day at 06:00 and wraps
+// through midnight inside the same `dayNumber` (see aiTown/gameTime.ts), which
+// is the shape these tests pin down: for six game-hours after midnight the
+// forward-only scan used to sit stuck on the 22:30 block with its activity
+// expired, so the town visibly stopped sleeping at twelve every night.
+describe('walking the clock through midnight', () => {
+  // The step-advance rule from Agent.tickSchedule, including the rewind that
+  // lets it follow the clock back round past midnight.
+  function stepIndexAt(schedule: { startMinute: number }[], index: number, minutesIntoDay: number) {
+    let idx = index;
+    if (schedule[idx] && minutesIntoDay < schedule[idx].startMinute) idx = 0;
+    while (idx < schedule.length - 1 && minutesIntoDay >= schedule[idx + 1].startMinute) idx++;
+    return idx;
+  }
+
+  // Walk one whole game-day at one-minute resolution, in the order the engine
+  // does: 06:00 → 24:00, then 00:00 → 06:00.
+  function walkDay(name: string, dayNumber: number) {
+    const schedule = scheduleFor(name, dayNumber);
+    const minutes = [
+      ...Array.from({ length: 18 * 60 }, (_, i) => 6 * 60 + i),
+      ...Array.from({ length: 6 * 60 }, (_, i) => i),
+    ];
+    let idx = 0;
+    return minutes.map((minutesIntoDay) => {
+      idx = stepIndexAt(schedule, idx, minutesIntoDay);
+      return { minutesIntoDay, step: schedule[idx], started: minutesIntoDay >= schedule[idx].startMinute };
+    });
+  }
+
+  const CAST = ['Yvonne', 'Bernard', 'Tiago', 'Sharifah', 'Naomi', 'Emeka', 'Xavier'];
+
+  it.each(CAST)('never leaves %s without a block that has started', (name) => {
+    const stalled = walkDay(name, MONDAY).filter((m) => !m.started);
+    expect(stalled).toEqual([]);
+  });
+
+  it.each(CAST)('keeps %s in bed right through midnight', (name) => {
+    const day = walkDay(name, MONDAY);
+    const at = (minute: number) => day.find((m) => m.minutesIntoDay === minute)!;
+    // 03:00 is inside every sleep window the persona library produces.
+    expect(isSleepStep(at(3 * 60).step)).toBe(true);
+    // And the block in force a minute either side of midnight is the same one
+    // they went to bed in, or its continuation — never a gap.
+    expect(isSleepStep(at(23 * 60 + 59).step) || isSleepStep(at(1 * 60).step)).toBe(true);
+  });
+
+  it('keeps the night-shift nurse on the ward past midnight, not in bed', () => {
+    const day = walkDay('Nurul', TUESDAY);
+    const at = (minute: number) => day.find((m) => m.minutesIntoDay === minute)!;
+    expect(at(23 * 60).step.locationId).toBe('changi_hospital');
+    expect(at(2 * 60).step.locationId).toBe('changi_hospital');
+    expect(at(5 * 60 + 59).step.locationId).toBe('changi_hospital');
+  });
+
+  it('sends the night owl to bed after midnight rather than holding him out all night', () => {
+    const day = walkDay('Tiago', MONDAY);
+    const at = (minute: number) => day.find((m) => m.minutesIntoDay === minute)!;
+    expect(isSleepStep(at(30).step)).toBe(false); // 00:30 — still out
+    expect(isSleepStep(at(2 * 60).step)).toBe(true); // 02:00 — home in bed
   });
 });
 

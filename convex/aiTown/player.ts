@@ -208,6 +208,13 @@ export class Player {
         throw new Error(`Only ${MAX_HUMAN_PLAYERS} human players allowed at once.`);
       }
     }
+    // Ten random darts at the map, then a deterministic sweep. The darts alone
+    // were fine for eight agents and merely lucky for twenty-five: roughly two
+    // tiles in five are impassable, so each join had about a 1-in-8000 chance of
+    // finding nothing — and a failed join throws out of the input handler, which
+    // means that character silently never enters the world. Creating fifty in a
+    // row makes that a bet worth not taking, and the sweep costs nothing on the
+    // path that already worked.
     let position;
     for (let attempt = 0; attempt < 10; attempt++) {
       const candidate = {
@@ -219,6 +226,22 @@ export class Player {
       }
       position = candidate;
       break;
+    }
+    if (!position) {
+      const startX = Math.floor(Math.random() * game.worldMap.width);
+      const startY = Math.floor(Math.random() * game.worldMap.height);
+      search: for (let dy = 0; dy < game.worldMap.height; dy++) {
+        for (let dx = 0; dx < game.worldMap.width; dx++) {
+          const candidate = {
+            x: (startX + dx) % game.worldMap.width,
+            y: (startY + dy) % game.worldMap.height,
+          };
+          if (!blocked(game, now, candidate)) {
+            position = candidate;
+            break search;
+          }
+        }
+      }
     }
     if (!position) {
       throw new Error(`Failed to find a free position!`);

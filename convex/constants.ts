@@ -486,6 +486,133 @@ export const CHARACTER_ACTIVITIES: Record<string, Activity[]> = {
     { description: 'watching the cricket', emoji: '🏏', duration: 20_000, energy: 0 },
     { description: 'letting a regular off the bill again', emoji: '🧾', duration: 20_000, energy: 5 },
   ],
+
+  // The 50-agent cast.
+  Faisal: [
+    { description: 'taking a call about a deal', emoji: '📱', duration: 20_000, energy: 5 },
+    { description: 'ordering coffee for the whole table', emoji: '☕', duration: 20_000, cost: 12, energy: 0 },
+    { description: 'stepping out for prayer', emoji: '🕌', duration: 20_000, energy: 0 },
+  ],
+  Somchai: [
+    { description: 'kicking a ball against the wall', emoji: '⚽', duration: 20_000, energy: 20 },
+    { description: 'checking his shift roster', emoji: '📋', duration: 20_000, energy: 0 },
+    { description: 'sending money home', emoji: '💸', duration: 20_000, cost: 15, energy: 0 },
+  ],
+  Katrin: [
+    { description: 'checking a tolerance by hand', emoji: '📐', duration: 20_000, energy: 10 },
+    { description: 'planning a climbing session', emoji: '🧗', duration: 20_000, cost: 15, energy: 5 },
+    { description: 'rereading a schedule she does not trust', emoji: '🗓️', duration: 20_000, energy: 5 },
+  ],
+  Pilar: [
+    { description: 'laying a table for people who have not arrived yet', emoji: '🍽️', duration: 20_000, energy: 10 },
+    { description: 'arguing with a supplier about tomatoes', emoji: '🍅', duration: 20_000, energy: 10 },
+    { description: 'putting a record on', emoji: '🎶', duration: 20_000, energy: 0 },
+  ],
+  Danuta: [
+    { description: 'making a pot of soup for two households', emoji: '🍲', duration: 20_000, cost: 8, energy: 20 },
+    { description: 'walking a client down to the void deck', emoji: '🚶', duration: 20_000, energy: 20 },
+    { description: 'sitting down for the first time all day', emoji: '😮‍💨', duration: 20_000, energy: 0 },
+  ],
+  Camille: [
+    { description: 'redlining somebody else’s layout', emoji: '🖍️', duration: 20_000, energy: 10 },
+    { description: 'photographing a doorway she likes', emoji: '📷', duration: 20_000, energy: 5 },
+    { description: 'complaining about the signage', emoji: '🙄', duration: 20_000, energy: 0 },
+  ],
+  Sipho: [
+    { description: 'shooting hoops behind the hall', emoji: '🏀', duration: 20_000, energy: 25 },
+    { description: 'reading something outside his field', emoji: '📚', duration: 20_000, energy: 5 },
+    { description: 'working out what he can afford this week', emoji: '🧮', duration: 20_000, energy: 0 },
+  ],
+  Lucia: [
+    { description: 'checking the time before pickup', emoji: '🕒', duration: 20_000, energy: 5 },
+    { description: 'cooking far more than anyone asked for', emoji: '🌽', duration: 20_000, cost: 10, energy: 20 },
+    { description: 'dancing while she wipes down', emoji: '💃', duration: 20_000, energy: 15 },
+  ],
+  Bryan: [
+    { description: 'queueing for bubble tea', emoji: '🧋', duration: 20_000, cost: 5, energy: 0 },
+    { description: 'arguing about a game', emoji: '🎮', duration: 20_000, energy: 10 },
+    { description: 'putting off an assignment', emoji: '😬', duration: 20_000, energy: 5 },
+  ],
+  Farah: [
+    { description: 'running netball drills', emoji: '🏐', duration: 20_000, energy: 25 },
+    { description: 'reorganising her study timetable', emoji: '📔', duration: 20_000, energy: 5 },
+    { description: 'finding somewhere to pray', emoji: '🕌', duration: 20_000, energy: 0 },
+  ],
+  Anh: [
+    { description: 'photographing the morning light', emoji: '📷', duration: 20_000, energy: 10 },
+    { description: 'working out what she can send home', emoji: '💱', duration: 20_000, energy: 0 },
+    { description: 'cycling the long way back', emoji: '🚲', duration: 20_000, energy: 20 },
+  ],
+  Tomoko: [
+    { description: 'sketching whoever is nearest', emoji: '✏️', duration: 20_000, energy: 5 },
+    { description: 'rehearsing a sentence before saying it', emoji: '💭', duration: 20_000, energy: 5 },
+    { description: 'browsing a thrift rail', emoji: '👕', duration: 20_000, cost: 10, energy: 10 },
+  ],
+  Daniyal: [
+    { description: 'marking a stack of problem sets', emoji: '📝', duration: 20_000, energy: 15 },
+    { description: 'arguing a point for the sport of it', emoji: '🗣️', duration: 20_000, energy: 10 },
+    { description: 'brewing tea for whoever is in the room', emoji: '🫖', duration: 20_000, cost: 3, energy: 5 },
+  ],
+  Grace: [
+    { description: 'reshelving a trolley of returns', emoji: '📚', duration: 20_000, energy: 15 },
+    { description: 'video-calling her mother', emoji: '📞', duration: 20_000, energy: 0 },
+    { description: 'pressing food on a student', emoji: '🍱', duration: 20_000, cost: 6, energy: 5 },
+  ],
+  Priya: [
+    { description: 'going out for a dawn run', emoji: '🏃', duration: 20_000, energy: 25 },
+    { description: 'writing up a hall incident', emoji: '🗂️', duration: 20_000, energy: 10 },
+    { description: 'checking on a student who went quiet', emoji: '🚪', duration: 20_000, energy: 10 },
+  ],
+  Hafiz: [
+    { description: 'walking the perimeter again', emoji: '🚶', duration: 20_000, energy: 20 },
+    { description: 'taking his prayer break', emoji: '🕌', duration: 20_000, energy: 0 },
+    { description: 'tinkering with the bike', emoji: '🛠️', duration: 20_000, cost: 5, energy: 15 },
+  ],
+  Meihua: [
+    { description: 'stacking trays nobody returned', emoji: '🧺', duration: 20_000, energy: 25 },
+    { description: 'line dancing at the void deck', emoji: '💃', duration: 20_000, energy: 15 },
+    { description: 'checking her 4D numbers', emoji: '🎫', duration: 20_000, cost: 2, energy: 0 },
+  ],
+  Arun: [
+    { description: 'flipping dough for the practice of it', emoji: '🥞', duration: 20_000, energy: 20 },
+    { description: 'winding up the stall next door', emoji: '😏', duration: 20_000, energy: 5 },
+    { description: 'listening to the cricket', emoji: '📻', duration: 20_000, energy: 0 },
+  ],
+  Nadia: [
+    { description: 'checking a requisition twice', emoji: '🩻', duration: 20_000, energy: 10 },
+    { description: 'swimming lengths before shift', emoji: '🏊', duration: 20_000, energy: 25 },
+    { description: 'practising calligraphy', emoji: '🖌️', duration: 20_000, energy: 0 },
+  ],
+  Tavita: [
+    { description: 'doing a slow round of the gates', emoji: '🔦', duration: 20_000, energy: 20 },
+    { description: 'practising his part for Sunday', emoji: '🎶', duration: 20_000, energy: 5 },
+    { description: 'queueing at the remittance counter', emoji: '💸', duration: 20_000, cost: 10, energy: 5 },
+  ],
+  Sofia: [
+    { description: 'demonstrating an exercise on herself', emoji: '🤸', duration: 20_000, energy: 20 },
+    { description: 'putting music on too loud', emoji: '🔊', duration: 20_000, energy: 5 },
+    { description: 'telling someone to fix their posture', emoji: '🧍', duration: 20_000, energy: 5 },
+  ],
+  Haoran: [
+    { description: 'running one more measurement', emoji: '📈', duration: 20_000, energy: 15 },
+    { description: 'playing a Go problem', emoji: '⚫', duration: 20_000, energy: 5 },
+    { description: 'ignoring a message he will answer at midnight', emoji: '📵', duration: 20_000, energy: 0 },
+  ],
+  Siti: [
+    { description: 'pinning a hem', emoji: '📏', duration: 20_000, energy: 10 },
+    { description: 'unpicking somebody else’s bad seam', emoji: '🧵', duration: 20_000, energy: 10 },
+    { description: 'watching a serial on her phone', emoji: '📺', duration: 20_000, energy: 0 },
+  ],
+  Gordon: [
+    { description: 'cutting garnish for service', emoji: '🍋', duration: 20_000, energy: 10 },
+    { description: 'putting a record on before opening', emoji: '🎷', duration: 20_000, energy: 0 },
+    { description: 'cooking staff supper', emoji: '🍜', duration: 20_000, cost: 12, energy: 15 },
+  ],
+  Meera: [
+    { description: 'watching a pipeline fail again', emoji: '💻', duration: 20_000, energy: 10 },
+    { description: 'looking for a kingfisher', emoji: '🐦', duration: 20_000, energy: 10 },
+    { description: 'reading a menu for shellfish', emoji: '🦐', duration: 20_000, energy: 5 },
+  ],
 };
 
 export function activitiesForName(name?: string): Activity[] {
@@ -494,8 +621,15 @@ export function activitiesForName(name?: string): Activity[] {
 
 export const ENGINE_ACTION_DURATION = 30000;
 
-// Bound the number of pathfinding searches we do per game step.
-export const MAX_PATHFINDS_PER_STEP = 16;
+// Bound the number of pathfinding searches we do per game step. This is a budget
+// for the WHOLE cast, not per agent, and it resets once a second (STEP_INTERVAL),
+// so it has to scale with the roster or the town jams at the moments everybody
+// re-routes at once — the 08:15 commute block, a scenario calling its cast
+// together, the walk home at six. At 16 with fifty agents those moments took
+// three or four seconds to clear and filled the logs with "Reached max pathfinds
+// for this step"; 32 keeps the same ~1.5 searches per agent per second the
+// twenty-five-agent town had.
+export const MAX_PATHFINDS_PER_STEP = 32;
 
 export const DEFAULT_NAME = 'Me';
 
@@ -617,6 +751,18 @@ export const FATIGUE_SOCIAL_CUTOFF = 80;
 // for a "night, ah" and a reply, not a conversation.
 export const FATIGUE_MAX_CONVERSATION_MESSAGES = 2;
 
+// --- Obligations outrank conversations ---
+// Messages an agent who is already due somewhere fixed — their shift, the
+// commute to it, a prayer, a service, their own bed — will exchange before
+// making their excuses and going. Deliberately a couple more than the fatigue
+// cut-off above: this fires in the middle of the day rather than at a natural
+// goodnight, so the exit needs room to read as one ("sorry, I'm late for
+// work — later, ah?") rather than as someone walking off mid-sentence.
+// Conversations belonging to a scenario are exempt entirely: the scenario IS
+// the commitment there, and cutting one short to attend a work block would
+// break the very thing being measured.
+export const OBLIGATION_MAX_CONVERSATION_MESSAGES = 4;
+
 // --- Reflection trigger ---
 // Accumulated importance (across memories formed since the last reflection)
 // that tips an agent into reflecting. The original 500 was unreachable: memories
@@ -666,9 +812,17 @@ export const MAX_OBSERVATIONS_PER_STEP = 32;
 // town, at which point any fixed threshold fires on everyone and the whole
 // ambient stream gets promoted into long-term memory.
 export const AFFINITY_STANDOUT_DELTA = 15;
-// Cap on an agent's remembered dedupe fingerprints. Sized above the cast so a
-// crowded location can't push a subject out and cause repeat observations.
-export const MAX_OBSERVED_SUBJECTS = 16;
+// Cap on an agent's remembered dedupe fingerprints. It has to sit above the
+// largest crowd one agent can perceive at once, not above the cast: a subject
+// pushed out of this list looks new again on the next pass, so the same
+// observation re-fires every OBSERVATION_INTERVAL_MS, eats the per-step budget
+// that real changes need, and pays for an embedding each time it clears
+// OBSERVATION_EMBED_MIN_IMPORTANCE. Perception reaches SCHEDULE_CHAT_RADIUS, and
+// the biggest cohort that shares a spot is the polytechnic's eleven staff and
+// students plus the eight who live on the campus — comfortably past 16 once the
+// cast reached fifty. Matched to MAX_OBSERVATIONS_PER_STEP, which is the real
+// ceiling on how many distinct things one pass can report anyway.
+export const MAX_OBSERVED_SUBJECTS = 32;
 // Observations are pruned far more aggressively than memories — they're ambient
 // context with a short useful life, and anything worth keeping was already
 // promoted into `memories` with an embedding. Twelve in-game days, i.e.
@@ -777,3 +931,15 @@ export const MEAL_COST = 8;
 // Fatigue gained on arriving at an "away" (non-home, non-meal) schedule step —
 // this stands in for the travel + exertion of going out to do something.
 export const AWAY_STEP_FATIGUE = 8;
+
+// --- Interviews (convex/interview.ts) ---
+// An interview is a question put to a character from outside the simulation: it
+// writes nothing back, so these only size the prompt.
+// How many of the character's most recent memories to lay in front of them.
+// Read straight off the table in recency order rather than searched, so this is
+// a window on their recent life rather than a targeted recall.
+export const INTERVIEW_MEMORY_COUNT = 12;
+// How many lines of the running interview transcript to carry into each prompt.
+// The transcript itself lives in the browser and can grow indefinitely; this
+// caps what any one question costs.
+export const INTERVIEW_HISTORY_TURNS = 12;

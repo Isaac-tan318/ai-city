@@ -5,12 +5,13 @@ import { Id } from '../../convex/_generated/dataModel';
 import closeImg from '../../assets/close.svg';
 import { CharacterIcon } from './CharacterIcon';
 import { relativeTime } from './PlayerDetails';
+import { InterviewPopup } from './InterviewPopup';
 import { useEscapeKey } from '../hooks/useEscapeKey';
 import { useSendInput } from '../hooks/sendInput';
 import { useServerGame } from '../hooks/serverGame';
 import { toastOnError } from '../toasts';
 import { GameId } from '../../convex/aiTown/ids';
-import { CITY_LOCATIONS, nearestLocation } from '../../data/cityLocations';
+import { CITY_LOCATIONS, nearestLocation, workplaceFor } from '../../data/cityLocations';
 import {
   financialPressure,
   gaugeColor,
@@ -67,6 +68,8 @@ type Row = {
   selfSummary?: string;
   selfSummaryDay?: number;
   identity: string;
+  // Their place of work, from the same table the schedule walks them to.
+  workplace?: { location: { name: string }; activity: string };
   inScenario: boolean;
   // Set while a manual hold is in effect (see the agentSetLocation input).
   pinnedAt?: string;
@@ -118,7 +121,12 @@ export function AgentsPanel({
   engineId: Id<'engines'>;
   onClose: () => void;
 }) {
-  useEscapeKey(onClose);
+  // Whether the interview panel is up for the selected agent. Declared before
+  // the Esc binding below so one Esc closes the interview first and a second
+  // closes this panel. Reset when the selection changes, so it can never stay
+  // open labelled with one character while pointed at another.
+  const [interviewOpen, setInterviewOpen] = useState(false);
+  useEscapeKey(onClose, !interviewOpen);
   const game = useServerGame(worldId);
 
   const setAgentState = useSendInput(engineId, 'agentSetState');
@@ -164,6 +172,7 @@ export function AgentsPanel({
         selfSummary: agentDescription?.selfSummary,
         selfSummaryDay: agentDescription?.selfSummaryDay,
         identity: agentDescription?.identity ?? '',
+        workplace: workplaceFor(description?.name ?? player.name ?? ''),
         inScenario: !!(agent.scenarioId || agent.scenarioInstruction),
         pinnedAt: agent.pin?.locationId,
       });
@@ -180,6 +189,7 @@ export function AgentsPanel({
     setDraft(selected.draft);
     setLocationDraft(nearestLocation(selected.position).id);
     setShowMemories(false);
+    setInterviewOpen(false);
   }
 
   const memories = useQuery(
@@ -336,6 +346,20 @@ export function AgentsPanel({
                       📍 {currentLocation?.name} · {selected.position.x}, {selected.position.y}
                     </div>
                   </div>
+                  {/* Everything else on this screen edits the agent. This one only
+                      asks them something — nothing said in an interview reaches
+                      the simulation. */}
+                  <button
+                    type="button"
+                    onClick={() => setInterviewOpen(true)}
+                    className="button ml-auto min-w-0 shrink-0 text-white shadow-solid text-sm cursor-pointer pointer-events-auto"
+                    title={`Ask ${selected.name} questions — they won't remember it`}
+                  >
+                    <div className="h-full flex items-center gap-2 bg-clay-700 px-3 py-2">
+                      <span aria-hidden>🎤</span>
+                      Interview
+                    </div>
+                  </button>
                 </div>
 
                 {/* Wellbeing */}
@@ -506,6 +530,18 @@ export function AgentsPanel({
                         <p className="mt-1 text-xs leading-snug text-white/75">
                           {selected.selfSummary ?? selected.identity}
                         </p>
+                        {/* Where their weekday actually goes. The identity text
+                            gives an occupation; this gives the place on the map
+                            their schedule sends them to. */}
+                        {selected.workplace && (
+                          <p className="mt-1.5 text-[11px] leading-snug text-white/50">
+                            💼 Works at{' '}
+                            <span className="text-amber-200/90">
+                              {selected.workplace.location.name}
+                            </span>{' '}
+                            — {selected.workplace.activity}
+                          </p>
+                        )}
                         {selected.selfSummary && (
                           <>
                             <div className="mt-2 text-[10px] uppercase tracking-widest text-white/35">
@@ -606,6 +642,14 @@ export function AgentsPanel({
           </button>
         </div>
       </div>
+      {interviewOpen && selected && (
+        <InterviewPopup
+          worldId={worldId}
+          playerId={selected.playerId}
+          name={selected.name}
+          onClose={() => setInterviewOpen(false)}
+        />
+      )}
     </div>
   );
 }

@@ -37,6 +37,12 @@ export type SchedStep = {
   activity: string;
   emoji?: string;
   description: string;
+  // True for the deterministic obligations this module adds (the shift, the
+  // commute to it, prayer, a service, sleep) — as opposed to the flexible
+  // blocks the LLM planned around them. The engine reads it to decide what an
+  // agent may put off: you can let a walk to the park wait while you finish a
+  // conversation; you cannot let your shift wait.
+  fixed?: boolean;
 };
 
 // Does this block have the character asleep? Lives here (rather than in the
@@ -63,6 +69,20 @@ const SHIFT_START = 9 * 60; // 09:00
 const SHIFT_END = 18 * 60; // 18:00
 const LUNCH_START = 12 * 60; // 12:00
 const LUNCH_END = 13 * 60; // 13:00
+
+// How long before a shift the commute block starts. The shift block alone only
+// says "be at work from 09:00", so an agent set off AT nine and arrived
+// whenever the walk happened to end — and any conversation picked up on the way
+// pushed that later still, which is how the town ended up drifting into work
+// mid-morning. This is a step of its own, pointed at the workplace, so the walk
+// happens before the shift rather than eating the start of it.
+//
+// Sized off the map rather than picked: agents move at `movementSpeed` (1.25
+// tiles per real second) and one real second is one game-minute during waking
+// hours, so 45 game-minutes buys ~56 tiles of path — further than any corner of
+// the 70x44 city is from any other. Arriving early is fine; they mill about at
+// the workplace until the shift step takes over.
+export const COMMUTE_MINUTES = 45;
 
 // Sunday Christian service — observed at the character's home.
 const SERVICE_START = 10 * 60; // 10:00
@@ -100,17 +120,30 @@ const WAKE_ROUTINE_MINUTES = 45;
 // same night rather than reading as a second, separate shift.
 //
 // Deliberately short: "at night they sleep" is the rule, and this is the
-// exception that keeps the hospital from going dark. Both names are people the
-// persona library already calls shift workers (Nurul "Rotating shift worker",
-// Dylan "Shift work"). Tiago is NOT here — he is a night owl, not a rostered
-// worker, and the late bedtime SLEEP_RHYTHMS gives him covers that already.
+// exception that keeps the hospital and the hotel from going dark. Every name
+// here is someone the persona library already calls a shift worker (Nurul
+// "Rotating shift worker", Dylan "Shift work", Somchai "Shift-work schedule",
+// Hafiz "Shift-work schedule"). Tiago, Gordon and Haoran are NOT here — they are
+// night owls, not rostered workers, and the late bedtime sleepWindowFor gives
+// them covers that already. Nadia is a rotating-shift worker on paper but is left
+// off on purpose: four people out all night is as far as this should go before
+// the town stops reading as asleep.
 const NIGHT_SHIFT_ROSTER: Record<string, number[]> = {
   Nurul: [1, 2], // Tuesday and Wednesday nights on the ward
   Dylan: [3, 4], // Thursday and Friday nights on the ambulance
+  Somchai: [2, 5], // Wednesday and Saturday nights turning the hotel over
+  Hafiz: [1, 4], // Tuesday and Friday nights on the hotel detail
 };
 
+// Nobody is rostered on a Monday night, and nobody on a Sunday one either. That
+// is not a scheduling preference, it is what keeps day 1 of a fresh world an
+// ordinary weekday for all fifty: a Sunday-night shift runs into Monday morning
+// (the sleeping-it-off block), and a Monday-night one owns Monday's small hours,
+// because a game-day runs 06:00 to 06:00. `convex/roster.test.ts` asserts it.
+
 // Is this character on the night shift that STARTS on `dayNumber`? If so they
-// are also at their workplace from midnight to 06:00 on `dayNumber + 1`.
+// are at their workplace from 22:00 through to 06:00 — and because a game-day
+// runs 06:00 → 06:00, both of those hours belong to `dayNumber` itself.
 export function worksNightShift(characterName: string, dayNumber: number): boolean {
   const nights = NIGHT_SHIFT_ROSTER[characterName];
   return !!nights && nights.includes(dayOfWeekIndex(dayNumber));
@@ -167,21 +200,78 @@ function dayOfWeekIndex(dayNumber: number): number {
 
 // ---- Obligation construction ---------------------------------------------
 
-function stepAt(loc: CityLocation, activity: string, emoji: string, description: string): SchedStep {
+// `locationIdOverride` is how the home-based obligations (sleep, getting up,
+// prayer, a service) label themselves 'home' rather than 'hdb' / 'shophouses' /
+// 'university'. The LLM planner already uses 'home' for a step at the character's
+// own address, and three things downstream read the step's locationId and mean
+// "is this the building they work in": workLeashAnchor, the isOwnWorkplace flag
+// on short-term accrual, and the contextual-event pool. Labelling a night in bed
+// with the building's own id made all three fire for anyone whose home and
+// workplace share a location — the live-in helper, the estate's site supervisor,
+// the social worker, and now every student who sleeps on the campus they study
+// at. The destination is still the home tile either way; only the label changes.
+function stepAt(
+  loc: CityLocation,
+  activity: string,
+  emoji: string,
+  description: string,
+  locationIdOverride?: string,
+): SchedStep {
   return {
     startMinute: 0, // overwritten with the interval start when flattened
-    locationId: loc.id,
+    locationId: locationIdOverride ?? loc.id,
     destination: { x: loc.x, y: loc.y },
     activity,
     emoji,
     description,
+    // Everything built through here is an obligation, by construction.
+    fixed: true,
+  };
+}
+
+// When a character is up, dressed and available to be somewhere — the end of
+// the getting-up block that follows their morning sleep. Nothing may be
+// scheduled before it, which is what keeps the commute below from reaching back
+// into somebody's night.
+function upAndAboutMinute(characterName: string, dayNumber: number): number {
+  if (worksNightShift(characterName, dayNumber - 1)) {
+    return POST_NIGHT_SLEEP_END + WAKE_ROUTINE_MINUTES;
+  }
+  return sleepWindowFor(characterName).wake + WAKE_ROUTINE_MINUTES;
+}
+
+// The walk to work, ending exactly when the shift starts. Points at the
+// workplace so the agent is already travelling there when the shift block takes
+// over, rather than setting off at the moment they are due.
+//
+// Clamped to start no earlier than they are up: a night owl on a 09:00 shift
+// would otherwise be pulled out of bed at 08:15 by their own commute. Somebody
+// who gets up too late for any commute at all simply does not get one — their
+// sleep rhythm and their shift genuinely conflict, and quietly shortening the
+// night is not this module's call to make.
+function commuteInterval(
+  characterName: string,
+  dayNumber: number,
+  loc: CityLocation,
+  shiftStart: number,
+): Interval | undefined {
+  const start = Math.max(0, shiftStart - COMMUTE_MINUTES, upAndAboutMinute(characterName, dayNumber));
+  if (start >= shiftStart) return undefined;
+  return {
+    start,
+    end: shiftStart,
+    step: stepAt(loc, 'heading to work', '🚇', 'on the way to work'),
   };
 }
 
 // The sleep blocks (and the short getting-up block that follows each) for a
-// character on a given game-day, as intervals. An ordinary sleep window runs
-// through midnight, so it lands as two pieces — the tail of last night at the
-// top of the day and the start of tonight at the bottom.
+// character on a given game-day, as intervals.
+//
+// A game-day runs 06:00 → 06:00, not midnight → midnight (see
+// convex/aiTown/gameTime.ts). So the 00:00–06:00 slice of a day's schedule is
+// the small hours that FOLLOW that day's evening, and a sleep window that runs
+// through midnight lands as two pieces of one night: [bed, 24:00) played in the
+// evening and [00:00, wake) played straight after it.
 //
 // The getting-up block matters beyond flavour: waking is what resets fatigue
 // (see Agent.accrueStepShortTerm), so it needs to be a step of its own rather
@@ -189,42 +279,65 @@ function stepAt(loc: CityLocation, activity: string, emoji: string, description:
 function sleepIntervals(characterName: string, dayNumber: number): Interval[] {
   const home = homeFor(characterName);
   if (!home) return [];
-  const inBed = stepAt(home, 'sleeping at home', '😴', 'asleep in bed');
-  const gettingUp = stepAt(home, 'waking up and getting ready', '🛏️', 'up and about at home');
+  const inBed = stepAt(home, 'sleeping at home', '😴', 'asleep in bed', 'home');
+  const gettingUp = stepAt(home, 'waking up and getting ready', '🛏️', 'up and about at home', 'home');
   const wakeBlock = (from: number): Interval => ({
     start: from,
     end: Math.min(MINUTES_PER_DAY, from + WAKE_ROUTINE_MINUTES),
     step: gettingUp,
   });
   const { bed, wake } = sleepWindowFor(characterName);
+  // Came off a shift at 06:00 this morning (it began on the previous day's
+  // evening), as opposed to going on one at 22:00 tonight.
   const cameOffShift = worksNightShift(characterName, dayNumber - 1);
   const onShiftTonight = worksNightShift(characterName, dayNumber);
   const obs: Interval[] = [];
 
-  // --- The morning half of the day ---
+  // --- The small hours, at the END of this day (00:00–06:00) ---
+  // Skipped when tonight is a night shift: those hours are spent on the ward,
+  // and locationObligations lays that block down instead.
+  if (!onShiftTonight) {
+    if (bed > wake) {
+      // Asleep across midnight — this is the tail of the night that began with
+      // the evening block below.
+      if (wake > 0) obs.push({ start: 0, end: wake, step: inBed });
+    } else {
+      // A night owl or a student, whose whole sleep falls after midnight.
+      obs.push({ start: bed, end: wake, step: inBed });
+    }
+  }
+
+  // --- The morning (06:00 onward) ---
   if (cameOffShift) {
-    // They were at work until 06:00, so there is no pre-dawn sleep to place —
-    // just time to get home, and then the day sleep.
+    // They were on the ward until 06:00, so the morning is for getting home and
+    // sleeping the shift off. The walk home is a block of its own: without it
+    // the day opens on the ordinary [00:00, wake) sleep block, which reads as
+    // "asleep in bed" while they are in fact still leaving the hospital.
+    obs.push({
+      start: NIGHT_SHIFT_END,
+      end: POST_NIGHT_SLEEP_START,
+      step: stepAt(
+        home,
+        'heading home after the night shift',
+        '🏠',
+        'on the way home from a night on shift',
+        'home',
+      ),
+    });
     obs.push({
       start: POST_NIGHT_SLEEP_START,
       end: POST_NIGHT_SLEEP_END,
-      step: stepAt(home, 'sleeping off the night shift', '😴', 'asleep after a night on shift'),
+      step: stepAt(home, 'sleeping off the night shift', '😴', 'asleep after a night on shift', 'home'),
     });
     obs.push(wakeBlock(POST_NIGHT_SLEEP_END));
-  } else if (bed > wake) {
-    // The ordinary case: asleep across midnight, so the day opens in bed.
-    if (wake > 0) obs.push({ start: 0, end: wake, step: inBed });
-    obs.push(wakeBlock(wake));
   } else {
-    // A night owl, whose whole sleep lands after midnight and inside this day.
-    obs.push({ start: bed, end: wake, step: inBed });
     obs.push(wakeBlock(wake));
   }
 
-  // --- The evening half ---
+  // --- The evening ---
   // Dropped when they leave for the night shift at 22:00 instead of turning in.
-  // A night owl's block was already placed above: their bedtime belongs to the
-  // small hours, which this day's frame puts at its start, not its end.
+  // A night owl has no evening block: their bedtime is in the small hours, which
+  // this day's frame puts at its start even though the engine reaches them last.
   if (!onShiftTonight && bed > wake) {
     obs.push({ start: bed, end: MINUTES_PER_DAY, step: inBed });
   }
@@ -243,20 +356,21 @@ function locationObligations(characterName: string, dayNumber: number): Interval
   // is worth keeping honest.
   obs.push(...sleepIntervals(characterName, dayNumber));
 
-  // Night shift, for the handful of characters rostered onto one. The two halves
-  // of a single night land on consecutive game-days: the small hours belong to
-  // the shift that started the evening before.
+  // Night shift, for the handful of characters rostered onto one. Both halves of
+  // a single night live on the SAME game-day, because a game-day runs 06:00 →
+  // 06:00: the 22:00–24:00 block and the 00:00–06:00 block that follows it are
+  // one shift, walked in that order.
   const workplace = CHARACTER_WORKPLACES[characterName];
   const nightDuty = hasNightShiftDuty(characterName, dayNumber);
   if (workplace && nightDuty) {
     const loc = getLocationById(workplace.locationId);
     if (loc) {
       const onDuty = stepAt(loc, workplace.activity, '🌙', 'on the night shift');
-      if (worksNightShift(characterName, dayNumber - 1)) {
-        obs.push({ start: 0, end: NIGHT_SHIFT_END, step: onDuty });
-      }
       if (worksNightShift(characterName, dayNumber)) {
+        const commute = commuteInterval(characterName, dayNumber, loc, NIGHT_SHIFT_START);
+        if (commute) obs.push(commute);
         obs.push({ start: NIGHT_SHIFT_START, end: MINUTES_PER_DAY, step: onDuty });
+        obs.push({ start: 0, end: NIGHT_SHIFT_END, step: onDuty });
       }
     }
   }
@@ -266,6 +380,8 @@ function locationObligations(characterName: string, dayNumber: number): Interval
   if (workplace && dow < 5 && !nightDuty) {
     const loc = getLocationById(workplace.locationId);
     if (loc) {
+      const commute = commuteInterval(characterName, dayNumber, loc, SHIFT_START);
+      if (commute) obs.push(commute);
       obs.push({
         start: SHIFT_START,
         end: SHIFT_END,
@@ -286,7 +402,7 @@ function locationObligations(characterName: string, dayNumber: number): Interval
       obs.push({
         start: SERVICE_START,
         end: SERVICE_END,
-        step: stepAt(loc, 'observing Sunday service at home', '⛪', 'Sunday service at home'),
+        step: stepAt(loc, 'observing Sunday service at home', '⛪', 'Sunday service at home', 'home'),
       });
     }
   }
@@ -298,7 +414,7 @@ function locationObligations(characterName: string, dayNumber: number): Interval
       obs.push({
         start: FRIDAY_PRAYER_START,
         end: FRIDAY_PRAYER_END,
-        step: stepAt(loc, 'observing Friday prayer at home', '🕌', 'Friday prayer at home'),
+        step: stepAt(loc, 'observing Friday prayer at home', '🕌', 'Friday prayer at home', 'home'),
       });
     }
   }
@@ -313,6 +429,14 @@ function locationObligations(characterName: string, dayNumber: number): Interval
 function toIntervals(schedule: SchedStep[]): Interval[] {
   const sorted = [...schedule].sort((a, b) => a.startMinute - b.startMinute);
   const out: Interval[] = [];
+  // A day is a ring, not a line: the engine walks it from 06:00 round to 06:00
+  // (see convex/aiTown/gameTime.ts), so the stretch before the first entry is
+  // covered by the LAST one, exactly as midnight-to-06:00 follows the evening.
+  // Without this an LLM plan that opens at 07:00 left 00:00–07:00 with no step
+  // at all, and an agent reaching it just stood there.
+  if (sorted.length > 0 && sorted[0].startMinute > 0) {
+    out.push({ start: 0, end: sorted[0].startMinute, step: sorted[sorted.length - 1] });
+  }
   for (let i = 0; i < sorted.length; i++) {
     const start = sorted[i].startMinute;
     const end = i + 1 < sorted.length ? sorted[i + 1].startMinute : MINUTES_PER_DAY;

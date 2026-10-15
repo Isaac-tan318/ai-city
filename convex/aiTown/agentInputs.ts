@@ -454,6 +454,32 @@ export const agentInputs = {
     },
     handler: (game, now, args) => {
       const description = Descriptions[args.descriptionIndex];
+      if (!description) {
+        throw new Error(`No character at description index ${args.descriptionIndex}`);
+      }
+      // Idempotent by name. `init` tops a world up to the full roster, so on a
+      // world that grew from 25 characters to 50 it queues creates for the 25 it
+      // cannot see yet — and the queue takes a moment to drain, so a second
+      // `init` (npm run dev runs one through `predev`) can queue the same people
+      // again before the first batch lands. A duplicate is not a cosmetic
+      // problem: the two would share a name, a home tile, a workplace and a
+      // ground-truth profile, and homes.test.ts's whole premise is that no two
+      // characters sleep on the same square.
+      //
+      // The check lives here rather than in `init` on purpose. `init` would have
+      // to scan the `inputs` table to see what is already queued, and that table
+      // is written several times a second by a running engine — the read set
+      // loses the optimistic-concurrency race almost every time, which would
+      // leave `convex dev --run init --until-success` retrying forever against a
+      // busy world. In here the same question is answered from in-memory game
+      // state, with no reads at all.
+      for (const player of game.world.players.values()) {
+        const name = player.name ?? game.playerDescriptions.get(player.id)?.name;
+        if (name === description.name) {
+          console.debug(`${description.name} is already in the world; skipping create.`);
+          return null;
+        }
+      }
       const playerId = Player.join(
         game,
         now,

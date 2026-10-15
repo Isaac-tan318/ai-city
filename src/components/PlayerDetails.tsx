@@ -6,12 +6,14 @@ import closeImg from '../../assets/close.svg';
 import interactImg from '../../assets/interact.svg';
 import { SelectElement, SelectedElement } from './Player';
 import { ConversationPopup } from './ConversationPopup';
+import { InterviewPopup } from './InterviewPopup';
 import { ScenarioCreator } from './ScenarioCreator';
 import { toastOnError } from '../toasts';
 import { useSendInput } from '../hooks/sendInput';
 import { GameId } from '../../convex/aiTown/ids';
 import { ServerGame } from '../hooks/serverGame';
 import { computeGameTime } from '../../convex/aiTown/gameTime';
+import { workplaceFor } from '../../data/cityLocations';
 import {
   affinityColor,
   affinityEmoji,
@@ -131,6 +133,15 @@ export default function PlayerDetails({
     setChatOpen(!!selection?.openChat && !isMe && !!liveConversation);
   }, [selection]);
 
+  // Asking this character questions directly, which is a thing you do TO the
+  // panel rather than to the town — see InterviewPopup. Closed whenever the
+  // selection changes, so it can never end up labelled with one character and
+  // interviewing another.
+  const [interviewOpen, setInterviewOpen] = useState(false);
+  useEffect(() => {
+    setInterviewOpen(false);
+  }, [playerId]);
+
   const previousConversation = useQuery(
     api.world.previousConversation,
     playerId ? { worldId, playerId } : 'skip',
@@ -156,6 +167,9 @@ export default function PlayerDetails({
   );
 
   const playerDescription = playerId && game.playerDescriptions.get(playerId);
+  // Their place of work, looked up by name from the same table the schedule
+  // sends them to, so the popup and the map can never disagree about it.
+  const workplace = playerDescription?.name ? workplaceFor(playerDescription.name) : undefined;
   const agentForPlayer = useMemo(() => {
     if (!playerId) return undefined;
     for (const a of game.world.agents.values()) {
@@ -416,6 +430,23 @@ export default function PlayerDetails({
             </div>
           </button>
         )}
+        {/* Put a question to them directly. Unlike "start conversation" above,
+            this never reaches the engine: they answer as themselves and then
+            forget it happened. */}
+        {!isMe && agentForPlayer && (
+          <button
+            className="button text-white shadow-solid text-xl cursor-pointer pointer-events-auto"
+            onClick={() => setInterviewOpen(true)}
+            type="button"
+          >
+            <div className="h-full bg-clay-700 flex items-center gap-2 px-3">
+              <span aria-hidden className="shrink-0">
+                🎤
+              </span>
+              <div className="leading-none">interview</div>
+            </div>
+          </button>
+        )}
         {scenarioInjector}
       </div>
       {canInvite && (
@@ -513,6 +544,18 @@ export default function PlayerDetails({
         <p className="leading-tight -m-4 bg-brown-700 text-base sm:text-sm">
           {!isMe && playerDescription?.description}
           {isMe && <i>This is you!</i>}
+          {/* Where they work. The identity text names an occupation but rarely the
+              place on the map, so "researcher" never told you to look at A*STAR
+              — and their whole weekday is spent there. */}
+          {!isMe && workplace && (
+            <>
+              <br />
+              <br />
+              <i>
+                Works at {workplace.location.name} — {workplace.activity}.
+              </i>
+            </>
+          )}
           {!isMe && inConversationWithMe && (
             <>
               <br />
@@ -686,8 +729,16 @@ export default function PlayerDetails({
           inConversationWithMe={
             chatConversation.kind === 'active' && (inConversationWithMe ?? false)
           }
-          escapeEnabled={!injectorOpen}
+          escapeEnabled={!injectorOpen && !interviewOpen}
           onClose={() => setChatOpen(false)}
+        />
+      )}
+      {interviewOpen && playerId && (
+        <InterviewPopup
+          worldId={worldId}
+          playerId={playerId}
+          name={playerDescription?.name ?? 'this resident'}
+          onClose={() => setInterviewOpen(false)}
         />
       )}
     </>

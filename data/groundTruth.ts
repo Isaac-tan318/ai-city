@@ -512,6 +512,450 @@ export const groundTruth: Record<string, GroundTruthProfile> = {
     budgetLimit: 40,
     communicationStyle: 'Friendly and indirect',
   },
+
+  // --- The 50-agent cast -----------------------------------------------------
+  // Distilled from each profile in data/characters.ts the same way as the entries
+  // above: a hard taboo only where the profile records a religious rule, an
+  // allergy or a legal one, everything else as an essential need or a preference.
+  // None of these are invented the way the three [ADDED] constraints above are.
+  Faisal: {
+    culturalBackground: 'Arab Saudi; recently arrived investor',
+    religion: 'Muslim',
+    hardTaboos: [
+      'Halal only — pork and anything cooked with alcohol are absolutely out',
+      'No alcohol, and he will not attend an event whose centre of gravity is drinking',
+    ],
+    essentialNeeds: [
+      'Prayer times respected, with somewhere clean and private to pray',
+      'Evenings kept free for his family',
+    ],
+    preferences: [
+      'Dates, lamb dishes, Arabic coffee',
+      'Somewhere with a bit of standing — dislikes crowded informal spaces',
+      'Strongly prefers to host and pay, and is uncomfortable being paid for',
+    ],
+    budgetLimit: 0,
+    communicationStyle: 'Polite and formal',
+  },
+  Somchai: {
+    culturalBackground: 'Northern Thai; migrant service worker',
+    religion: 'Buddhist',
+    hardTaboos: [],
+    essentialNeeds: [
+      'A plan that fits around a shift rota he does not control',
+      'Cheap enough that he is not quietly going without to afford it',
+    ],
+    preferences: [
+      'Thai spicy food, noodles, mango sticky rice',
+      'Informal places; very formal dining makes him uncomfortable',
+      'Splits quietly and will never let someone else cover him',
+    ],
+    budgetLimit: 25,
+    communicationStyle: 'Indirect; smiles when uncomfortable',
+  },
+  Katrin: {
+    culturalBackground: 'Bavarian German; skilled migrant',
+    religion: 'Secular / no religion',
+    hardTaboos: [
+      'Lactose intolerant — dairy-heavy food makes her genuinely ill',
+    ],
+    essentialNeeds: [
+      'A time and place fixed in advance; last-minute changes are a real problem for her',
+      'Somewhere she can eat without dairy in everything',
+    ],
+    preferences: [
+      'Light meals, bread, salad, coffee',
+      'Dislikes very oily food',
+      'Strict AA; uncomfortable being treated',
+      'Quiet enough to hear the person opposite',
+    ],
+    budgetLimit: 70,
+    communicationStyle: 'Direct and concise',
+  },
+  Pilar: {
+    culturalBackground: 'Andalusian Spanish; long-settled cafe owner',
+    religion: 'Catholic',
+    hardTaboos: [],
+    essentialNeeds: [
+      'Enough time to sit properly — a rushed meal defeats the point for her',
+      'An evening slot; she eats late and always has',
+    ],
+    preferences: [
+      'Tapas-style sharing, seafood, coffee',
+      'Dislikes cold or hurried meals',
+      'Wants to treat people and finds a firm refusal of hospitality rude',
+      'May avoid meat on some Lent Fridays',
+    ],
+    budgetLimit: 80,
+    communicationStyle: 'Expressive and relational',
+  },
+  Danuta: {
+    culturalBackground: 'Polish; long-term care worker',
+    religion: 'Catholic',
+    hardTaboos: [],
+    essentialNeeds: [
+      'Timing that survives a care emergency — she may have to drop out at short notice',
+      'Somewhere she can sit down; she is tired most of the time',
+    ],
+    preferences: [
+      'Soup, home-style meals, potatoes',
+      'Dislikes expensive meals she considers wasteful',
+      'Modest gifts only; extravagance embarrasses her',
+      'May avoid meat on Lent Fridays',
+    ],
+    budgetLimit: 25,
+    communicationStyle: 'Respectful, and direct when it matters',
+  },
+  Camille: {
+    culturalBackground: 'French; medium-term resident',
+    religion: 'Secular / no religion',
+    hardTaboos: [],
+    essentialNeeds: [
+      'A plan with an actual shape to it — she disengages from chaotic arrangements',
+    ],
+    preferences: [
+      'Good pastries, cheese, properly cooked food',
+      'Will not eat offal and is open about poor-quality food',
+      'Comfortable with AA or treating close friends',
+      'Cares how a place looks more than she admits',
+    ],
+    budgetLimit: 90,
+    communicationStyle: 'Direct but polite',
+  },
+  Sipho: {
+    culturalBackground: 'Zulu South African; graduate student',
+    religion: 'Christian, low observance',
+    hardTaboos: [
+      'Lactose intolerant — dairy-heavy food makes him ill',
+    ],
+    essentialNeeds: [
+      'A budget-friendly plan; an expensive choice quietly excludes him',
+    ],
+    preferences: [
+      'Barbecue, spicy snacks, affordable food',
+      'Dislikes expensive cafes',
+      'Comfortable with alcohol when he can afford it',
+      'Will challenge an unfair split, politely but every time',
+    ],
+    budgetLimit: 25,
+    communicationStyle: 'Direct but relaxed',
+  },
+  Lucia: {
+    culturalBackground: 'Mexican; long-term resident',
+    religion: 'Catholic',
+    hardTaboos: [],
+    essentialNeeds: [
+      'Anything scheduled has to clear school pickup — childcare wins every time',
+      'Affordable; she is on a stall assistant’s wage',
+    ],
+    preferences: [
+      'Spicy food, corn dishes, home-style meals',
+      'Dislikes expensive restaurants',
+      'Prefers a cheap shared meal to a smart one',
+      'May avoid meat on Lent Fridays',
+    ],
+    budgetLimit: 20,
+    communicationStyle: 'Warm and expressive',
+  },
+  Bryan: {
+    culturalBackground: 'Chinese Singaporean; polytechnic student',
+    religion: 'No religion; Taoist family customs',
+    hardTaboos: [],
+    essentialNeeds: [
+      'Cheap — he is on an allowance and will not say when something is out of reach',
+      'Nothing that starts early; he is genuinely not awake',
+    ],
+    preferences: [
+      'Fried chicken, bubble tea, supper after midnight',
+      'Somewhere he can be loud',
+      'Under-age, so anywhere built around drinking is out',
+    ],
+    budgetLimit: 15,
+    communicationStyle: 'Fast, jokey, interrupts',
+  },
+  Farah: {
+    culturalBackground: 'Malay Singaporean; polytechnic student',
+    religion: 'Muslim',
+    hardTaboos: [
+      'Halal only — no pork, nothing cooked with alcohol',
+      'Does not drink',
+    ],
+    essentialNeeds: [
+      'Somewhere to pray, and a schedule that does not run through maghrib',
+      'A halal option that is an actual meal, not a side salad',
+    ],
+    preferences: [
+      'Nasi lemak, mee rebus, iced Milo',
+      'Splits evenly; will not be treated by near-strangers',
+      'Uncomfortable in bar settings',
+    ],
+    budgetLimit: 20,
+    communicationStyle: 'Warm and talkative',
+  },
+  Anh: {
+    culturalBackground: 'Kinh Vietnamese; international student',
+    religion: 'Ancestor veneration; no formal religion',
+    hardTaboos: [],
+    essentialNeeds: [
+      'Genuinely cheap — a third of her stipend goes home and she will not say so',
+    ],
+    preferences: [
+      'Pho, herbs, fresh food, strong iced coffee',
+      'Dislikes very sweet drinks and heavy cream',
+      'Refuses to be treated more than once; keeps a mental ledger',
+      'Rarely drinks',
+    ],
+    budgetLimit: 15,
+    communicationStyle: 'Quiet; answers rather than volunteers',
+  },
+  Tomoko: {
+    culturalBackground: 'Japanese; one-year design exchange',
+    religion: 'Secular; Shinto-Buddhist family customs',
+    hardTaboos: [],
+    essentialNeeds: [
+      'Somewhere quiet enough to follow a conversation in her second language',
+      'A small group — a big loud one shuts her down completely',
+    ],
+    preferences: [
+      'Rice, grilled fish, clean simple flavours',
+      'Struggles with heavy chilli and very oily food',
+      'Pays her exact share and brings a small gift',
+      'Drinks very little',
+    ],
+    budgetLimit: 40,
+    communicationStyle: 'Softly spoken; long pauses before answering',
+  },
+  Daniyal: {
+    culturalBackground: 'Punjabi Pakistani; postgraduate student',
+    religion: 'Muslim',
+    hardTaboos: [
+      'Halal only — no pork, nothing cooked with alcohol',
+      'Does not drink, and will not attend an event centred on drinking',
+    ],
+    essentialNeeds: [
+      'Friday prayer protected, and prayer breaks through the day',
+      'A halal main course, not an improvised vegetarian side',
+    ],
+    preferences: [
+      'Biryani, kebabs, strong tea',
+      'Dislikes bland food',
+      'Will insist on paying for others even when he cannot spare it',
+    ],
+    budgetLimit: 30,
+    communicationStyle: 'Formal and precise; enjoys debating a point',
+  },
+  Grace: {
+    culturalBackground: 'Ilonggo Filipino; campus librarian',
+    religion: 'Catholic',
+    hardTaboos: [],
+    essentialNeeds: [
+      'Sunday morning kept for mass',
+      'Affordable — a third of her pay goes home before anything else',
+    ],
+    preferences: [
+      'Rice, grilled meat, sweet snacks, shared platters',
+      'Hates eating alone; wants a table, not a counter',
+      'Brings food to share and is embarrassed to be repaid',
+    ],
+    budgetLimit: 25,
+    communicationStyle: 'Warm and indirect; softens every refusal',
+  },
+  Priya: {
+    culturalBackground: 'Indian Singaporean; polytechnic residential staff',
+    religion: 'Hindu',
+    hardTaboos: [
+      'No beef, in any form',
+    ],
+    essentialNeeds: [
+      'To be genuinely off duty — she will not attend while on call for the hall',
+      'A vegetarian option on Fridays',
+    ],
+    preferences: [
+      'Thosai, sambar, filter coffee',
+      'Splits strictly; will not be paid for by students',
+      'Will not drink anywhere students might see her',
+    ],
+    budgetLimit: 50,
+    communicationStyle: 'Calm and clear; asks before she tells',
+  },
+  Hafiz: {
+    culturalBackground: 'Malay Singaporean; auxiliary police officer',
+    religion: 'Muslim',
+    hardTaboos: [
+      'Halal only — no pork, nothing cooked with alcohol',
+      'Does not drink',
+      'Cannot accept a gift, a discount or a free round while on duty',
+    ],
+    essentialNeeds: [
+      'Something that fits a shift rota, including nights',
+      'Friday prayer, and prayer breaks on shift',
+    ],
+    preferences: [
+      'Mee goreng, teh halia, hawker food over anything fussy',
+      'Pays his own share, always',
+    ],
+    budgetLimit: 35,
+    communicationStyle: 'Economical; says the necessary thing once',
+  },
+  Meihua: {
+    culturalBackground: 'Chinese Singaporean; hawker centre cleaner',
+    religion: 'Taoist-Buddhist',
+    hardTaboos: [],
+    essentialNeeds: [
+      'Cheap, and she will refuse outright rather than admit that is why',
+      'Early — she is up at five and asleep by nine',
+      'Somewhere she can sit; her back will not take standing about',
+    ],
+    preferences: [
+      'Porridge, steamed fish, hot soup',
+      'Dislikes cold food and anything wasteful',
+      'Vegetarian on the first and fifteenth of the lunar month',
+      'Does not drink',
+    ],
+    budgetLimit: 10,
+    communicationStyle: 'Loud, abrupt, mostly in Hokkien',
+  },
+  Arun: {
+    culturalBackground: 'Tamil Singaporean; hawker stall owner',
+    religion: 'Hindu',
+    hardTaboos: [
+      'No beef, in any form',
+    ],
+    essentialNeeds: [
+      'Early evening at the latest — he is up at four and cannot do late nights',
+    ],
+    preferences: [
+      'Prata, fish curry, sweet teh',
+      'Vegetarian on prayer days',
+      'Thinks most restaurant prices are an insult',
+      'A beer with friends, never before a shift',
+    ],
+    budgetLimit: 25,
+    communicationStyle: 'Teasing; jokes his way through everything',
+  },
+  Nadia: {
+    culturalBackground: 'Egyptian Arab; hospital radiographer',
+    religion: 'Muslim',
+    hardTaboos: [
+      'Halal only — no pork, nothing cooked with alcohol',
+      'Does not drink',
+    ],
+    essentialNeeds: [
+      'Timing that survives a rotating shift pattern she does not control',
+      'Prayer breaks; Friday when she is off shift',
+    ],
+    preferences: [
+      'Koshari, grilled meat, mint tea',
+      'Dislikes heavily sweetened coffee',
+      'Splits exactly and keeps favours out of work',
+      'Dislikes being photographed',
+    ],
+    budgetLimit: 55,
+    communicationStyle: 'Direct; will correct an error in front of the room',
+  },
+  Tavita: {
+    culturalBackground: 'Samoan; security guard on contract',
+    religion: 'Christian (Congregational)',
+    hardTaboos: [
+      'Sunday is for church and rest — he will not be booked for anything on it',
+    ],
+    essentialNeeds: [
+      'Cheap; most of his pay goes home before he sees it',
+      'Early — he starts work before six',
+    ],
+    preferences: [
+      'Taro, roast pork, coconut, anything grilled',
+      'Small portions are not a meal to him',
+      'Stopped drinking entirely when he joined the choir',
+      'Gives more than he can afford and refuses repayment',
+    ],
+    budgetLimit: 15,
+    communicationStyle: 'Quiet and formal; uses titles',
+  },
+  Sofia: {
+    culturalBackground: 'Colombian; hospital physiotherapist',
+    religion: 'Catholic',
+    hardTaboos: [],
+    essentialNeeds: [
+      'People, and enough life in the room to make it worth leaving the house for',
+    ],
+    preferences: [
+      'Arepas, grilled meat, fresh juice',
+      'Finds under-seasoned food genuinely depressing',
+      'Rounds up and waves away the change',
+      'Would rather dance than drink',
+    ],
+    budgetLimit: 60,
+    communicationStyle: 'Loud, affectionate, stands close',
+  },
+  Haoran: {
+    culturalBackground: 'Han Chinese; research engineer on contract',
+    religion: 'Atheist',
+    hardTaboos: [],
+    essentialNeeds: [
+      'Late — a morning commitment costs him the part of the day he actually works',
+    ],
+    preferences: [
+      'Noodles, dumplings, anything still open at one in the morning',
+      'A cold sandwich is not a meal',
+      'Transfers his exact share the same evening',
+      'Drinks only when a group clearly expects it',
+    ],
+    budgetLimit: 50,
+    communicationStyle: 'Terse; answers the question asked and no more',
+  },
+  Siti: {
+    culturalBackground: 'Malay Singaporean; tailor on the shophouse row',
+    religion: 'Muslim',
+    hardTaboos: [
+      'Halal only — no pork, nothing cooked with alcohol',
+      'Does not drink',
+    ],
+    essentialNeeds: [
+      'Prayer times respected through the day',
+      'Not a bar, and not a gathering where she would be the only woman',
+    ],
+    preferences: [
+      'Lontong, kuih, teh tarik',
+      'Wants somewhere quiet enough to hear herself think',
+      'Undercharges friends and then resents it',
+    ],
+    budgetLimit: 30,
+    communicationStyle: 'Measured; a long pause before she disagrees',
+  },
+  Gordon: {
+    culturalBackground: 'Hong Kong Chinese; bar manager on the shophouse row',
+    religion: 'Secular / no religion',
+    hardTaboos: [],
+    essentialNeeds: [
+      'Late — his day starts at four in the afternoon and nothing moves it',
+    ],
+    preferences: [
+      'Late-night roast meat, congee at three in the morning, good whisky',
+      'Does not eat before four in the afternoon',
+      'Comps freely and quietly expects loyalty back',
+    ],
+    budgetLimit: 80,
+    communicationStyle: 'Easy and disarming; steers without seeming to',
+  },
+  Meera: {
+    culturalBackground: 'Indian Singaporean; A*STAR bioinformatician',
+    religion: 'Hindu by upbringing; largely secular now',
+    hardTaboos: [
+      'Severe shellfish allergy — a kitchen that handles prawns is not an option, at any price',
+      'No beef',
+    ],
+    essentialNeeds: [
+      'A kitchen that can credibly say it does not cross-contaminate with shellfish',
+    ],
+    preferences: [
+      'Dosa, dark chocolate, good filter coffee',
+      'Splits evenly without discussing it',
+      'A glass of wine occasionally',
+    ],
+    budgetLimit: 60,
+    communicationStyle: 'Precise and understated',
+  },
 };
 
 export function groundTruthFor(name: string): GroundTruthProfile | undefined {

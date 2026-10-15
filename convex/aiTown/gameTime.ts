@@ -73,6 +73,22 @@ export function cycleProgressForHour(hour: number): number {
   return AWAKE_MS + (h / 6) * DEEP_NIGHT_MS;
 }
 
+// Real-world ms from one point on the game clock to another, both given as game
+// hours (0..24). A `to` at or before `from` is read as the next time round.
+//
+// The two segments run at wildly different speeds — a game-hour costs 60 real
+// seconds during the day and about 10 at night — so "game minutes × a single
+// rate" is wrong for any span that crosses midnight. That matters most for the
+// one block that always does: an agent settling into bed at 22:30 gets an
+// activity lasting until their wake-up hour, and at the flat rate that overshot
+// by minutes of real time, leaving them "asleep in bed" halfway through the
+// following morning.
+export function realMsBetweenHours(from: number, to: number): number {
+  const a = cycleProgressForHour(from);
+  const b = cycleProgressForHour(to);
+  return b > a ? b - a : b - a + CYCLE_MS;
+}
+
 // Format a past/absolute engine-ms timestamp as an in-game wall time, e.g.
 // "Day 49, 2:08 AM". Use this anywhere we'd otherwise print real calendar time
 // (new Date(ts).toLocaleString()) so conversation/memory timestamps stay on the

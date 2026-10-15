@@ -36,6 +36,7 @@ import { point, Point } from '../util/types';
 import {
   computeGameTime,
   gameMinutesUntil,
+  realMsBetweenHours,
   CYCLE_MS,
   isWeekday,
   type GameTime,
@@ -114,6 +115,7 @@ import {
   SLEEP_PRESSURE_INTERVAL_MS,
   SLEEP_PRESSURE_RAMP_MINUTES,
   FATIGUE_MAX_CONVERSATION_MESSAGES,
+  OBLIGATION_MAX_CONVERSATION_MESSAGES,
 } from '../constants';
 import {
   getLocationById,
@@ -137,6 +139,18 @@ import {
   worksNightShift,
 } from '../../data/routines';
 
+// Where this character lives, read from the roster in data/cityLocations.ts
+// rather than the `home` stamped onto the agent when the world was created. The
+// two disagree whenever an address moves — and they all moved once already, to
+// stop sleeping agents walling each other out of the estate — and a world that
+// is already running would otherwise keep sending everyone to their old tile for
+// the rest of its life. The recorded `home` is only the fallback, for a player
+// the roster doesn't name.
+function homePointFor(playerName: string, recorded?: Point): Point {
+  const loc = homeFor(playerName) ?? (recorded ? undefined : getLocationById('hdb'));
+  return loc ? { x: loc.x, y: loc.y } : recorded!;
+}
+
 export type ScheduleStep = {
   startMinute: number;
   locationId: string;
@@ -144,6 +158,12 @@ export type ScheduleStep = {
   activity: string;
   emoji?: string;
   description: string;
+  // Set by data/routines.ts on the deterministic obligations it merges in — the
+  // shift, the commute to it, prayer, a service, sleep. The LLM's own blocks
+  // leave it unset. It is what separates "somewhere I said I'd be" from
+  // "somewhere I thought I might go", and only the former interrupts a
+  // conversation.
+  fixed?: boolean;
 };
 
 // One finer-grained action within a schedule block, produced by decomposing that
@@ -701,10 +721,19 @@ export class Agent {
         // inviter any goodwill. A human still gets through; the agent answers
         // them, but sleepily and briefly (see FATIGUE_MAX_CONVERSATION_MESSAGES).
         const tooTired = !!inviter && !inviter.human && this.tooTiredToTalk();
-        if (pullsOffPost || tooTired) {
+        // On their way somewhere they are already due. Declined like the off-post
+        // case rather than the affinity one: "I'm late for my shift" is not a
+        // snub and shouldn't cost the inviter any goodwill. A human still gets
+        // through, and so does a fellow participant of our own scenario.
+        const dueElsewhere =
+          !!inviter &&
+          !inviter.human &&
+          !sameScenario &&
+          !!this.pendingStep(game, now, player);
+        if (pullsOffPost || tooTired || dueElsewhere) {
           console.log(
             `Agent ${player.id} declining invite to ${conversation.id} (${
-              tooTired ? 'too tired' : 'off post'
+              tooTired ? 'too tired' : dueElsewhere ? 'due elsewhere' : 'off post'
             })`,
           );
           conversation.rejectInvite(game, now, player);
@@ -920,6 +949,18 @@ export class Agent {
         if (
           this.tooTiredToTalk() &&
           conversation.numMessages >= FATIGUE_MAX_CONVERSATION_MESSAGES
+        ) {
+          shouldLeave = true;
+        }
+        // Late for something they committed to being at. The schedule cannot
+        // take itself out of a conversation — tickSchedule refuses to move an
+        // agent who is talking, by design — so if the obligation is to win, the
+        // agent has to be the one to wrap up. Scenario conversations are exempt:
+        // there the conversation is the commitment.
+        if (
+          !this.isInScenarioConversation(game, conversation) &&
+          conversation.numMessages >= OBLIGATION_MAX_CONVERSATION_MESSAGES &&
+          this.owesFixedObligation(game, now, player)
         ) {
           shouldLeave = true;
         }
@@ -1176,6 +1217,12 @@ export class Agent {
     // While heading to a scenario gathering, don't get absorbed into some unrelated
     // conversation on the way — keep walking to the spot.
     if (this.scenarioTarget) return false;
+    // Same rule for an ordinary plan: someone on their way to where they are
+    // already due walks past the huddle. They can join one once they arrive.
+    // Not for someone enlisted in a scenario, though — the only conversation the
+    // filter below would let them join is their own scenario's, and that IS
+    // their plan for as long as it runs.
+    if (!this.scenarioId && this.pendingStep(game, now, player)) return false;
     // Respect the post-conversation and invite cooldowns so we don't ping-pong.
     if (this.lastConversation && now < this.lastConversation + CONVERSATION_COOLDOWN) return false;
     if (this.lastInviteAttempt && now < this.lastInviteAttempt + CONVERSATION_COOLDOWN) return false;
@@ -1234,6 +1281,52 @@ export class Agent {
     this.lastInviteAttempt = now;
     if (player.pathfinding) stopPlayer(player);
     return true;
+  }
+
+  // The step this agent is due at right now and has not reached yet — in other
+  // words, the thing they are (or should be) walking to.
+  //
+  // This is the predicate behind "the plan comes first". An agent who is settled
+  // at their step is free: they chat across the map, join huddles, accept
+  // invitations — that is where the town's conversations come from, and none of
+  // it changes. An agent still on their way somewhere is not free, because every
+  // conversation picked up en route is paid for in game-hours: one real second
+  // is one game-minute while the town is awake, so a single eight-message chat
+  // is most of a game-hour, and two of them between waking and nine o'clock is
+  // why the cast used to arrive at work mid-morning.
+  //
+  // Returns undefined while a pin or a scenario is in force: both REPLACE the
+  // schedule's destination, so there is no outstanding plan to defend, and a
+  // scenario participant walking to the meeting spot must stay free to start the
+  // conversation the scenario exists for.
+  pendingStep(
+    game: Game,
+    now: number,
+    player: import('./player').Player,
+  ): ScheduleStep | undefined {
+    if (!this.schedule || this.currentStepIndex === undefined) return undefined;
+    const step = this.schedule[this.currentStepIndex];
+    if (!step) return undefined;
+    if (this.pin?.destination || this.scenarioTarget || this.scenarioMeetingPoint(game)) {
+      return undefined;
+    }
+    const gt = computeGameTime(now, game.world.worldStartTime);
+    // Not due yet — the pre-dawn hold walks them there early, and being early is
+    // not the same as being late.
+    if (gt.minutesIntoDay < step.startMinute) return undefined;
+    // Measured against the milling-about radius, the same one tickSchedule uses
+    // to decide it has arrived, so an agent drifting around their workplace
+    // counts as there rather than perpetually in transit.
+    if (distance(player.position, step.destination) < STEP_SETTLED_RADIUS) return undefined;
+    return step;
+  }
+
+  // True when what they are late for is an obligation rather than a plan they
+  // made up — a shift, the commute to it, a prayer, a service, their own bed.
+  // Only these interrupt a conversation already under way; being due at the park
+  // is not a reason to walk out on someone mid-sentence.
+  owesFixedObligation(game: Game, now: number, player: import('./player').Player): boolean {
+    return !!this.pendingStep(game, now, player)?.fixed;
   }
 
   // Returns true if the schedule handled this tick (caller should return).
@@ -1332,8 +1425,7 @@ export class Agent {
       !conversation
     ) {
       const playerName = player.name ?? 'someone';
-      const homeLoc = this.home ?? (homeFor(playerName) ?? getLocationById('hdb'))!;
-      const homePoint = this.home ?? { x: homeLoc.x, y: homeLoc.y };
+      const homePoint = homePointFor(playerName, this.home);
       this.schedule = buildSickSchedule(homePoint);
       this.scheduleGeneratedForDay = gt.dayNumber;
       this.currentStepIndex = 0;
@@ -1353,6 +1445,23 @@ export class Agent {
     // permanently unreachable. Advancing first and measuring from the current
     // step's own startMinute lets stuck agents correctly trigger a replan.
     if (this.schedule && this.currentStepIndex !== undefined) {
+      // A game-day starts at 06:00, not at midnight (see gameTime.ts: the awake
+      // segment runs 6 AM→midnight and the compressed deep night runs
+      // midnight→6 AM, and only then does `dayNumber` tick over). So
+      // `minutesIntoDay` climbs 360→1439 and then WRAPS BACK to 0→359 inside
+      // the same day, while a schedule is a flat array indexed 00:00→24:00.
+      //
+      // A forward-only scan cannot follow that wrap. At midnight it sat pinned
+      // on the 22:30 block — whose activity expired at exactly that moment —
+      // and stayed there until the 06:00 rollover: no sleep, no activity, six
+      // game-hours of the schedule (everyone's 00:00–06:00 block) never
+      // executed at all. Rewinding when the clock has gone backwards past the
+      // current step's start turns the day into the ring it was always written
+      // as, so the night carries on through midnight.
+      const current = this.schedule[this.currentStepIndex];
+      if (current && gt.minutesIntoDay < current.startMinute) {
+        this.currentStepIndex = 0;
+      }
       while (
         this.currentStepIndex < this.schedule.length - 1 &&
         gt.minutesIntoDay >= this.schedule[this.currentStepIndex + 1].startMinute
@@ -1395,8 +1504,21 @@ export class Agent {
     const reactionReplan =
       !!this.reactionReplan &&
       now - (this.lastReactionReplanAt ?? 0) > REACTION_REPLAN_COOLDOWN_MS;
+    // A re-plan costs an LLM round trip, and the agent stands still for all of
+    // it (tick() returns early while an operation is in flight). That is the
+    // last thing someone already late for their shift needs: they would finish a
+    // conversation, freeze for another game-hour re-planning it, and only then
+    // set off. The two discretionary triggers are therefore deferred while a
+    // fixed obligation is outstanding — `scheduleNeedsRefresh` and
+    // `reactionReplan` stay set, so the re-plan happens once they have arrived.
+    // The mandatory ones are not: no schedule, a new day, or a genuinely stuck
+    // agent all need the planner before anything sensible can happen.
+    const owesFixed = this.owesFixedObligation(game, now, player);
     const wantsPlan =
-      (noSchedule || dayChanged || disrupted || conversationRefresh || reactionReplan) &&
+      (noSchedule ||
+        dayChanged ||
+        disrupted ||
+        ((conversationRefresh || reactionReplan) && !owesFixed)) &&
       !conversation &&
       !busyWithOneOffActivity;
     if (wantsPlan) {
@@ -1429,8 +1551,7 @@ export class Agent {
       // through and keep executing the existing schedule (walk to current step).
       if (forcePlan || reactionReplan || (!onCooldown && !beforeStagger)) {
         const playerName = player.name ?? 'someone';
-        const home = this.home ?? (homeFor(playerName) ?? getLocationById('hdb'))!;
-        const homePoint = this.home ?? { x: home.x, y: home.y };
+        const homePoint = homePointFor(playerName, this.home);
         const homeLoc = homeFor(playerName);
         this.lastPlanAttempt = now;
         delete this.scheduleNeedsRefresh;
@@ -1550,11 +1671,19 @@ export class Agent {
     // needed for their reply. Nor does someone who is asleep or on the edge of
     // it: nobody starts a chat on their way to bed, and an agent who did would
     // hold the whole town up past its bedtime waiting for a reply.
+    // Not while still on the way to this step, either. The in-transit branch
+    // below used to let an agent greet anyone they physically passed, which is
+    // charming once and expensive every morning: the walk to work stops dead for
+    // the length of a conversation, and the shift starts whenever that ends.
+    // A scenario participant is exempt: their scenario is the plan, and a
+    // universal one has no gathering spot to be settled at in the first place.
+    const stillTravelling = !this.scenarioId && !!this.pendingStep(game, now, player);
     if (
       !conversation &&
       !onInviteCooldown &&
       !justChatted &&
       !this.inProgressOperation &&
+      !stillTravelling &&
       this.health !== 'sick' &&
       !this.tooTiredToTalk()
     ) {
@@ -1663,8 +1792,13 @@ export class Agent {
           fatigueMultiplier,
         );
       }
-      // Game-minute → real-ms: each in-game minute lasts CYCLE_MS / (24*60).
-      const realMsPerGameMinute = CYCLE_MS / (24 * 60);
+      // How long, in REAL ms, until a given game-minute of the day. Not
+      // game-minutes times a flat rate: the deep night runs roughly six times
+      // faster than the day, so a block that spans midnight — which the nightly
+      // sleep block always does — came out minutes of real time too long and
+      // left agents showing "asleep in bed" well into the next morning.
+      const realMsUntilMinute = (endMinute: number) =>
+        Math.max(1, Math.min(CYCLE_MS, realMsBetweenHours(gt.hour, endMinute / 60)));
       // Hierarchical plan decomposition: a coarse block ("at work, 09:00–17:00")
       // is broken into 3–5 finer actions the first time we settle into it, so the
       // agent visibly moves through their block instead of doing one thing for
@@ -1676,7 +1810,7 @@ export class Agent {
         player.activity = {
           description: subStep.activity,
           emoji: subStep.emoji ?? step.emoji ?? '💭',
-          until: now + Math.max(1, subEnd - gt.minutesIntoDay) * realMsPerGameMinute,
+          until: now + realMsUntilMinute(subEnd),
           ambient: true,
         };
       } else {
@@ -1685,8 +1819,11 @@ export class Agent {
         // otherwise), then fall back to the block's base activity afterwards.
         // Only reachable when the block has no sub-steps — the two mechanisms
         // both exist to break up a long block, so running both would fight.
+        // Never on a sleep block, for the same reason decomposition skips one:
+        // "people-watching" and "grabbing a snack" are not things that happen
+        // between 1 and 5 in the morning.
         const event =
-          Math.random() < CONTEXTUAL_EVENT_PROBABILITY
+          !isSleepStep(step) && Math.random() < CONTEXTUAL_EVENT_PROBABILITY
             ? pickContextualEvent(step.locationId, gt.minutesIntoDay)
             : null;
         if (event) {
@@ -1694,14 +1831,14 @@ export class Agent {
           player.activity = {
             description: event.description,
             emoji: event.emoji,
-            until: now + eventMinutes * realMsPerGameMinute,
+            until: now + realMsUntilMinute(gt.minutesIntoDay + eventMinutes),
             ambient: true,
           };
         } else {
           player.activity = {
             description: step.activity,
             emoji: step.emoji ?? '💭',
-            until: now + minutesLeft * realMsPerGameMinute,
+            until: now + realMsUntilMinute(stepEndMinutes),
             ambient: true,
           };
         }
@@ -1761,7 +1898,11 @@ export class Agent {
       playerId: this.playerId,
       playerName: player.name ?? 'someone',
       currentActivity: activity,
-      currentPlace: step ? getLocationById(step.locationId)?.name : undefined,
+      // 'home' is not a CITY_LOCATION, so getLocationById can't name it — and
+      // both schedule sources use it for a step at the character's own address,
+      // which is a large share of the day. Name it rather than sending the
+      // reacting prompt "You are at " nothing at all.
+      currentPlace: reactPlaceName(step),
       shortTermNote: shortTermSelfDescription(
         buildShortTermSnapshot({
           shortTerm: this.shortTerm,
@@ -1950,6 +2091,12 @@ export class Agent {
     stepEndMinutes: number,
   ) {
     if (this.inProgressOperation) return;
+    // Nobody does five distinct things while asleep. Decomposition exists to
+    // break up a long waking block; run it on the night and the town spends it
+    // "listening to calming music" and "checking messages from friends", which
+    // reads — correctly — as nobody having gone to bed. Same rule the wander
+    // already follows.
+    if (isSleepStep(step)) return;
     // Already decomposed, or a request for this exact step instance is in flight.
     if (this.activeSubSteps?.stepKey === stepKey) return;
     if (this.subStepsRequestedFor === stepKey) return;
@@ -2332,7 +2479,15 @@ export class Agent {
     // clock's job rather than this one's.
     let hungerCause: 'meal' | 'activity' = 'activity';
     const text = `${step.activity} ${step.description}`.toLowerCase();
-    const isHome = step.locationId === 'home' || step.locationId === 'hdb';
+    // 'home' is what both schedule sources label a step at the character's own
+    // address — the LLM planner always did, and the fixed obligations in
+    // data/routines.ts now do too. This used to also accept 'hdb', to catch the
+    // sleep and getting-up blocks back when they were labelled with the building
+    // they happened to be in; that both missed everyone who lives above the
+    // shophouses (no breakfast, and the getting-up block accrued away-from-home
+    // fatigue) and handed a free meal to anyone whose plan merely took them to
+    // the estate.
+    const isHome = step.locationId === 'home';
     const isSleep = isSleepStep(step);
     // A shift at the agent's own workplace is work — never a meal — even if it's the
     // hawker stall (locationId 'restaurant') or the text mentions food/kopi.
@@ -2412,6 +2567,16 @@ export class Agent {
   }
 }
 
+// The place name for a schedule step, for prompts that want "You are at X".
+// Steps at the character's own address carry the sentinel locationId 'home'
+// (the LLM planner has always used it; the fixed obligations in
+// data/routines.ts do too), which resolves to no CITY_LOCATION.
+function reactPlaceName(step: { locationId: string } | undefined): string | undefined {
+  if (!step) return undefined;
+  if (step.locationId === 'home') return 'home';
+  return getLocationById(step.locationId)?.name;
+}
+
 export const subStep = v.object({
   startMinute: v.number(),
   activity: v.string(),
@@ -2425,6 +2590,7 @@ export const scheduleStep = v.object({
   activity: v.string(),
   emoji: v.optional(v.string()),
   description: v.string(),
+  fixed: v.optional(v.boolean()),
 });
 
 export const serializedAgent = {
